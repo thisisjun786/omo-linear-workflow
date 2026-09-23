@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Result } from "./core/contracts";
+import { deliveryRecordSchema } from "./core/schema";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator } from "./orchestrator";
 
@@ -96,10 +97,38 @@ async function text(path: string | undefined): Promise<Result<string>> {
 }
 function exitCode(result: Result<unknown>): number {
   if (result.ok) return 0;
-  if (result.error.code.includes("uncertain")) return 4;
+  if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
+    return 4;
   if (result.error.code === "runtime_unavailable") return 3;
   return 2;
 }
+function deliveryOutcome(result: Result<unknown>): Result<unknown> {
+  if (!result.ok && result.error.code !== "delivery_in_progress") return result;
+  const parsed = deliveryRecordSchema.safeParse(result.ok ? result.value : result.error.details);
+  if (!parsed.success || parsed.data.state === "accepted") return result;
+  const delivery = parsed.data;
+  const rejected = delivery.state === "rejected";
+  return {
+    ok: false,
+    error: {
+      code: result.ok ? (rejected ? "delivery_rejected" : "delivery_uncertain") : result.error.code,
+      message: rejected
+        ? "Command processed, but native delivery returned a rejection; the instruction is not confirmed accepted."
+        : "Native delivery is pending or uncertain; the instruction is not confirmed accepted.",
+      details: {
+        delivery,
+        recovery: "inspect_before_retry",
+        next_action:
+          "Run olw status to resolve the target binding to its durableSessionId, then inspect that native session's transcript, pending queue, and delivery receipts. " +
+          (rejected
+            ? "Repeating this command with the same --id only replays the stored rejection. "
+            : "Do not resend while acceptance is unresolved. ") +
+          "Do not use a new --id unless authoritative reconciliation proves non-acceptance. In the pinned native runtime, turn_conflict can also follow a lost acknowledgement, so its code alone is not that proof.",
+      },
+    },
+  };
+}
+
 function print(result: Result<unknown>, json: boolean): void {
   if (json || !result.ok) process.stdout.write(`${JSON.stringify(result)}\n`);
   else process.stdout.write(`${JSON.stringify(result.value, null, 2)}\n`);
@@ -310,6 +339,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       },
     };
   }
+  if (command === "send" || command === "report") result = deliveryOutcome(result);
   print(result, has(options, "json"));
   return exitCode(result);
 }

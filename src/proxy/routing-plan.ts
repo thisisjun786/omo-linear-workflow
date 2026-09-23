@@ -24,6 +24,8 @@ const ROUTING_KEYS = [
 // https://www.kimi.com/code/docs/en/kimi-code/models.html
 const PROXY_MODEL_IDS: Readonly<Record<string, string>> = {
   "kimi-for-coding-highspeed": "kimi-k2.7-code-highspeed",
+  // Current rolling-ID version: https://api-docs.deepseek.com/quick_start/pricing
+  "deepseek-flash": "deepseek-v4.1-flash",
 };
 export class RoutingError extends Error {}
 

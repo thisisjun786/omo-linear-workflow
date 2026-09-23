@@ -1,3 +1,4 @@
+import { compatibleCandidates } from "./compatibility";
 import {
   type Candidate,
   DiscoveryError,
@@ -82,10 +83,6 @@ function parseDefinitions(payload: unknown): Definition[] {
 
 function parseCompatibility(payload: unknown): Compatibility[] {
   return compatibilitySchema.parse(payload)["openai-compatibility"] ?? [];
-}
-
-function normalizedBaseUrl(value: string): string {
-  return value.replace(/\/+$/, "");
 }
 
 function parseAliases(payload: unknown): Map<string, { channel: string; alias: Alias }> {
@@ -178,37 +175,7 @@ export class CatalogDiscovery {
         : typeof this.options.nativeModels === "function"
           ? await this.options.nativeModels()
           : this.options.nativeModels;
-    const candidates = new Map<string, Candidate[]>();
-    for (const provider of compatibility) {
-      if (provider.disabled) continue;
-      const baseUrl = normalizedBaseUrl(provider["base-url"]);
-      for (const configured of provider.models) {
-        const exposedId = provider.prefix
-          ? `${provider.prefix.replace(/\/$/, "")}/${configured.alias}`
-          : configured.alias;
-        const nativeModel = nativeModels?.find(
-          (model) => normalizedBaseUrl(model.baseUrl) === baseUrl && model.id === configured.name,
-        );
-        const definition: Definition = {
-          id: configured.name,
-          owned_by: provider.name,
-          type: "openai",
-          display_name: configured["display-name"],
-          context_length: configured["max-context-length"],
-          supportedInputModalities: configured["input-modalities"],
-          supportedOutputModalities: configured["output-modalities"],
-          thinking: configured.thinking,
-        };
-        candidates.set(exposedId, [
-          ...(candidates.get(exposedId) ?? []),
-          {
-            channel: "openai-compatibility",
-            definition,
-            ...(nativeModel ? { nativeModel } : {}),
-          },
-        ]);
-      }
-    }
+    const candidates = compatibleCandidates(compatibility, nativeModels);
     for (const result of definitionResults) {
       for (const definition of result.definitions) {
         candidates.set(definition.id, [

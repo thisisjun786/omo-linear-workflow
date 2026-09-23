@@ -9,6 +9,7 @@ export type Candidate = {
   definition: Definition;
   alias?: Alias;
   nativeModel?: Model<Api>;
+  transportDefaults?: Pick<Model<Api>, "maxTokens" | "compat" | "thinkingLevelMap">;
 };
 
 export class DiscoveryError extends Error {
@@ -99,7 +100,8 @@ export function toModel(
   const maxTokens =
     positiveInteger(definition.max_completion_tokens) ??
     positiveInteger(definition.outputTokenLimit) ??
-    positiveInteger(candidate.nativeModel?.maxTokens);
+    positiveInteger(candidate.nativeModel?.maxTokens) ??
+    positiveInteger(candidate.transportDefaults?.maxTokens);
   const modalities = definition.supportedInputModalities ?? candidate.nativeModel?.input;
   if (!contextWindow || !maxTokens || !modalities?.includes("text")) {
     throw new DiscoveryError(
@@ -119,6 +121,7 @@ export function toModel(
     // Keep the client-visible alias on the wire. CLIProxyAPI owns alias-to-upstream routing.
     name: candidate.alias?.["display-name"] ?? definition.display_name ?? available.id,
     api,
+    ...(candidate.transportDefaults?.compat ? { compat: candidate.transportDefaults.compat } : {}),
     ...(candidate.nativeModel?.compat ? { compat: candidate.nativeModel.compat } : {}),
     ...(api === "openai-responses" ? { compat: { supportsStrictMode: true } } : {}),
     ...(candidate.channel === "kimi" ? { compat: { supportsDeveloperRole: false } } : {}),
@@ -126,7 +129,9 @@ export function toModel(
       definition.thinking !== undefined
         ? definition.thinking.levels === undefined || map !== undefined
         : (candidate.nativeModel?.reasoning ?? false),
-    ...(map ? { thinkingLevelMap: map } : {}),
+    ...(candidate.transportDefaults?.thinkingLevelMap || map
+      ? { thinkingLevelMap: { ...candidate.transportDefaults?.thinkingLevelMap, ...map } }
+      : {}),
     ...(promptPreset ? { promptPreset } : {}),
     input,
     cost: candidate.nativeModel?.cost ?? costs.get(upstreamId) ?? ZERO_COST,

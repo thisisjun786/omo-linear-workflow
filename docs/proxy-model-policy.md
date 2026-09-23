@@ -48,7 +48,8 @@ therefore remains available unless the user explicitly disables it.
 
 ## OpenAI-compatible manual providers
 
-The configured MiMo Token Plan provider is OpenAI-compatible, not OAuth.
+The configured MiMo Token Plan and Ollama Cloud providers are OpenAI-compatible,
+not OAuth.
 OAuth Model Disablement does not manage its individual registered models.
 Its registrations live under `openai-compatibility` and are edited in that
 provider's model list in the management UI.
@@ -58,6 +59,20 @@ OMO currently references only a subset. In this migration all four user-register
 MiMo entries were preserved, including V2.5 and V2.6 Flash. For a later explicit
 request to remove an individual compatible model registration, save that entry
 first so it can be restored. Do not fabricate OAuth exclusions that have no effect.
+
+### Ollama Cloud DeepSeek registration
+
+The manually registered `ollama-cloud` provider uses `https://ollama.com/v1` and
+advertises `deepseek-v4.1-flash`. Its API key is held only by CLIProxyAPI, not OMO
+or this repository. Toggle the entire provider with its management-UI disabled
+switch, or edit its registered model list; OAuth Model Disablement does not apply.
+
+Ollama `/api/show` supplies 1,048,576 context, text/image input, tools, and
+`false`/`low`/`high`/`max` thinking. Its OpenAI-compatible API expresses the
+`false` choice as `reasoning_effort: "none"` for this registration. The extension's 16,384
+output budget is a client policy, not a published Ollama server maximum. The older
+`deepseek-v4-flash:0731` was not registered because its advertised retirement date
+was 2026-09-25. No Command Code provider or key was registered.
 
 ## OMO and OLW responsibilities
 

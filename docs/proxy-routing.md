@@ -49,6 +49,12 @@ actual request with `reasoning_effort: "none"` succeeded but returned reasoning
 tokens. A configured `off` therefore must not be described as guaranteed
 non-thinking execution through this service.
 
+DeepSeek's rolling `deepseek-flash` ID currently identifies V4.1 Flash according
+to [the official model table](https://api-docs.deepseek.com/quick_start/pricing).
+The verified mapping uses an advertised `deepseek-v4.1-flash` when the exact
+rolling ID is absent, preserving each route's reasoning level. Recheck that
+identity if the upstream rolling alias changes; older V4 Flash is not substituted.
+
 For configured OpenAI-compatible providers such as MiMo Token Plan, the proxy
 may publish context/input fields but omit the output-token limit. The standalone
 synchronizer now loads the policy authority's public SDK model catalog lazily
@@ -57,6 +63,13 @@ both the configured upstream model ID and base URL to obtain missing metadata.
 It neither guesses limits nor enables/authenticates native providers. Missing
 metadata still causes omission with a diagnostic. Run `sync --force` after adding
 a provider to reconsider the available upstream routes.
+
+For the exact Ollama Cloud endpoint `https://ollama.com/v1`, which does not
+advertise output-token limits, the extension uses a 16,384-token client output
+budget, matching Senpi's Ollama default. This is not a server-maximum claim.
+Context, modalities and thinking levels remain the proxy's manual model metadata;
+`none` in its thinking levels maps explicit off to `reasoning_effort: "none"`.
+Requests still go through CLIProxyAPI; OMO never loads the Ollama API key.
 
 ## Ownership and version policy
 

@@ -65,6 +65,32 @@ describe("upstream proxy routing", () => {
     );
   });
 
+  test.each(["off", "max"])(
+    "resolves current DeepSeek Flash identity with %s reasoning",
+    (reasoning) => {
+      // Given the official rolling ID and a separately registered V4.1 model.
+      const upstream: UpstreamPolicy = {
+        ...policy,
+        agents: {},
+        categories: {
+          quick: [
+            { providers: ["openai"], model: "luna", variant: "low" },
+            { providers: ["deepseek"], model: "deepseek-flash", variant: reasoning },
+          ],
+        },
+      };
+      // When the proxy advertises the verified current version of that rolling ID.
+      const result = planRouting(upstream, new Set(["luna", "deepseek-v4.1-flash"]), empty);
+      // Then preserve upstream order and reasoning instead of treating Flash as absent.
+      expect(result.groups.categories["quick"]).toEqual({
+        models: [
+          { model: "cliproxyapi/luna", reasoning: "low" },
+          { model: "cliproxyapi/deepseek-v4.1-flash", reasoning },
+        ],
+      });
+    },
+  );
+
   test("maps available exact identities in upstream order with reasoning", () => {
     // Given an upstream preference that the proxy does not serve.
     // When the policy is mapped, only explicit upstream alternatives are eligible.

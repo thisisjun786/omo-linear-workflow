@@ -1,8 +1,10 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { ensureHerdrBuild } from "../src/herdr/build";
 
 const root = join(import.meta.dir, "..");
 const output = join(root, "dist");
+await ensureHerdrBuild(root);
 await rm(output, { recursive: true, force: true });
 await mkdir(join(output, "core"), { recursive: true });
 await mkdir(join(output, "extension"), { recursive: true });

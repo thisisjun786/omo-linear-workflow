@@ -8,11 +8,19 @@ Linear에서 승인된 initiative 범위를 Herdr worktree와 OMO native thread�
 cd ~/code/omo-initiative
 pnpm install
 bun run build
+bun run herdr --version
 bun run cli -- doctor --json
 bun run cli -- --help
 ```
 
-설치된 `herdr`, `git`이 PATH에 있고 Herdr 안에서 실행해야 합니다. TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하므로 전역 OMO 업데이트와 버전이 섞이지 않습니다. 역할 모델 세 개의 OMO 인증도 필요합니다.
+`git`이 PATH에 있어야 합니다. 최초 빌드는 Rustup의 Rust 1.96.1과 Zig 0.16.0을 사용해
+OMO 지원 패치가 포함된 Herdr도 함께 준비합니다. `cargo`나 `zig`가 PATH에 없다면
+`CARGO`와 `ZIG` 환경변수로 실행 파일을 지정합니다. 이후 빌드는 검증된 산출물을
+재사용하므로 Herdr를 매번 컴파일하지 않습니다.
+
+Herdr는 별도로 맞춰 설치하는 선택 항목이 아니라 OLW의 필수 관리형 런타임입니다.
+`bun run herdr`로 이 빌드를 실행할 수 있으며, OLW 역할 생성은 Herdr 안에서 실행합니다.
+TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하므로 전역 OMO 업데이트와 버전이 섞이지 않습니다. 역할 모델 세 개의 OMO 인증도 필요합니다.
 이 저장소가 자격 증명을 발급하거나 복사하지는 않습니다. 기존 OMO에서 아래 세 모델을 실제로 호출할 수 있는 상태여야 합니다.
 
 Linear 인증과 조회는 OMO의 기존 Linear MCP 연결을 사용합니다. 인증이 필요하면 사용자가 `/mcp auth linear`를 실행합니다. 이후 `skills/define/SKILL.md`, `skills/plan/SKILL.md`를 읽도록 요청해 revision이 고정된 snapshot을 준비합니다. import는 원격 인증이나 최신 revision을 증명하지 않으므로 skill의 MCP 확인 절차를 생략하면 안 됩니다. 로컬 QA fixture인 `tests/fixtures/scope.json`에는 반드시 `--fixture`를 붙입니다.
@@ -80,7 +88,7 @@ bun run qa:events
 bun run qa:linear
 ```
 
-`qa:events`는 격리 Herdr server와 Git fixture에서 세 역할의 실제 모델, worktree ancestry, focus 유지, 보고에 따른 자동 재개, 중복 방지, runtime 유실 감지와 종료 시 데이터 보존을 검사하고 자원을 정리합니다. `qa:linear`는 실제 OMO MCP 실행 경로에 로컬 HTTP fixture를 연결하고 네 개 skill의 로딩을 확인합니다. 다른 Herdr 빌드를 시험하려면 `QA_HERDR_BINARY=/abs/herdr`를 지정합니다.
+`qa:events`는 격리 Herdr server와 Git fixture에서 세 역할의 실제 모델, worktree ancestry, focus 유지, 보고에 따른 자동 재개, 중복 방지, runtime 유실 감지와 종료 시 데이터 보존을 검사하고 자원을 정리합니다. 기본 Herdr는 관리형 산출물이며 QA control root에도 같은 manifest·patch·receipt를 전달합니다. `qa:linear`는 실제 OMO MCP 실행 경로에 로컬 HTTP fixture를 연결하고 네 개 skill의 로딩을 확인합니다. 다른 서버 빌드와의 호환성을 시험하려면 `QA_HERDR_BINARY=/abs/herdr`를 명시합니다. 격리 QA 성공만으로 현재 사용 중인 서버의 TUI 동작까지 검증됐다고 간주하지 않습니다.
 
 ## 복구와 종료
 
@@ -96,10 +104,19 @@ workspace 생성 응답 자체가 유실됐다면 Herdr를 직접 확인해야 �
 
 실제 Herdr/모델/보고 QA는 통과했습니다. Live Linear OAuth와 실제 Linear 쓰기는 실행하지 않았습니다. 기본 Herdr의 OMO 탐지 지원 여부는 이 CLI의 실행·통신과 별개입니다.
 
-## 이 머신의 Herdr 설치
+## 관리형 Herdr
 
-OMO 탐지 패치를 이식한 Herdr 0.9.1을 `~/.local/bin/herdr`에 설치했습니다. 소스는 `~/code/herdr-omo-0.9.1`에 있으며, 기존 `~/code/herdr-omo` 수정본은 보존했습니다. 실제 OMO의 `working → done` 전이와 detached-eval reporter의 보고·해제를 격리 서버에서 검증했습니다.
+[고정 manifest](vendor/herdr/manifest.json), [OMO 지원 패치](patches/herdr-0.9.1-omo.patch),
+[빌드·업데이트·복구 안내](vendor/herdr/README.md)가 Herdr의 소유 지점입니다.
+업스트림 커밋과 패치 해시, Rust/Zig 버전으로 산출물 위치를 구분하고,
+실행 전 receipt와 실행 파일의 SHA-256을 검증합니다. 누락되거나 다른 산출물이면
+전역 PATH의 Herdr로 조용히 대체하지 않습니다.
 
-현재 기본 Herdr 서버와 세션은 재시작하지 않았습니다. 새 탐지는 기본 서버를 나중에 재시작한 뒤 적용됩니다. 기존 바이너리는 `~/backups/herdr-0.9.1-stock-20260923T034357Z/herdr`에 보관했습니다.
+`bun run build`가 Herdr를 포함한 전체 런타임을 준비하고, `bun run herdr:build`는
+Herdr 단계만 실행합니다. 새 역할 TUI와 공유 호스트에는 이 바이너리 디렉터리가
+PATH 앞에 전달됩니다. 기존 서버·binding·workspace를 자동 재시작하거나 이전하지 않습니다.
 
-검증 결과와 설치 해시는 [evidence index](.omo/evidence/README.md) 및 [Herdr 설치 기록](.omo/evidence/herdr-installation.md)에 있습니다.
+통합 당시 재빌드한 Linux x64 바이너리는 기존 설치본 및 실제 실행 중인 서버와
+SHA-256이 같았습니다. 원래 `~/code/herdr-omo-0.9.1`과 과거 `~/code/herdr-omo`는
+보존했지만, 향후 빌드는 그 외부 소스 트리에 의존하지 않습니다.
+검증 기록은 [관리형 Herdr 증거](.omo/evidence/managed-herdr-integration.md)에 있습니다.

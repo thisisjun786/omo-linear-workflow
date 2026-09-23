@@ -1,0 +1,3538 @@
+diff --git a/distribution/agent-detection/index.toml b/distribution/agent-detection/index.toml
+index 1cd6c020..d5d5a6cf 100644
+--- a/distribution/agent-detection/index.toml
++++ b/distribution/agent-detection/index.toml
+@@ -80,6 +80,10 @@ path = "pi.toml"
+ id = "qodercli"
+ path = "qodercli.toml"
+ 
++[[agents]]
++id = "senpi"
++path = "senpi.toml"
++
+ [[agents]]
+ id = "qwen"
+ path = "qwen.toml"
+diff --git a/docs/next/website/src/content/docs/agent-automation.mdx b/docs/next/website/src/content/docs/agent-automation.mdx
+index e7c02ae3..612488aa 100644
+--- a/docs/next/website/src/content/docs/agent-automation.mdx
++++ b/docs/next/website/src/content/docs/agent-automation.mdx
+@@ -41,7 +41,7 @@ Agent commands accept either a unique live name or the pane ID that currently ho
+ 
+ An available shell pane is at its interactive shell prompt: the shell itself owns the foreground, with no foreground command, editor, or agent running. Return the pane to its prompt before calling `agent start`.
+ 
+-`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, and `muse`. Arguments after `--` are passed unchanged to that executable.
++`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, `muse`, and `omo`. `omo` is the public kind and display identity for OmO Native; managed launch uses the `omo` executable, while the persisted manifest ID remains `senpi`. Arguments after `--` are passed unchanged to that executable.
+ 
+ Successful `agent start` returns only after Herdr detects the expected agent in the same terminal and marks it ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. Startup waits for 30 seconds by default; `--timeout` must be greater than 3000 and no more than 300000 milliseconds.
+ 
+diff --git a/docs/next/website/src/content/docs/agents.mdx b/docs/next/website/src/content/docs/agents.mdx
+index d0612c3f..788c5ebc 100644
+--- a/docs/next/website/src/content/docs/agents.mdx
++++ b/docs/next/website/src/content/docs/agents.mdx
+@@ -33,6 +33,7 @@ Automatic detection works out of the box for common coding agents. The table sho
+ | Grok CLI | screen manifest | session |
+ | Antigravity CLI | screen manifest | session |
+ | Kiro CLI | screen manifest | none |
++| OmO Native | screen manifest | none |
+ | Maki | screen manifest | none |
+ | Muse | screen manifest | none |
+ 
+diff --git a/docs/next/website/src/content/docs/cli-reference.mdx b/docs/next/website/src/content/docs/cli-reference.mdx
+index 9f61d02d..32d7d38d 100644
+--- a/docs/next/website/src/content/docs/cli-reference.mdx
++++ b/docs/next/website/src/content/docs/cli-reference.mdx
+@@ -345,7 +345,7 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+ 
+ Agent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.
+ 
+-`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, and `muse`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
++`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, `muse`, and `omo`. `omo` is the public kind and display identity for OmO Native; managed launch uses the `omo` executable, while the persisted manifest ID remains `senpi`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
+ 
+ A successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
+ 
+@@ -407,6 +407,8 @@ A timeout or `agent_prompt_stalled` does not prove the prompt was never delivere
+ ```bash
+ herdr integration install pi
+ herdr integration install omp
++herdr integration install omo
++herdr integration install senpi
+ herdr integration install claude
+ herdr integration install codex
+ herdr integration install copilot
+@@ -424,6 +426,8 @@ herdr integration install mastracode
+ herdr integration install grok
+ herdr integration uninstall pi
+ herdr integration uninstall omp
++herdr integration uninstall omo
++herdr integration uninstall senpi
+ herdr integration uninstall claude
+ herdr integration uninstall codex
+ herdr integration uninstall copilot
+@@ -442,6 +446,8 @@ herdr integration uninstall grok
+ herdr integration status [--outdated-only]
+ ```
+ 
++OmO/Senpi targets are local-only; see [path resolution and ownership rules](/docs/integrations/#omo--senpi-local-cli-only). They are not API targets or startup recommendations.
++
+ ## Plugins
+ 
+ Plugin commands install and run local executable workflow plugins. A plugin is a manifest plus out-of-process commands; Herdr owns the host surface and plugins own their implementation language.
+diff --git a/docs/next/website/src/content/docs/integrations.mdx b/docs/next/website/src/content/docs/integrations.mdx
+index e584bb06..0a297e8f 100644
+--- a/docs/next/website/src/content/docs/integrations.mdx
++++ b/docs/next/website/src/content/docs/integrations.mdx
+@@ -131,6 +131,52 @@ Herdr uses `PI_CODING_AGENT_DIR` as the complete agent directory when set. Other
+ 
+ The OMP integration reports `omp` as the agent label, lifecycle state, and native session identity through Herdr's socket API. It does not require native process detection for the `omp` executable, and Herdr can resume an OMP pane with `omp --resume=<session>` after a server restart.
+ 
++## OmO / Senpi (local CLI only)
++
++```bash
++herdr integration install omo
++herdr integration install senpi
++herdr integration status
++herdr integration uninstall omo
++herdr integration uninstall senpi
++```
++
++These commands install the same Herdr-owned Senpi extension (version `1`) as
++`extensions/herdr-senpi-agent-state.ts`. Native OmO defaults to
++`~/.omo/agent`; standalone Senpi defaults to `~/.senpi/agent`. The agent directory
++must already exist; Herdr creates only the missing extensions directory.
++
++Path resolution follows the selected launcher:
++
++- OmO reads `OMO_CODING_AGENT_DIR`, then `SENPI_CODING_AGENT_DIR`, then
++  `PI_CODING_AGENT_DIR`. It trims whitespace and uses the first nonempty value,
++  otherwise `~/.omo/agent`. It does not search project directories or expand a
++  literal tilde in an override. Relative overrides resolve from the current directory.
++- Standalone Senpi reads `SENPI_CODING_AGENT_DIR`, then `PI_CODING_AGENT_DIR`.
++  The first defined value wins, including an empty value. Empty or absent values
++  select project/default lookup; `~` and `~/` in nonempty overrides expand to home.
++- Senpi project lookup selects the nearest real `.senpi/agent` directory, up to
++  100 parents, excluding symlinks and stopping before home. It then falls back to
++  `~/.senpi/agent`. Use native filesystem paths for either launcher.
++
++Run install, status, and uninstall from the same project and with the same
++variables used to launch the agent. A directory shared with Pi/OMP is refused;
++configure a separate `OMO_CODING_AGENT_DIR` or `SENPI_CODING_AGENT_DIR` instead.
++Herdr does not replace or remove unrelated files at the install filename, and
++uninstall leaves other extensions and settings untouched. Restart the agent after
++installation. `status --outdated-only` also reports local OmO/Senpi updates.
++
++This packaging is **local CLI only**. The server/API integration list, API
++install/uninstall targets, startup recommendations, and schema-derived shell
++completion targets remain unchanged until a separately versioned API is available.
++No protocol generation or API target enum is extended by these commands.
++
++The extension reports `working` while Senpi codemode has detached eval cells,
++then releases that report when the last cell settles or the session changes.
++It requires Senpi's `wake_source_state` event with source `senpi-codemode`.
++Other activity and permission prompts remain screen-detected. This integration
++does not report native session identity or enable automatic session resume.
++
+ ## Claude Code
+ 
+ Install the Claude Code hook:
+diff --git a/docs/next/website/src/content/docs/ja/agent-automation.mdx b/docs/next/website/src/content/docs/ja/agent-automation.mdx
+index f69d6a3a..b6bc7127 100644
+--- a/docs/next/website/src/content/docs/ja/agent-automation.mdx
++++ b/docs/next/website/src/content/docs/ja/agent-automation.mdx
+@@ -41,7 +41,7 @@ review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+ 
+ 利用可能なシェルペインとは、対話シェルのプロンプトに戻っており、フォアグラウンドをシェル自身が所有し、フォアグラウンドのコマンド、エディタ、エージェントが動いていないペインです。`agent start` の前にプロンプトへ戻してください。
+ 
+-`--kind` は対応済みエージェントとその標準実行ファイルを選びます。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse` です。`--` より後の引数は、その実行ファイルへそのまま渡されます。
++`--kind` は対応済みエージェントとその標準実行ファイルを選びます。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse`、`omo` です。`omo` は OmO Native の公開 kind と表示 ID です。管理された起動には `omo` 実行ファイルを使い、永続化されたマニフェスト ID は `senpi` のままです。`--` より後の引数は、その実行ファイルへそのまま渡されます。
+ 
+ 成功した `agent start` は、同じターミナルで期待したエージェントを検出し、対話入力の準備ができたと Herdr が判断してから返ります。起動中の検出状態が `blocked` の場合、コマンドは直ちに `agent_not_ready` を返します。名前は `agent read` と `agent send-keys` で引き続き使用でき、検出状態が `idle` になるとプロンプトを送信できるようになります。起動待機はデフォルトで 30 秒です。`--timeout` は 3000 より大きく 300000 以下のミリ秒で指定します。
+ 
+diff --git a/docs/next/website/src/content/docs/ja/agents.mdx b/docs/next/website/src/content/docs/ja/agents.mdx
+index 3a365221..2fa89521 100644
+--- a/docs/next/website/src/content/docs/ja/agents.mdx
++++ b/docs/next/website/src/content/docs/ja/agents.mdx
+@@ -33,6 +33,7 @@ Herdr は複数のコーディングエージェントを同時に動かすた
+ | Grok CLI | スクリーンマニフェスト | セッション |
+ | Antigravity CLI | スクリーンマニフェスト | セッション |
+ | Kiro CLI | スクリーンマニフェスト | なし |
++| OmO Native | スクリーンマニフェスト | なし |
+ | Maki | スクリーンマニフェスト | なし |
+ | Muse | スクリーンマニフェスト | なし |
+ 
+diff --git a/docs/next/website/src/content/docs/ja/cli-reference.mdx b/docs/next/website/src/content/docs/ja/cli-reference.mdx
+index fbda5674..df6b62ff 100644
+--- a/docs/next/website/src/content/docs/ja/cli-reference.mdx
++++ b/docs/next/website/src/content/docs/ja/cli-reference.mdx
+@@ -324,7 +324,8 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+ 
+ エージェントターゲットは、一意なライブエージェント名、または現在そのエージェントをホストしているペイン ID です。ターミナル ID とエージェント kind のラベルだけでは指定できません。`agent start` で起動するエージェントには名前が必須で、手動で起動したエージェントは名前なしのままペイン ID で指定します。
+ 
+-`agent start` は既存の利用可能なシェルペインを起動対象にします。対話シェル自身がフォアグラウンドを所有し、フォアグラウンドのコマンド、エディタ、エージェントが動いていない必要があります。トポロジーは別に作成します。名前はライブエージェント間で一意で、`[a-z][a-z0-9_-]{0,31}` に一致する必要があります。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse` です。名前は現在のペイン占有者に属し、そのエージェントの終了、release、置換で消えます。一時的に検出できないだけでは消えません。
++`agent start` は既存の利用可能なシェルペインを起動対象にします。対話シェル自身がフォアグラウンドを所有し、フォアグラウンドのコマンド、エディタ、エージェントが動いていない必要があります。トポロジーは別に作成します。名前はライブエージェント間で一意で、`[a-z][a-z0-9_-]{0,31}` に一致する必要があります。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse`、`omo` です。`omo` は OmO Native の公開 kind と表示 ID です。管理された起動には `omo` 実行ファイルを使い、永続化されたマニフェスト ID は `senpi` のままです。名前は現在のペイン占有者に属し、そのエージェントの終了、release、置換で消えます。一時的に検出できないだけでは消えません。
++
+ 
+ 成功した start は、期待したエージェントが同じターミナルを所有し、対話入力の準備ができてから返ります。起動中の検出状態が `blocked` の場合、コマンドは直ちに `agent_not_ready` を返します。名前は `agent read` と `agent send-keys` で引き続き使用でき、検出状態が `idle` になるとプロンプトを送信できるようになります。デフォルトの起動タイムアウトは 30000 ミリ秒で、明示する値は 3000 より大きく 300000 以下でなければなりません。
+ 
+diff --git a/docs/next/website/src/content/docs/ja/integrations.mdx b/docs/next/website/src/content/docs/ja/integrations.mdx
+index 6086e6b6..0537727d 100644
+--- a/docs/next/website/src/content/docs/ja/integrations.mdx
++++ b/docs/next/website/src/content/docs/ja/integrations.mdx
+@@ -133,6 +133,43 @@ Herdr はバンドルされた拡張を次の場所に書き込みます:
+ 
+ OMP インテグレーションは、Herdr のソケット API を通じてエージェントラベル `omp`、ライフサイクル状態、ネイティブセッション識別を報告します。`omp` 実行ファイルのネイティブプロセス検出は不要で、Herdr はサーバー再起動後に `omp --resume=<session>` で OMP ペインを resume できます。
+ 
++## OmO / Senpi (ローカル CLI のみ)
++
++```bash
++herdr integration install omo
++herdr integration install senpi
++herdr integration status
++herdr integration uninstall omo
++herdr integration uninstall senpi
++```
++
++両コマンドは同じ Herdr 管理拡張 (バージョン `1`) を
++`extensions/herdr-senpi-agent-state.ts` にインストールします。既定の agent
++ディレクトリは OmO が `~/.omo/agent`、Senpi が `~/.senpi/agent` です。
++agent ディレクトリは事前に存在する必要があり、Herdr が作成するのは extensions のみです。
++
++- OmO は `OMO_CODING_AGENT_DIR`、`SENPI_CODING_AGENT_DIR`、`PI_CODING_AGENT_DIR`
++  の順に参照し、前後の空白を除いた最初の非空値を使います。なければ
++  `~/.omo/agent` です。プロジェクト探索や上書き値の `~` 展開は行いません。
++  相対パスは現在の作業ディレクトリ基準です。
++- 独立した Senpi は後ろの 2 変数を参照し、空文字列を含め最初の定義値を使います。
++  空または未定義ならプロジェクト探索へ進み、非空値の `~` と `~/` はホームに展開します。
++- Senpi は最大 100 親まで最も近い実ディレクトリ `.senpi/agent` を探索します。
++  シンボリックリンクは除外し、ホームの手前で停止して `~/.senpi/agent` に戻ります。
++  どちらもファイルシステムのパスを指定してください。
++
++install、status、uninstall は、エージェント起動時と同じプロジェクトと環境変数で
++実行してください。Pi/OMP と共有されたディレクトリは拒否されます。無関係なファイルは
++置換も削除もしません。インストール後はエージェントを再起動してください。
++`status --outdated-only` はローカル OmO/Senpi の更新も表示します。
++
++これらはローカル CLI 専用です。サーバー/API の一覧や install/uninstall 対象、
++起動時の推奨、スキーマ由来のシェル補完、プロトコル世代は変更しません。
++拡張は source が `senpi-codemode` の `wake_source_state` イベントを使い、
++切り離された eval セルがある間だけ `working` を報告します。最後のセル完了時や
++セッション変更時に報告を解除します。他の活動と承認待ちは画面検出を使います。
++ネイティブセッション識別の報告や自動 resume は提供しません。
++
+ ## Claude Code
+ 
+ Claude Code フックをインストールします:
+diff --git a/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx b/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx
+index 8ad27952..616f25e9 100644
+--- a/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx
++++ b/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx
+@@ -41,7 +41,7 @@ review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+ 
+ 可用的 shell 窗格必须停在交互式 shell 提示符,由 shell 自身占用前台,没有正在前台运行的命令、编辑器或智能体。调用 `agent start` 前先让窗格回到提示符。
+ 
+-`--kind` 选择受支持的智能体及其标准可执行文件。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki` 和 `muse`。`--` 后的参数会原样传给该可执行文件。
++`--kind` 选择受支持的智能体及其标准可执行文件。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse` 和 `omo`。`omo` 是 OmO Native 的公开 kind 和显示标识；托管启动使用 `omo` 可执行文件,持久化清单 ID 仍为 `senpi`。`--` 后的参数会原样传给该可执行文件。
+ 
+ 成功的 `agent start` 只有在 Herdr 于同一终端检测到预期智能体,并确认它可接受交互输入后才返回。如果启动期间检测到 `blocked`,命令会立即返回 `agent_not_ready`。该名称仍可用于 `agent read` 和 `agent send-keys`,检测变为 `idle` 后即可用于发送提示。默认等待启动 30 秒;`--timeout` 必须大于 3000 且不超过 300000 毫秒。
+ 
+diff --git a/docs/next/website/src/content/docs/zh-cn/agents.mdx b/docs/next/website/src/content/docs/zh-cn/agents.mdx
+index bc749add..487aa4d9 100644
+--- a/docs/next/website/src/content/docs/zh-cn/agents.mdx
++++ b/docs/next/website/src/content/docs/zh-cn/agents.mdx
+@@ -33,6 +33,7 @@ Herdr 为同时运行多个编程智能体而生。每个智能体都待在一
+ | Grok CLI | 屏幕清单 | 会话 |
+ | Antigravity CLI | 屏幕清单 | 会话 |
+ | Kiro CLI | 屏幕清单 | 无 |
++| OmO Native | 屏幕清单 | 无 |
+ | Maki | 屏幕清单 | 无 |
+ | Muse | 屏幕清单 | 无 |
+ 
+diff --git a/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx b/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx
+index 4c7df02a..1b322dc7 100644
+--- a/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx
++++ b/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx
+@@ -324,7 +324,8 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+ 
+ 智能体目标只能是唯一的实时智能体名称,或当前承载该智能体的窗格 ID。终端 ID 和单独的智能体 kind 标签不能作为目标。通过 `agent start` 启动的智能体必须有名称;手动启动的智能体保持未命名,通过窗格 ID 寻址。
+ 
+-`agent start` 会在现有可用 shell 窗格中启动智能体:交互式 shell 必须占用前台,不能有正在前台运行的命令、编辑器或智能体。拓扑必须单独创建。名称在实时智能体中必须唯一,并匹配 `[a-z][a-z0-9_-]{0,31}`。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki` 和 `muse`。名称属于当前窗格占用者,在该智能体退出、release 或被替换时清除;短暂的检测不确定不会清除它。
++`agent start` 会在现有可用 shell 窗格中启动智能体:交互式 shell 必须占用前台,不能有正在前台运行的命令、编辑器或智能体。拓扑必须单独创建。名称在实时智能体中必须唯一,并匹配 `[a-z][a-z0-9_-]{0,31}`。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse` 和 `omo`。`omo` 是 OmO Native 的公开 kind 和显示标识；托管启动使用 `omo` 可执行文件,持久化清单 ID 仍为 `senpi`。名称属于当前窗格占用者,在该智能体退出、release 或被替换时清除;短暂的检测不确定不会清除它。
++
+ 
+ 成功的 start 只有在预期智能体占用同一终端并可接受交互输入后才返回。如果启动期间检测到 `blocked`,命令会立即返回 `agent_not_ready`。该名称仍可用于 `agent read` 和 `agent send-keys`,检测变为 `idle` 后即可用于发送提示。默认启动超时是 30000 毫秒;显式值必须大于 3000 且不超过 300000。
+ 
+diff --git a/docs/next/website/src/content/docs/zh-cn/integrations.mdx b/docs/next/website/src/content/docs/zh-cn/integrations.mdx
+index 5eb1f322..598b7af9 100644
+--- a/docs/next/website/src/content/docs/zh-cn/integrations.mdx
++++ b/docs/next/website/src/content/docs/zh-cn/integrations.mdx
+@@ -133,6 +133,41 @@ Herdr 把内置扩展写入:
+ 
+ OMP 集成通过 Herdr 的 socket API 上报智能体标签 `omp`、生命周期状态和原生会话身份。它不需要对 `omp` 可执行文件做原生进程检测,并且 Herdr 可以在服务器重启后用 `omp --resume=<session>` 恢复 OMP 窗格。
+ 
++## OmO / Senpi (仅本地 CLI)
++
++```bash
++herdr integration install omo
++herdr integration install senpi
++herdr integration status
++herdr integration uninstall omo
++herdr integration uninstall senpi
++```
++
++两种命令安装同一个由 Herdr 管理的扩展 (版本 `1`),文件为
++`extensions/herdr-senpi-agent-state.ts`。OmO 默认使用 `~/.omo/agent`,
++独立 Senpi 默认使用 `~/.senpi/agent`。agent 目录必须已存在;
++Herdr 只创建缺失的 extensions 目录。
++
++- OmO 依次读取 `OMO_CODING_AGENT_DIR`、`SENPI_CODING_AGENT_DIR` 和
++  `PI_CODING_AGENT_DIR`,去除首尾空白后使用第一个非空值,否则使用 `~/.omo/agent`。
++  不查找项目目录,也不展开覆盖值中的字面 `~`;相对路径基于当前工作目录。
++- 独立 Senpi 读取后两个变量,使用第一个已定义的值,包括空字符串。
++  空值或未定义时查找项目目录;非空覆盖值中的 `~` 和 `~/` 展开为主目录。
++- Senpi 向上查找最多 100 层父目录,选择最近的真实 `.senpi/agent` 目录。
++  忽略符号链接,在主目录前停止,然后回退到 `~/.senpi/agent`。
++  两种启动器都应使用文件系统路径。
++
++请在与启动智能体相同的项目和环境变量下执行 install、status 和 uninstall。
++与 Pi/OMP 共享的目录会被拒绝;请配置独立目录。Herdr 不会替换或删除无关文件,
++卸载也不影响其他扩展或设置。安装后请重启智能体。
++`status --outdated-only` 也会报告本地 OmO/Senpi 更新。
++
++这些命令仅供本地 CLI 使用,不改变服务器/API 的集成列表、安装卸载目标、
++启动推荐、由 schema 生成的 shell 补全或协议世代。
++扩展依赖 source 为 `senpi-codemode` 的 `wake_source_state` 事件,
++在存在后台独立 eval 单元时报告 `working`,最后一个单元结束或会话切换时释放报告。
++其他活动和权限提示仍由屏幕检测。此集成不报告原生会话身份,也不提供自动会话恢复。
++
+ ## Claude Code
+ 
+ 安装 Claude Code 钩子:
+diff --git a/docs/next/website/src/data/config-reference.json b/docs/next/website/src/data/config-reference.json
+index 36afe337..638ce1b3 100644
+--- a/docs/next/website/src/data/config-reference.json
++++ b/docs/next/website/src/data/config-reference.json
+@@ -1494,7 +1494,7 @@
+           "key": "experimental.cjk_ime_agents",
+           "type": "list of strings",
+           "default": "[]",
+-          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, qwen, qwen-code, letta, letta-code, maki."
++          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, qwen, qwen-code, letta, letta-code, maki, omo (senpi compatibility alias)."
+         },
+         {
+           "key": "experimental.cjk_ime_cursor_shape",
+diff --git a/justfile b/justfile
+index 5c42bee6..47f220a9 100644
+--- a/justfile
++++ b/justfile
+@@ -96,6 +96,7 @@ integration-assets-test:
+     bun test src/integration/assets/herdr-agent-state.test.ts
+     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
+     bun test src/integration/assets/opencode/herdr-tui-session.test.ts
++    bun test src/integration/assets/senpi/herdr-agent-state.test.ts
+ 
+ # Regenerate the C API bindings with bindgen-cli 0.72.1
+ libghostty-bindings *clang_args:
+diff --git a/scripts/agent_detection_manifest_check.py b/scripts/agent_detection_manifest_check.py
+index 6990a215..70763ca5 100644
+--- a/scripts/agent_detection_manifest_check.py
++++ b/scripts/agent_detection_manifest_check.py
+@@ -40,6 +40,7 @@ REGION_RE = re.compile(
+     r"before_current_prompt_marker|current_prompt_block_marker|after_current_prompt_block_marker|"
+     r"prompt_box_body|above_prompt_box|last_non_empty_above_prompt_box|after_last_horizontal_rule|"
+     r"osc_title|osc_progress|"
++    r"senpi_current_dialog|senpi_current_status|senpi_current_btw_panel|senpi_current_footer|"
+     r"bottom_lines\([1-9][0-9]*\)|bottom_non_empty_lines\([1-9][0-9]*\)|"
+     r"top_non_empty_lines\([1-9][0-9]*\))$"
+ )
+@@ -164,6 +165,11 @@ def validate_manifest(path: Path, engine_version: int) -> dict:
+                 f"{path}: rule {rule['id']} region {region!r} requires min_engine_version 3"
+             )
+ 
++        if region.startswith("senpi_current_") and min_engine < 4:
++            raise CheckError(
++                f"{path}: rule {rule['id']} region {region!r} requires min_engine_version 4"
++            )
++
+     return manifest
+ 
+ 
+@@ -336,7 +342,7 @@ def validate_catalog(
+         stages_new_engine_manifest = (
+             staged_manifest
+             == (bundled_manifest["version"], manifest["version"], published_digest)
+-            and bundled_manifest["min_engine_version"] == engine_version
++            and bundled_manifest["min_engine_version"] <= engine_version
+             and manifest["min_engine_version"] < bundled_manifest["min_engine_version"]
+         )
+         if cmp < 0 and not stages_new_engine_manifest:
+diff --git a/scripts/test_agent_detection_manifest_check.py b/scripts/test_agent_detection_manifest_check.py
+index fed0e06f..ef4c7ffd 100644
+--- a/scripts/test_agent_detection_manifest_check.py
++++ b/scripts/test_agent_detection_manifest_check.py
+@@ -101,6 +101,37 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
+             bundled_manifests = check.load_manifest_dir(bundled, engine_version=3)
+             check.validate_catalog(website, bundled_manifests, engine_version=3)
+ 
++    def test_staged_manifest_remains_valid_after_engine_advances(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            bundled, published = staged_grok_dirs(Path(tmp))
++            manifests = check.load_manifest_dir(bundled, engine_version=4)
++            check.validate_catalog(published, manifests, engine_version=4)
++
++            with (published / "grok.toml").open("a") as manifest_file:
++                manifest_file.write("\n# changed digest\n")
++            with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
++                check.validate_catalog(published, manifests, engine_version=4)
++
++    def test_senpi_regions_require_engine_four(self):
++        for region in (
++            "senpi_current_dialog",
++            "senpi_current_status",
++            "senpi_current_btw_panel",
++            "senpi_current_footer",
++        ):
++            with self.subTest(region=region), tempfile.TemporaryDirectory() as tmp:
++                path = Path(tmp) / "senpi.toml"
++                content = manifest("senpi", "2026.09.05.2").replace(
++                    'contains = ["ready"]',
++                    f'region = "{region}"\ncontains = ["ready"]',
++                )
++                path.write_text(content.replace("min_engine_version = 1", "min_engine_version = 4"))
++                check.validate_manifest(path, engine_version=4)
++
++                path.write_text(content)
++                with self.assertRaisesRegex(check.CheckError, "requires min_engine_version 4"):
++                    check.validate_manifest(path, engine_version=4)
++
+     def test_rejects_mutated_staged_published_manifest(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             bundled, website = staged_grok_dirs(Path(tmp))
+diff --git a/src/cli/integration.rs b/src/cli/integration.rs
+index a8d5a5bf..9443cb23 100644
+--- a/src/cli/integration.rs
++++ b/src/cli/integration.rs
+@@ -1,4 +1,14 @@
+ use crate::api::schema::IntegrationTarget;
++use crate::integration::senpi::{self, Brand};
++
++/// Integration target accepted by the CLI. Letta and Senpi are deliberately
++/// kept out of the frozen client endpoint `IntegrationTarget` enum.
++#[derive(Debug, PartialEq, Eq)]
++enum IntegrationCommandTarget {
++    Builtin(IntegrationTarget),
++    Letta,
++    Senpi(Brand),
++}
+ 
+ pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
+     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+@@ -33,7 +43,7 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
+ 
+     if outdated_only {
+         crate::integration::print_outdated_update_notice();
+-        return Ok(0);
++        return print_local_senpi_statuses(true);
+     }
+ 
+     for status in crate::integration::installed_integration_statuses() {
+@@ -59,7 +69,37 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
+         );
+     }
+ 
+-    Ok(0)
++    print_local_senpi_statuses(false)
++}
++
++fn print_local_senpi_statuses(outdated_only: bool) -> std::io::Result<i32> {
++    let mut exit_code = 0;
++    for brand in Brand::ALL {
++        let status = match senpi::status(brand) {
++            Ok(status) => status,
++            Err(err) => {
++                eprintln!("{}: {err}", brand.label());
++                exit_code = 1;
++                continue;
++            }
++        };
++        let state = match status.state {
++            crate::integration::IntegrationStatusKind::NotInstalled => "not installed".to_string(),
++            crate::integration::IntegrationStatusKind::Current => {
++                format!("current (v{})", senpi::VERSION)
++            }
++            crate::integration::IntegrationStatusKind::Outdated => format!(
++                "needs update/repair (v{}; bundled v{}); run `herdr integration install {}`",
++                status.installed_version.unwrap_or(0),
++                senpi::VERSION,
++                brand.label()
++            ),
++        };
++        if !outdated_only || status.state == crate::integration::IntegrationStatusKind::Outdated {
++            println!("{}: {state} ({})", brand.label(), status.path.display());
++        }
++    }
++    Ok(exit_code)
+ }
+ 
+ fn describe_integration_state(
+@@ -90,11 +130,12 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
+         return Ok(2);
+     };
+ 
+-    let installed = match target {
++    let result = match target {
+         IntegrationCommandTarget::Builtin(target) => crate::integration::install_target(target),
+         IntegrationCommandTarget::Letta => crate::integration::install_experimental_letta(),
++        IntegrationCommandTarget::Senpi(brand) => senpi::install(brand),
+     };
+-    match installed {
++    match result {
+         Ok(messages) => {
+             print_integration_messages(messages);
+             Ok(0)
+@@ -111,11 +152,12 @@ fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
+         return Ok(2);
+     };
+ 
+-    let removed = match target {
++    let result = match target {
+         IntegrationCommandTarget::Builtin(target) => crate::integration::uninstall_target(target),
+         IntegrationCommandTarget::Letta => crate::integration::uninstall_experimental_letta(),
++        IntegrationCommandTarget::Senpi(brand) => senpi::uninstall(brand),
+     };
+-    match removed {
++    match result {
+         Ok(messages) => {
+             print_integration_messages(messages);
+             Ok(0)
+@@ -133,31 +175,32 @@ fn print_integration_messages(messages: Vec<String>) {
+     }
+ }
+ 
+-/// Integration target accepted by the CLI. Letta is deliberately kept out of
+-/// the frozen client endpoint `IntegrationTarget` enum and is handled as an
+-/// experimental CLI-only target until the agent registry replaces it.
+-enum IntegrationCommandTarget {
+-    Builtin(IntegrationTarget),
+-    Letta,
+-}
+-
+ fn parse_integration_target(
+     args: &[String],
+     action: &str,
+ ) -> std::io::Result<Option<IntegrationCommandTarget>> {
+     let Some(target) = args.first().map(|arg| arg.as_str()) else {
+         eprintln!(
+-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
++            "usage: herdr integration {action} <pi|omp|omo|senpi|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
+         );
+         return Ok(None);
+     };
+     if args.len() != 1 {
+         eprintln!(
+-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
++            "usage: herdr integration {action} <pi|omp|omo|senpi|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
+         );
+         return Ok(None);
+     }
+ 
++    let brand = match target {
++        "omo" => Some(Brand::Omo),
++        "senpi" => Some(Brand::Senpi),
++        _ => None,
++    };
++    if let Some(brand) = brand {
++        return Ok(Some(IntegrationCommandTarget::Senpi(brand)));
++    }
++
+     let parsed = match target {
+         "pi" => IntegrationCommandTarget::Builtin(IntegrationTarget::Pi),
+         "omp" => IntegrationCommandTarget::Builtin(IntegrationTarget::Omp),
+@@ -182,7 +225,7 @@ fn parse_integration_target(
+         _ => {
+             eprintln!("unknown integration target: {target}");
+             eprintln!(
+-                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok"
++                "currently supported: pi, omp, omo, senpi, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok"
+             );
+             return Ok(None);
+         }
+@@ -195,6 +238,7 @@ fn print_integration_help() {
+     eprintln!("herdr integration commands:");
+     eprintln!("  herdr integration install pi");
+     eprintln!("  herdr integration install omp");
++    eprintln!("  herdr integration install omo|senpi (local only)");
+     eprintln!("  herdr integration install claude");
+     eprintln!("  herdr integration install codex");
+     eprintln!("  herdr integration install copilot");
+@@ -213,6 +257,7 @@ fn print_integration_help() {
+     eprintln!("  herdr integration install grok");
+     eprintln!("  herdr integration uninstall pi");
+     eprintln!("  herdr integration uninstall omp");
++    eprintln!("  herdr integration uninstall omo|senpi (local only)");
+     eprintln!("  herdr integration uninstall claude");
+     eprintln!("  herdr integration uninstall codex");
+     eprintln!("  herdr integration uninstall copilot");
+@@ -231,3 +276,44 @@ fn print_integration_help() {
+     eprintln!("  herdr integration uninstall grok");
+     eprintln!("  herdr integration status [--outdated-only]");
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn local_senpi_targets_are_accepted() {
++        for target in ["omo", "senpi"] {
++            for action in ["install", "uninstall"] {
++                assert!(
++                    parse_integration_target(&[target.into()], action)
++                        .unwrap()
++                        .is_some(),
++                    "{action} {target}"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn local_senpi_routing_preserves_legacy_targets_and_usage_errors() {
++        for target in IntegrationTarget::ALL {
++            let label = crate::integration::integration_target_label(target);
++            assert_eq!(
++                parse_integration_target(&[label.into()], "install").unwrap(),
++                Some(IntegrationCommandTarget::Builtin(target))
++            );
++        }
++        for target in ["omo", "senpi"] {
++            assert!(
++                parse_integration_target(&[target.into(), "extra".into()], "install")
++                    .unwrap()
++                    .is_none()
++            );
++        }
++        assert!(parse_integration_target(&[], "install").unwrap().is_none());
++        assert!(parse_integration_target(&["unknown".into()], "install")
++            .unwrap()
++            .is_none());
++    }
++}
+diff --git a/src/cli/spec.rs b/src/cli/spec.rs
+index 9465dcc3..4f94d229 100644
+--- a/src/cli/spec.rs
++++ b/src/cli/spec.rs
+@@ -890,6 +890,7 @@ fn current_pane_args() -> [Arg; 2] {
+ fn integration_target_arg() -> Arg {
+     Arg::new("target")
+         .value_name("TARGET")
++        .help("Integration to manage; omo and senpi are also accepted as local-only targets")
+         .required(true)
+         .value_parser(integration_target_values())
+ }
+diff --git a/src/config/model.rs b/src/config/model.rs
+index 6ef6274d..e4f920aa 100644
+--- a/src/config/model.rs
++++ b/src/config/model.rs
+@@ -1060,7 +1060,8 @@ pub struct ExperimentalConfig {
+     /// if the list contains no valid names, the reveal does not apply.
+     /// Accepted names: pi, claude, codex, gemini, cursor, devin, cline,
+     /// opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo,
+-    /// qodercli, qoder, qwen, qwen-code, letta, letta-code, maki.
++    /// qodercli, qoder, qwen, qwen-code, letta, letta-code, maki, omo
++    /// (senpi compatibility alias).
+     /// Default: empty.
+     pub cjk_ime_agents: Vec<String>,
+     /// Cursor shape rendered for the IME anchor when
+diff --git a/src/config/sidebar.rs b/src/config/sidebar.rs
+index 9a4cb5e0..6b66c05e 100644
+--- a/src/config/sidebar.rs
++++ b/src/config/sidebar.rs
+@@ -408,15 +408,25 @@ where
+     D: serde::Deserializer<'de>,
+ {
+     let rows_by_agent = BTreeMap::<String, AgentSidebarRows>::deserialize(deserializer)?;
+-    for (id, rows) in &rows_by_agent {
+-        if crate::detect::parse_canonical_agent_label(id).is_none() {
+-            return Err(serde::de::Error::custom(format!(
++    let mut normalized_rows_by_agent = BTreeMap::new();
++    for (id, rows) in rows_by_agent {
++        let agent = crate::detect::parse_persisted_agent_label(&id).ok_or_else(|| {
++            serde::de::Error::custom(format!(
+                 "unknown canonical agent id `{id}` in sidebar rows_by_agent"
++            ))
++        })?;
++        validate_sidebar_rows(&rows).map_err(serde::de::Error::custom)?;
++        let canonical_id = crate::detect::agent_label(agent).to_string();
++        if normalized_rows_by_agent
++            .insert(canonical_id.clone(), rows)
++            .is_some()
++        {
++            return Err(serde::de::Error::custom(format!(
++                "duplicate canonical agent id `{canonical_id}` in sidebar rows_by_agent"
+             )));
+         }
+-        validate_sidebar_rows(rows).map_err(serde::de::Error::custom)?;
+     }
+-    Ok(rows_by_agent)
++    Ok(normalized_rows_by_agent)
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+@@ -726,4 +736,20 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
+             );
+         }
+     }
++
++    #[test]
++    fn normalizes_legacy_senpi_override_key_to_omo() {
++        let input = "[ui.sidebar.agents.rows_by_agent]\nsenpi = [[\"agent\"]]\n";
++        let config: crate::config::Config = toml::from_str(input).expect("legacy senpi key");
++
++        assert!(config.ui.sidebar.agents.rows_by_agent.contains_key("omo"));
++        assert!(!config.ui.sidebar.agents.rows_by_agent.contains_key("senpi"));
++    }
++
++    #[test]
++    fn rejects_conflicting_omo_and_senpi_override_keys() {
++        let input =
++            "[ui.sidebar.agents.rows_by_agent]\nomo = [[\"agent\"]]\nsenpi = [[\"agent\"]]\n";
++        assert!(toml::from_str::<crate::config::Config>(input).is_err());
++    }
+ }
+diff --git a/src/config/sound.rs b/src/config/sound.rs
+index 8eb2561e..3c9f26f1 100644
+--- a/src/config/sound.rs
++++ b/src/config/sound.rs
+@@ -145,6 +145,7 @@ impl AgentSoundOverrides {
+             Some(Agent::Qwen) => self.qwen,
+             Some(Agent::Letta) => self.letta,
+             Some(Agent::Maki) => self.maki,
++            Some(Agent::Senpi) => AgentSoundSetting::Default,
+             Some(Agent::Muse) => self.muse,
+             None => AgentSoundSetting::Default,
+         }
+diff --git a/src/detect/manifest.rs b/src/detect/manifest.rs
+index acd6b8f9..9369567d 100644
+--- a/src/detect/manifest.rs
++++ b/src/detect/manifest.rs
+@@ -1,4 +1,5 @@
+ use std::{
++    cell::OnceCell,
+     path::{Path, PathBuf},
+     sync::{Arc, Mutex, OnceLock, RwLock},
+ };
+@@ -7,10 +8,12 @@ use regex::Regex;
+ use serde::Deserialize;
+ 
+ use super::{
+-    agent_label, manifest_update::ManifestVersion, parse_agent_label, Agent, AgentDetection,
+-    AgentState,
++    agent_label, agent_manifest_id, manifest_update::ManifestVersion, parse_agent_label, Agent,
++    AgentDetection, AgentState,
+ };
+ 
++mod senpi_regions;
++
+ pub const DEFAULT_KNOWN_AGENT_IDLE_FALLBACK: &str = "default_known_agent_idle_fallback";
+ 
+ /// Input to the detection engine, carrying the screen snapshot plus any
+@@ -201,6 +204,7 @@ struct ManifestGate {
+ #[derive(Debug, Clone)]
+ struct CompiledRule {
+     gate: CompiledGate,
++    senpi_region: Option<senpi_regions::Region>,
+ }
+ 
+ #[derive(Debug, Clone)]
+@@ -258,6 +262,7 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
+     ("opencode", include_str!("manifests/opencode.toml")),
+     ("pi", include_str!("manifests/pi.toml")),
+     ("qodercli", include_str!("manifests/qodercli.toml")),
++    ("senpi", include_str!("manifests/senpi.toml")),
+     ("qwen", include_str!("manifests/qwen.toml")),
+     ("copilot", include_str!("manifests/github-copilot.toml")),
+ ];
+@@ -453,6 +458,7 @@ fn evaluate_loaded_manifest(
+ ) -> DetectionExplain {
+     let mut matched: Option<(&ManifestRule, String)> = None;
+     let mut evaluated_rules = Vec::new();
++    let senpi = OnceCell::new();
+ 
+     for (rule, compiled_rule) in loaded
+         .manifest
+@@ -460,7 +466,12 @@ fn evaluate_loaded_manifest(
+         .iter()
+         .zip(loaded.compiled_rules.iter())
+     {
+-        let region_text = region(input, &rule.region);
++        let region_text = match compiled_rule.senpi_region {
++            Some(region) => senpi
++                .get_or_init(|| senpi_regions::Regions::parse(input.screen))
++                .get(region),
++            None => region(input, &rule.region),
++        };
+         let matched_rule = compiled_rule_matches(compiled_rule, region_text);
+         evaluated_rules.push(EvaluatedRule {
+             id: rule.id.clone(),
+@@ -743,7 +754,7 @@ fn bundled_loaded_manifest(
+ }
+ 
+ fn bundled_manifest(agent: Agent) -> Option<AgentManifest> {
+-    let id = agent_label(agent);
++    let id = agent_manifest_id(agent);
+     BUNDLED_MANIFESTS
+         .iter()
+         .find(|(manifest_id, _)| *manifest_id == id)
+@@ -971,6 +982,17 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
+                 rule.id, TOP_NON_EMPTY_LINES_ENGINE_VERSION
+             ));
+         }
++        if senpi_regions::Region::parse(&rule.region).is_some()
++            && manifest
++                .min_engine_version
++                .is_none_or(|version| version < senpi_regions::ENGINE_VERSION)
++        {
++            return Err(format!(
++                "rule {} uses a Senpi current region but requires min_engine_version {}",
++                rule.id,
++                senpi_regions::ENGINE_VERSION
++            ));
++        }
+         validate_rule_gate(rule, &mut complexity)
+             .map_err(|err| format!("rule {} has invalid matcher gates: {err}", rule.id))?;
+     }
+@@ -1125,7 +1147,8 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
+         | "osc_progress" => Ok(()),
+         _ if region_count(trimmed, "bottom_lines").is_some()
+             || region_count(trimmed, "bottom_non_empty_lines").is_some()
+-            || top_region_count(trimmed).is_some() =>
++            || top_region_count(trimmed).is_some()
++            || senpi_regions::Region::parse(trimmed).is_some() =>
+         {
+             Ok(())
+         }
+@@ -1137,7 +1160,7 @@ fn override_path(agent: Agent) -> Option<PathBuf> {
+     Some(
+         crate::config::config_dir()
+             .join("agent-detection")
+-            .join(format!("{}.toml", agent_label(agent))),
++            .join(format!("{}.toml", agent_manifest_id(agent))),
+     )
+ }
+ 
+@@ -1173,7 +1196,10 @@ fn compile_manifest(manifest: &AgentManifest) -> Result<Vec<CompiledRule>, Strin
+         .iter()
+         .map(|rule| {
+             compile_gate(&manifest_gate_from_rule(rule))
+-                .map(|gate| CompiledRule { gate })
++                .map(|gate| CompiledRule {
++                    gate,
++                    senpi_region: senpi_regions::Region::parse(&rule.region),
++                })
+                 .map_err(|err| format!("rule {} could not be compiled: {err}", rule.id))
+         })
+         .collect()
+diff --git a/src/detect/manifest/tests.rs b/src/detect/manifest/tests.rs
+index bdb0789d..00beaf71 100644
+--- a/src/detect/manifest/tests.rs
++++ b/src/detect/manifest/tests.rs
+@@ -99,6 +99,332 @@ fn known_agent_no_match_defaults_to_idle_fallback() {
+     );
+ }
+ 
++#[test]
++fn omo_port_compaction_routes_through_production_detection() {
++    with_manifest_dirs("omo-port-compaction", || {
++        let screen = "  ⠙ Compacting context... (esc to cancel)\n────────────────\n❯\n────────────────\n(😺 OmO Native)\n";
++        let detection = crate::detect::detect_agent(crate::detect::identify_agent("senpi"), screen);
++        assert_eq!(detection.state, AgentState::Working);
++        assert!(detection.visible_working);
++    });
++}
++
++#[test]
++fn senpi_legacy_override_path_survives_canonical_identity_and_reload() {
++    with_manifest_dirs("senpi-override", || {
++        let path = override_path(Agent::Senpi).unwrap();
++        assert_eq!(path.file_name().unwrap(), "senpi.toml");
++        assert_eq!(
++            crate::detect::manifest_update::remote_manifest_path(Agent::Senpi)
++                .file_name()
++                .unwrap(),
++            "senpi.toml"
++        );
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(&path, "id = \"senpi\"\n[[rules]]\nid = \"local\"\nstate = \"blocked\"\ncontains = [\"local-sentinel\"]\n").unwrap();
++        reload_manifests_for_agents(&[Agent::Senpi]);
++        let result = explain_for_label("omo", "local-sentinel");
++        assert_eq!(result.agent.as_deref(), Some("omo"));
++        assert_eq!(result.state, AgentState::Blocked);
++        assert_eq!(result.source, Some(ManifestSource::Override(path)));
++    });
++}
++
++#[test]
++fn senpi_active_goal_continuation_is_working() {
++    let screen = "\
++────────────────────────────────────────────────────────────────────────────
++❯
++────────────────────────────────────────────────────────────────────────────
++~/homelab/flash-freerouter • main • 프로젝트 5줄 설명 작성 • CH20.7% • 136K/372K (36.7%) (auto)
++(😺 OmO Native) Pursuing goal (17m) ▰▰▰▰▰▰▰▱▱▱▱▱ goal continues in 1m 50s · 1 bash on duty
++";
++
++    let explain = senpi_review_explain(screen);
++
++    assert_eq!(explain.state, AgentState::Working);
++    assert!(explain.visible_working);
++    assert_eq!(
++        explain.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("goal_continuation_working")
++    );
++}
++
++#[test]
++fn senpi_pursuing_goal_without_continuation_is_working() {
++    let screen = "\
++────────────────────────────────────────────────────────────────────────────
++❯
++────────────────────────────────────────────────────────────────────────────
++~/homelab/flash-freerouter • main • 프로젝트 5줄 설명 작성 • CH20.7% • 136K/372K (36.7%) (auto)
++(😺 OmO Native) Pursuing goal (17m) ▰▰▰▰▰▰▰▱▱▱▱▱
++";
++
++    let explain = senpi_review_explain(screen);
++
++    assert_eq!(explain.state, AgentState::Working);
++    assert!(explain.visible_working);
++    assert_eq!(
++        explain.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("goal_continuation_working")
++    );
++}
++
++#[test]
++fn senpi_pursuing_goal_after_footer_metadata_is_working() {
++    let screen = "\
++  ⠧ Compacting... (esc to cancel)  실제 prompt submit → daemon/model → rendered response end-to-end 미검증
++
++ Todo
++ Native Panel
++ [ ] Cleanup native panel browser build resources
++ [✓] chromium patch test: add active extension close RED
++ [•] Chromium button: close active extension panel explicitly
++ [ ] Rebuild local Chromium toggle-close fix
++────────────────────────────────────────────────────────────────────────────
++❯
++────────────────────────────────────────────────────────────────────────────
++(🏴‍☠️ OmO Native) • ~/github.com/minpeter/openaside • main • 리눅스 빌드 진행상황 조사 • CH99.8% • 256K/272K (94.0%) (auto) • (codex-lb) gpt-5.6-sol:high • fallback: openai-codex/gpt-5.6-sol Pursuing goal (1h 29m)
++";
++
++    let explain = senpi_review_explain(screen);
++
++    assert_eq!(explain.state, AgentState::Working);
++    assert!(explain.visible_working);
++    assert_eq!(
++        explain.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("goal_continuation_working")
++    );
++}
++
++#[test]
++fn senpi_pasted_metadata_pursuing_goal_does_not_trigger_working() {
++    let screen = "\
++────────────────────────────────────────────────────────────────────────────
++❯ 이 footer가 왜 감지되지 않는지 설명해줘:
++  (🏴‍☠️ OmO Native) • ~/github.com/minpeter/openaside • main • (codex-lb) gpt-5.6-sol:high • fallback: openai-codex/gpt-5.6-sol Pursuing goal (1h 29m)
++────────────────────────────────────────────────────────────────────────────
++(🏴‍☠️ OmO Native) • ~/github.com/minpeter/openaside • main • Goal achieved (2m)
++";
++
++    let explain = senpi_review_explain(screen);
++
++    assert_eq!(explain.state, AgentState::Idle);
++    assert!(explain.matched_rule.is_none());
++    assert!(!explain.visible_working);
++}
++
++// Reduced from .local/qa/review-fixes/live-red-corrected.json. Use the
++// bundled rules directly: a user's persistent override must not certify a build.
++fn senpi_review_explain(screen: &str) -> DetectionExplain {
++    let manifest = parse_manifest(include_str!("../manifests/senpi.toml")).unwrap();
++    let loaded = loaded_manifest(manifest, ManifestSource::Bundled, None, None, false).unwrap();
++    evaluate_loaded_manifest(
++        Agent::Senpi,
++        DetectionInput {
++            screen,
++            osc_title: "",
++            osc_progress: "",
++        },
++        loaded,
++        false,
++    )
++}
++
++fn senpi_review_screen(above: &str, body: &str, below: &str) -> String {
++    let border = "─".repeat(40);
++    format!("{above}{border}\n{body}\n{border}\n{below}")
++}
++
++#[test]
++fn senpi_review_wrapped_permission_controls_are_blocked() {
++    let screen = senpi_review_screen(
++        "",
++        "\n Permission required: bash\n\n Command: $ printf hello\n\n → Allow once\n   Allow always\n   Deny\n   Deny with feedback\n\n ↑↓ navigate  enter select  esc/ctrl+c\n cancel\n",
++        "fixture-model\n",
++    );
++    let result = senpi_review_explain(&screen);
++    assert_eq!(result.state, AgentState::Blocked);
++    assert!(result.visible_blocker);
++}
++
++#[test]
++fn senpi_review_long_permission_metadata_and_children_are_blocked() {
++    let commands = " printf hello\n".repeat(20);
++    let screen = senpi_review_screen(
++        "",
++        &format!("\n Permission required: bash\n\n Command: $ printf hello\n{commands}\n → Allow once\n   Allow always\n   Deny\n   Deny with feedback\n\n ↑↓ navigate  enter select  esc/ctrl+c cancel\n"),
++        " ⠋ child · agent:qa · running · 1s\nfixture-model\n",
++    );
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Blocked);
++}
++
++#[test]
++fn senpi_review_feedback_remains_blocked_while_tool_waits() {
++    let screen = senpi_review_screen(
++        "\n ⠋ Running eval\n",
++        "\n Feedback\n\n>\n\n enter submit  esc/ctrl+c cancel\n",
++        "fixture-model\n",
++    );
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Blocked);
++}
++
++#[test]
++fn senpi_review_pasted_internal_border_does_not_expose_editor_text() {
++    let screen = senpi_review_screen(
++        "",
++        "❯ Pasted status:\n  ⠋ Running eval\n  ────────────────────────────────────\n  Explain this output.",
++        "fixture-model\n",
++    );
++    let result = senpi_review_explain(&screen);
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(!result.visible_working);
++}
++
++#[test]
++fn senpi_review_completed_shell_output_is_not_a_primary_loader() {
++    let shell = senpi_review_screen("", " $ printf retained-output\n\n ⠋ Working\n", "");
++    let screen = senpi_review_screen(&shell, "❯", "fixture-model\n");
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Idle);
++}
++
++#[test]
++fn senpi_review_wrapped_retry_is_working() {
++    let screen = senpi_review_screen(
++        "\n ⠋ Retrying (1/3) in 60s... (esc to\n cancel)\n",
++        "❯",
++        "fixture-model\n",
++    );
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++}
++
++#[test]
++fn senpi_review_wrapped_branch_summary_is_working() {
++    let screen = senpi_review_screen(
++        "\n ⠋ Summarizing branch... (ctrl+x to\n cancel)\n",
++        "❯",
++        "fixture-model\n",
++    );
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++}
++
++#[test]
++fn senpi_review_eval_summary_can_contain_middle_dots() {
++    let screen = senpi_review_screen("", "❯", "↗ js · Compile · test (1m)\n");
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++}
++
++#[test]
++fn senpi_review_eval_remains_working_with_paused_or_blocked_goal() {
++    for goal in ["Goal paused (/goal resume)", "Goal blocked: input needed"] {
++        let screen = senpi_review_screen("", "❯", &format!("↗ js · Report (1m) {goal}\n"));
++        assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++    }
++}
++
++#[test]
++fn senpi_review_completed_goal_eval_collision_keeps_conservative_fallback() {
++    // The live-eval + completed-goal and completed-only source formatters emit
++    // these identical bytes. This is a false-positive guard, not a liveness fix.
++    let screen = senpi_review_screen("", "❯", "↗ js · Report (1m) Report · Goal achieved\n");
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Idle);
++}
++
++#[test]
++fn senpi_review_completed_goal_mimicking_an_eval_stays_idle() {
++    let screen = senpi_review_screen(
++        "",
++        "❯",
++        "(😺 OmO Native) ↗ js · report (1m) · Goal achieved (1m)\n",
++    );
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Idle);
++}
++
++fn senpi_review_btw(status: &str) -> String {
++    senpi_review_screen(
++        "",
++        &format!(" btw: Review progress?\n Answer one\n Answer two\n Answer three\n {status}"),
++        "",
++    )
++}
++
++#[test]
++fn senpi_review_answering_btw_and_todo_work_in_either_order() {
++    let panel = senpi_review_btw("answering… (Esc to cancel)");
++    let todo = " Todo\n QA\n [ ] Check detection\n";
++    for above in [format!("{panel}{todo}"), format!("{todo}{panel}")] {
++        let screen = senpi_review_screen(&above, "❯", "fixture-model\n");
++        assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++    }
++}
++
++#[test]
++fn senpi_review_terminal_btw_does_not_match_quoted_working_or_cancellation() {
++    for terminal in [
++        "(dismisses on next message)",
++        "(dismissed)",
++        "error: unavailable",
++    ] {
++        let panel = senpi_review_btw(&format!(
++            "⠋ Working\n answering… (Esc to cancel)\n {terminal}"
++        ));
++        let screen = senpi_review_screen(
++            &format!("{panel} Todo\n QA\n [ ] Check detection\n"),
++            "❯",
++            "fixture-model\n",
++        );
++        assert_eq!(senpi_review_explain(&screen).state, AgentState::Idle);
++    }
++}
++
++#[test]
++fn senpi_review_compaction_above_retained_btw_is_working() {
++    let panel = senpi_review_btw("(dismisses on next message)");
++    let screen = senpi_review_screen(
++        &format!("  ⠋ Compacting context... (esc to cancel)\n{panel}"),
++        "❯",
++        "fixture-model\n",
++    );
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++}
++
++#[test]
++fn senpi_review_wrapped_dag_header_with_narrow_native_child_is_working() {
++    let screen = senpi_review_screen("", "❯", " ▶ Review pipeline rendering audit\n running wave 1/1 0/1 done, 1 running\n   ▶ Review child · agent:qa · 1m 0s\n ⠋ Review child ·\n agent:qa(xai/grok-4)...\nfixture-model\n");
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Working);
++}
++
++#[test]
++fn senpi_review_wrapped_dag_suspension_cannot_borrow_a_live_node() {
++    let screen = senpi_review_screen("", "❯", " · Review pipeline rendering audit\n suspended · 1 active wave 1/1 0/1\n done, 1 running\n   ▶ Review child · agent:qa · 1m 0s\n ⠋ Review child ·\n agent:qa(xai/grok-4)...\nfixture-model\n");
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Idle);
++}
++
++#[test]
++fn senpi_review_dag_header_cannot_borrow_a_node_from_another_run() {
++    let screen = senpi_review_screen("", "❯", " ▶ first running wave 1/1 0/1 done, 1 running\n · second suspended · 1 active wave 1/1 0/1 done, 1 running\n   ▶ Review child · agent:qa · 1m 0s\nfixture-model\n");
++    assert_eq!(senpi_review_explain(&screen).state, AgentState::Idle);
++}
++
++#[test]
++fn senpi_review_regions_require_engine_four() {
++    for name in [
++        "senpi_current_dialog",
++        "senpi_current_status",
++        "senpi_current_btw_panel",
++        "senpi_current_footer",
++    ] {
++        let rules = format!("[[rules]]\nid = \"region\"\nstate = \"working\"\nregion = \"{name}\"\ncontains = [\"ready\"]\n");
++        assert!(
++            parse_manifest(&format!("id = \"senpi\"\nmin_engine_version = 4\n{rules}")).is_ok()
++        );
++        assert!(
++            parse_manifest(&format!("id = \"senpi\"\nmin_engine_version = 3\n{rules}")).is_err()
++        );
++        assert!(parse_manifest(&format!("id = \"senpi\"\n{rules}")).is_err());
++    }
++}
++
+ #[test]
+ fn rule_semantics_apply_gates_priority_and_line_regex() {
+     with_manifest_dirs("rule-semantics", || {
+@@ -1429,3 +1755,205 @@ fn codex_osc_working_beats_weak_blocker_screen() {
+         Some("osc_title_working")
+     );
+ }
++
++#[test]
++fn senpi_interrupt_suffix_working() {
++    let screen = "• Working (4m 27s • esc to interrupt)\n\
++        Tip: Open the model selector with ctrl+l\n\
++        ❯\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Working);
++    assert_eq!(
++        result.matched_rule.as_ref().map(|r| r.id.as_str()),
++        Some("interrupt_suffix_working")
++    );
++    assert!(result.visible_working);
++}
++
++#[test]
++fn senpi_pasted_interrupt_suffix_does_not_trigger_working() {
++    let screen = "────────────────────────────────────────────────\n\
++        ❯ Pasted status:\n\
++          • Working (4m 27s • esc to interrupt)\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(result.matched_rule.is_none());
++    assert!(!result.visible_working);
++}
++
++#[test]
++fn senpi_working_literal_prose_does_not_trigger_working() {
++    let screen = "The documentation says Working... while a task is active.\n\
++        ────────────────────────────────────────────────\n\
++        ❯\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(result.matched_rule.is_none());
++    assert!(!result.visible_working);
++}
++
++#[test]
++fn senpi_compacting_context_spinner_is_working() {
++    let screen =
++        "TPS 44.9 tok/s. Cache hit 86.6%, 313.4s\n  ⠙ Compacting context... (esc to cancel)\n\
++        ────────────────────────────────────────────────\n\
++        ❯\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/clawroid/bori\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Working);
++    assert_eq!(
++        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("compacting_context_working")
++    );
++    assert!(result.visible_working);
++}
++
++#[test]
++fn senpi_compacting_short_label_with_stale_tail_is_working() {
++    let screen =
++        "Queued message for after compaction\n\
++        Steering: 음 그렇군\n\
++          ⠦ Compacting... (esc to cancel) ent benchmark implementation - Registered active HEAVY goal\n\
++        ────────────────────────────────────────────────\n\
++        ❯\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/minpeter/pss-runtime\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Working);
++    assert_eq!(
++        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("compacting_context_working")
++    );
++    assert!(result.visible_working);
++}
++
++#[test]
++fn senpi_compacting_wrapped_stale_tail_is_working() {
++    let screen = "  ⠦ Compacting... (esc to cancel) ent benchmark imple\n\
++        mentation\n\
++        ────────────────────────────────────────────────\n\
++        ❯\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/minpeter/pss-runtime\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Working);
++    assert_eq!(
++        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("compacting_context_working")
++    );
++    assert!(result.visible_working);
++}
++
++#[test]
++fn senpi_compacting_context_prose_does_not_trigger_working() {
++    let screen = "────────────────────────────────────────────────\n\
++        ❯ Goal: detect `Compacting context... (esc to cancel)` as working.\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/clawroid/bori\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(result.matched_rule.is_none());
++    assert!(!result.visible_working);
++}
++
++#[test]
++fn senpi_pasted_short_compaction_row_does_not_trigger_working() {
++    let screen = "────────────────────────────────────────────────\n\
++        ❯ Pasted status:\n\
++          ⠦ Compacting... (esc to cancel) ent benchmark implementation\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/minpeter/pss-runtime\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(result.matched_rule.is_none());
++    assert!(!result.visible_working);
++}
++
++#[test]
++fn senpi_active_subagent_row_is_working() {
++    let screen = "Todo\n\
++        감사\n\
++        [•] Run independent final review workstreams\n\
++        ────────────────────────────────────────────────\n\
++        ❯\n\
++        ────────────────────────────────────────────────\n\
++         ⠏ Oracle이 최종 commit의 목표·byte-parity 제약 검증 · agent:oracle(openai-codex/gpt-5.6-sol:xhigh) · turn 11 (60 tools) · $1.0453 · 44 tok/s · running · 3m 14s\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/minpeter/ai-sdk-tool-call-middleware\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Working);
++    assert_eq!(
++        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
++        Some("active_subagent_working")
++    );
++    assert!(result.visible_working);
++}
++
++#[test]
++fn senpi_pasted_subagent_row_does_not_trigger_working() {
++    let screen =
++        "Pasted status:\n ⠏ Oracle review · agent:oracle(openai-codex/gpt-5.6-sol:xhigh) · running · 3m 14s\n\
++        ────────────────────────────────────────────────\n\
++        ❯\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com/minpeter/ai-sdk-tool-call-middleware\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(result.matched_rule.is_none());
++    assert!(!result.visible_working);
++}
++
++#[test]
++fn senpi_permission_prompt_blocked() {
++    let screen = "Permission required for bash\n\
++        Allow once\n\
++        Allow always\n\
++        Deny\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Blocked);
++    assert_eq!(
++        result.matched_rule.as_ref().map(|r| r.id.as_str()),
++        Some("permission_prompt_blocked")
++    );
++    assert!(result.visible_blocker);
++}
++
++#[test]
++fn senpi_pasted_permission_options_do_not_trigger_blocked() {
++    let screen = "────────────────────────────────────────────────\n\
++        ❯ Permission example:\n\
++          Allow once\n\
++          Allow always\n\
++          Deny\n\
++        ────────────────────────────────────────────────\n\
++        (🏴‍☠️ OmO Native) • ~/github.com\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++    assert!(result.matched_rule.is_none());
++    assert!(!result.visible_blocker);
++}
++
++#[test]
++fn senpi_idle_fallback_when_no_rules_match() {
++    let screen = "❯\n\
++        (🏴‍☠️ OmO Native) • ~/github.com\n";
++    let result = senpi_review_explain(screen);
++
++    assert_eq!(result.state, AgentState::Idle);
++}
+diff --git a/src/detect/manifest_update.rs b/src/detect/manifest_update.rs
+index 33493059..aa79be05 100644
+--- a/src/detect/manifest_update.rs
++++ b/src/detect/manifest_update.rs
+@@ -10,9 +10,9 @@ use std::{
+ 
+ use serde::{Deserialize, Serialize};
+ 
+-use super::{agent_label, parse_agent_label, Agent};
++use super::{agent_label, agent_manifest_id, parse_agent_label, Agent};
+ 
+-pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 3;
++pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 4;
+ const DEFAULT_CATALOG_URL: &str = "https://herdr.dev/agent-detection/index.toml";
+ const CATALOG_URL_ENV: &str = "HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL";
+ const MAX_FETCH_BYTES: usize = 256 * 1024;
+@@ -131,7 +131,7 @@ pub(crate) struct ManifestUpdateStatus {
+ 
+ impl ManifestUpdateStatus {
+     pub(crate) fn agent_status(&self, agent: Agent) -> Option<AgentRemoteStatus> {
+-        self.agents.get(agent_label(agent)).cloned()
++        self.agents.get(agent_manifest_id(agent)).cloned()
+     }
+ }
+ 
+@@ -247,7 +247,7 @@ fn check_and_update_from_url(url: &str) -> Result<ManifestUpdateOutput, String>
+     let checked = catalog.iter().map(|entry| entry.agent).collect::<Vec<_>>();
+     let mut updated = Vec::new();
+     for entry in catalog {
+-        let agent_id = agent_label(entry.agent).to_string();
++        let agent_id = agent_manifest_id(entry.agent).to_string();
+         let manifest_url = join_url(&base_url, &entry.path)?;
+         match fetch_text(&manifest_url)
+             .map_err(|err| format!("fetch failed: {err}"))
+@@ -375,7 +375,7 @@ fn parse_catalog(content: &str) -> Result<Vec<CatalogAgent>, String> {
+                 entry.id, entry.path
+             ));
+         }
+-        if !seen.insert(agent_label(agent).to_string()) {
++        if !seen.insert(agent_manifest_id(agent).to_string()) {
+             return Err(format!("catalog contains duplicate agent {}", entry.id));
+         }
+         agents.push(CatalogAgent {
+@@ -417,7 +417,7 @@ pub(crate) fn status_path() -> PathBuf {
+ pub(crate) fn remote_manifest_path(agent: Agent) -> PathBuf {
+     state_root()
+         .join("remote")
+-        .join(format!("{}.toml", agent_label(agent)))
++        .join(format!("{}.toml", agent_manifest_id(agent)))
+ }
+ 
+ pub(crate) fn cached_remote_version(agent: Agent) -> Option<ManifestVersion> {
+@@ -996,6 +996,53 @@ path = "codex-2.toml"
+         .is_err());
+     }
+ 
++    #[test]
++    fn senpi_manifest_status_uses_legacy_storage_id() {
++        let status = ManifestUpdateStatus {
++            agents: BTreeMap::from([(
++                "senpi".to_string(),
++                AgentRemoteStatus {
++                    cached_version: Some("2026.08.13.1".to_string()),
++                    attempted_version: None,
++                    last_checked_unix: None,
++                    last_result: "updated".to_string(),
++                    last_error: None,
++                },
++            )]),
++            ..ManifestUpdateStatus::default()
++        };
++
++        assert_eq!(
++            status.agent_status(Agent::Senpi),
++            status.agents.get("senpi").cloned()
++        );
++        assert!(!status.agents.contains_key("omo"));
++    }
++
++    #[test]
++    fn senpi_catalog_entry_maps_to_canonical_omo_agent() {
++        let agents = parse_catalog(
++            r#"
++schema_version = 1
++
++[[agents]]
++id = "senpi"
++path = "senpi.toml"
++"#,
++        )
++        .unwrap();
++
++        assert_eq!(
++            agents,
++            vec![CatalogAgent {
++                agent: Agent::Senpi,
++                path: "senpi.toml".to_string(),
++            }]
++        );
++        assert_eq!(agent_label(agents[0].agent), "omo");
++        assert_eq!(agent_manifest_id(agents[0].agent), "senpi");
++    }
++
+     #[test]
+     fn catalog_rejects_unsafe_paths() {
+         assert!(parse_catalog(
+diff --git a/src/detect/mod.rs b/src/detect/mod.rs
+index 0c773f0e..6355a62e 100644
+--- a/src/detect/mod.rs
++++ b/src/detect/mod.rs
+@@ -64,11 +64,12 @@ pub enum Agent {
+     Qwen,
+     Letta,
+     Maki,
++    Senpi,
+     Muse,
+ }
+ 
+ impl Agent {
+-    pub const ALL: [Self; 24] = [
++    pub const ALL: [Self; 25] = [
+         Self::Pi,
+         Self::Claude,
+         Self::Codex,
+@@ -92,10 +93,11 @@ impl Agent {
+         Self::Qwen,
+         Self::Letta,
+         Self::Maki,
++        Self::Senpi,
+         Self::Muse,
+     ];
+ 
+-    pub const SCREEN_MANIFEST_AGENTS: [Self; 22] = [
++    pub const SCREEN_MANIFEST_AGENTS: [Self; 23] = [
+         Self::Pi,
+         Self::Claude,
+         Self::Codex,
+@@ -117,6 +119,7 @@ impl Agent {
+         Self::Qwen,
+         Self::Letta,
+         Self::Maki,
++        Self::Senpi,
+         Self::Muse,
+     ];
+ }
+@@ -146,10 +149,18 @@ pub fn agent_label(agent: Agent) -> &'static str {
+         Agent::Qwen => "qwen",
+         Agent::Letta => "letta",
+         Agent::Maki => "maki",
++        Agent::Senpi => "omo",
+         Agent::Muse => "muse",
+     }
+ }
+ 
++pub(crate) fn agent_manifest_id(agent: Agent) -> &'static str {
++    match agent {
++        Agent::Senpi => "senpi",
++        _ => agent_label(agent),
++    }
++}
++
+ pub fn interactive_agent_executable(agent: Agent) -> &'static str {
+     match agent {
+         Agent::Pi => "pi",
+@@ -181,6 +192,7 @@ pub fn interactive_agent_executable(agent: Agent) -> &'static str {
+         Agent::Qwen => "qwen",
+         Agent::Letta => "letta",
+         Agent::Maki => "maki",
++        Agent::Senpi => "omo",
+         Agent::Muse => "muse",
+     }
+ }
+@@ -195,6 +207,11 @@ pub(crate) fn parse_canonical_agent_label(label: &str) -> Option<Agent> {
+     (agent_label(agent) == label).then_some(agent)
+ }
+ 
++pub(crate) fn parse_persisted_agent_label(label: &str) -> Option<Agent> {
++    let agent = lookup_agent(label)?;
++    (agent_label(agent) == label || agent_manifest_id(agent) == label).then_some(agent)
++}
++
+ fn lookup_agent(name: &str) -> Option<Agent> {
+     let name = path_basename(name);
+     match name {
+@@ -221,6 +238,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
+         "qwen" | "qwen-code" | "qwen code" => Some(Agent::Qwen),
+         "letta" | "letta-code" | "letta code" => Some(Agent::Letta),
+         "maki" => Some(Agent::Maki),
++        "senpi" | "omo" | "omo-senpi" | "omo-native" => Some(Agent::Senpi),
+         "muse" | "muse-code" | "muse-cli" => Some(Agent::Muse),
+         _ if is_muse_versioned_binary(name) => Some(Agent::Muse),
+         _ => None,
+@@ -662,7 +680,26 @@ fn agent_name_from_known_package_path(path: &str) -> Option<String> {
+         .into_iter()
+         .map(normalized_agent_lookup_name)
+         .collect();
++    for window in components.windows(6) {
++        if window
++            == [
++                "node_modules",
++                "@code-yeongyu",
++                "senpi",
++                "dist",
++                "bundle",
++                "cli",
++            ]
++        {
++            return Some(agent_label(Agent::Senpi).to_string());
++        }
++    }
+     for window in components.windows(5) {
++        if window == ["node_modules", "@code-yeongyu", "senpi", "dist", "cli"]
++            || window == ["node_modules", "@code-yeongyu", "senpi", "dist", "cli-main"]
++        {
++            return Some(agent_label(Agent::Senpi).to_string());
++        }
+         if window == ["node_modules", "@qwen-code", "qwen-code", "dist", "index"] {
+             return Some(agent_label(Agent::Qwen).to_string());
+         }
+@@ -903,6 +940,23 @@ mod tests {
+ 
+     // ---- Agent identification ----
+ 
++    #[test]
++    fn omo_port_recognizes_both_brands_with_canonical_display() {
++        for name in ["omo", "senpi", "omo-native", "omo-senpi"] {
++            assert_eq!(identify_agent(name).map(agent_label), Some("omo"), "{name}");
++        }
++    }
++
++    #[test]
++    fn omo_port_launches_omo_when_canonical_kind_is_selected() {
++        // Given the public kind accepted by agent start.
++        let agent = parse_canonical_agent_label("omo").expect("supported OMO kind");
++        // When resolving the executable for the interactive launch.
++        let executable = interactive_agent_executable(agent);
++        // Then launch OMO, not an independently installed standalone Senpi.
++        assert_eq!(executable, "omo");
++    }
++
+     #[test]
+     fn identify_known_agents() {
+         assert_eq!(identify_agent("pi"), Some(Agent::Pi));
+@@ -941,6 +995,8 @@ mod tests {
+         assert_eq!(identify_agent("letta"), Some(Agent::Letta));
+         assert_eq!(identify_agent("Letta Code"), Some(Agent::Letta));
+         assert_eq!(identify_agent("maki"), Some(Agent::Maki));
++        assert_eq!(identify_agent("senpi"), Some(Agent::Senpi));
++        assert_eq!(identify_agent("omo"), Some(Agent::Senpi));
+         assert_eq!(identify_agent("muse"), Some(Agent::Muse));
+         assert_eq!(identify_agent("muse-code"), Some(Agent::Muse));
+         assert_eq!(identify_agent("muse-cli"), Some(Agent::Muse));
+@@ -956,6 +1012,19 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn senpi_and_omo_share_omo_canonical_identity() {
++        assert_eq!(parse_agent_label("senpi"), Some(Agent::Senpi));
++        assert_eq!(parse_agent_label("omo"), Some(Agent::Senpi));
++        assert_eq!(agent_label(Agent::Senpi), "omo");
++        assert_eq!(agent_manifest_id(Agent::Senpi), "senpi");
++        assert_eq!(interactive_agent_executable(Agent::Senpi), "omo");
++        assert_eq!(parse_canonical_agent_label("senpi"), None);
++        assert_eq!(parse_canonical_agent_label("omo"), Some(Agent::Senpi));
++        assert_eq!(parse_persisted_agent_label("senpi"), Some(Agent::Senpi));
++        assert_eq!(parse_persisted_agent_label("omo"), Some(Agent::Senpi));
++    }
++
+     #[test]
+     fn parse_known_agent_labels() {
+         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
+@@ -981,6 +1050,9 @@ mod tests {
+         assert_eq!(parse_agent_label("qwen-code"), Some(Agent::Qwen));
+         assert_eq!(parse_agent_label("letta-code"), Some(Agent::Letta));
+         assert_eq!(parse_agent_label("maki"), Some(Agent::Maki));
++        assert_eq!(parse_agent_label("senpi"), Some(Agent::Senpi));
++        assert_eq!(parse_agent_label("omo"), Some(Agent::Senpi));
++        assert_eq!(parse_agent_label("omo-native"), Some(Agent::Senpi));
+         assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
+     }
+ 
+@@ -1026,6 +1098,7 @@ mod tests {
+             (Agent::Qwen, "qwen"),
+             (Agent::Letta, "letta"),
+             (Agent::Maki, "maki"),
++            (Agent::Senpi, "omo"),
+             (Agent::Muse, "muse"),
+         ];
+         assert_eq!(expected.len(), Agent::ALL.len());
+@@ -1571,6 +1644,46 @@ Enter to select · Esc to cancel"#;
+         );
+     }
+ 
++    #[test]
++    fn identify_agent_in_job_detects_node_wrapped_senpi_package_cli() {
++        let job = crate::platform::ForegroundJob {
++            process_group_id: 42,
++            processes: vec![foreground_process(
++                42,
++                "node",
++                &[
++                    "node",
++                    "C:\\Users\\herdr\\AppData\\Roaming\\npm\\node_modules\\@code-yeongyu\\senpi\\dist\\cli.js",
++                ],
++            )],
++        };
++
++        assert_eq!(
++            identify_agent_in_job(&job),
++            Some((Agent::Senpi, "omo".to_string()))
++        );
++    }
++
++    #[test]
++    fn identify_agent_in_job_detects_bun_wrapped_senpi_bundled_cli() {
++        let job = crate::platform::ForegroundJob {
++            process_group_id: 84,
++            processes: vec![foreground_process(
++                84,
++                "bun",
++                &[
++                    "/home/jun/.bun/bin/bun",
++                    "/home/jun/.local/nodejs/node-v24.20.0-linux-x64/lib/node_modules/omo-ai/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js",
++                ],
++            )],
++        };
++
++        assert_eq!(
++            identify_agent_in_job(&job),
++            Some((Agent::Senpi, "omo".to_string()))
++        );
++    }
++
+     #[test]
+     fn identify_agent_in_job_detects_node_wrapped_pi_bundled_cli() {
+         let job = crate::platform::ForegroundJob {
+diff --git a/src/integration/mod.rs b/src/integration/mod.rs
+index daa714e0..8cbde705 100644
+--- a/src/integration/mod.rs
++++ b/src/integration/mod.rs
+@@ -7,6 +7,7 @@ mod env;
+ mod file_ops;
+ mod opencode_config;
+ mod registry;
++pub(crate) mod senpi;
+ mod targets;
+ mod types;
+ mod version;
+diff --git a/src/persist/restore.rs b/src/persist/restore.rs
+index 3c5775c9..69ec91f4 100644
+--- a/src/persist/restore.rs
++++ b/src/persist/restore.rs
+@@ -494,7 +494,7 @@ fn restore_tab(
+         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+         let saved_managed_agent = saved_pane
+             .and_then(|pane| pane.managed_agent_kind.as_deref())
+-            .and_then(crate::detect::parse_canonical_agent_label);
++            .and_then(crate::detect::parse_persisted_agent_label);
+         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
+         let saved_history =
+diff --git a/src/persist/snapshot.rs b/src/persist/snapshot.rs
+index 07aaf3b9..0651b250 100644
+--- a/src/persist/snapshot.rs
++++ b/src/persist/snapshot.rs
+@@ -330,7 +330,7 @@ fn capture_tab(
+                     terminal.agent_name.clone(),
+                     terminal
+                         .managed_agent_kind()
+-                        .map(|agent| crate::detect::agent_label(agent).to_string()),
++                        .map(|agent| crate::detect::agent_manifest_id(agent).to_string()),
+                 )
+             })
+             .unwrap_or_default();
+@@ -593,6 +593,39 @@ mod tests {
+         assert_eq!(active_pane.managed_agent_kind.as_deref(), Some("pi"));
+     }
+ 
++    #[test]
++    fn senpi_snapshot_keeps_legacy_storage_and_canonical_runtime_identity() {
++        let mut state = state_with_workspaces(&["senpi-snapshot"]);
++        let root = state.workspaces[0].tabs[0].root_pane;
++        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
++            .attached_terminal_id
++            .clone();
++        let now = std::time::Instant::now();
++        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
++        terminal.begin_managed_agent(
++            "reviewer".into(),
++            crate::detect::Agent::Senpi,
++            now,
++            std::time::Duration::ZERO,
++            std::time::Duration::from_secs(1),
++        );
++        terminal.set_detected_state(
++            Some(crate::detect::Agent::Senpi),
++            crate::detect::AgentState::Idle,
++        );
++        assert!(terminal.reconcile_managed_agent_at(now, false));
++        assert_eq!(terminal.effective_agent_label(), Some("omo"));
++        let snapshot = capture_from_state(&state);
++        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
++        assert_eq!(pane.managed_agent_kind.as_deref(), Some("senpi"));
++        assert_eq!(
++            pane.managed_agent_kind
++                .as_deref()
++                .and_then(crate::detect::parse_persisted_agent_label),
++            Some(crate::detect::Agent::Senpi),
++        );
++    }
++
+     #[test]
+     fn round_trip_empty_session() {
+         let snap = SessionSnapshot {
+diff --git a/distribution/agent-detection/senpi.toml b/distribution/agent-detection/senpi.toml
+new file mode 100644
+index 00000000..2121f34d
+--- /dev/null
++++ b/distribution/agent-detection/senpi.toml
+@@ -0,0 +1,176 @@
++id = "senpi"
++version = "2026.09.05.2"
++min_engine_version = 4
++updated_at = "2026-09-05T00:00:00Z"
++aliases = ["omo", "omo-senpi", "omo-native"]
++
++# Senpi powers the OmO Native coding-agent CLIs: npm @code-yeongyu/senpi
++# uses process.title / comm "senpi", while npm omo-ai exposes "omo".
++#
++# Working chrome (live herdr detection buffer, senpi 2026.8.7):
++#   "• Working (4m 27s • esc to interrupt)"
++# Context compaction uses a braille spinner and may leave overwritten text:
++#   "  ⠙ Compacting context... (esc to cancel)"
++#   "  ⠦ Compacting... (esc to cancel) ent benchmark implementation"
++# Active subagents render below the prompt box:
++#   " ⠏ Oracle review · agent:oracle(...) · turn 11 (...) · running · 3m 14s"
++# Latest source (Senpi 4df67dc87), rendered through a real Herdr PTY:
++# custom working indicators omit elapsed/interrupt hints: "⠴ Running eval".
++# Retry, branch summary, and automatic compaction use cancellation hints.
++# Default working alternates between • and ◦ without truecolor.
++# Permission prompts show
++# "Allow once" / "Allow always" / "Deny". Idle shows a bordered prompt
++# with "❯" and no interrupt suffix.
++
++[[rules]]
++id = "permission_prompt_blocked"
++state = "blocked"
++priority = 980
++region = "bottom_non_empty_lines(8)"
++visible_blocker = true
++line_regex = [
++  '^Permission required for .+$',
++  '^[ \t]*Allow once[ \t]*$',
++  '^[ \t]*Allow always[ \t]*$',
++  '^[ \t]*Deny[ \t]*$',
++]
++
++[[rules]]
++id = "permission_selector_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++# Current Senpi replaces the editor with a selector, including a selected arrow,
++# four choices and navigation hints. Retain the legacy prompt rule above.
++line_regex = [
++  '^ Permission required: [^\n]+$',
++  '^ → (?:Allow once|Allow always|Deny|Deny with feedback)[ \t]*$',
++  '^[ \t]*(?:→ )?Allow once[ \t]*$',
++  '^[ \t]*(?:→ )?Allow always[ \t]*$',
++  '^[ \t]*(?:→ )?Deny[ \t]*$',
++  '^[ \t]*(?:→ )?Deny with feedback[ \t]*$',
++]
++regex = ['(?m)^[ \t]*↑↓[ \t\n]+navigate[ \t\n]+[^ \t\n]+[ \t\n]+select[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "permission_feedback_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++line_regex = ['^ Feedback[ \t]*$', '^>[^\n]*$']
++regex = ['(?m)^[ \t]*[^ \t\n]+[ \t\n]+submit[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "compacting_context_working"
++state = "working"
++# Preserve goal/native attribution when compaction is displaced by widgets.
++priority = 904
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Compacting(?: context| before next prompt)?|Auto-compacting|Context overflow detected, compacting)(?:\.\.\.|…) \([^)\n]+ to cancel\)(?:[ \t]+[^\n]*)?(?:\n[^\n]*){0,3}\z']
++
++[[rules]]
++id = "retry_or_branch_summary_working"
++state = "working"
++priority = 910
++region = "senpi_current_status"
++visible_working = true
++regex = ['\A[ \t\n]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Retrying \([0-9]+/[0-9]+\)[ \t\n]+in[ \t\n]+[0-9]+s|Summarizing[ \t\n]+branch)(?:\.\.\.|…)[ \t\n]+\([^)]+[ \t\n]to[ \t\n]+cancel\)[ \t\n]*\z']
++
++[[rules]]
++id = "active_subagent_working"
++state = "working"
++priority = 905
++region = "after_last_horizontal_rule"
++visible_working = true
++line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category):.+ · running ·(?: .*)?[ \t]*$']
++
++[[rules]]
++id = "detached_eval_working"
++state = "working"
++priority = 904
++region = "senpi_current_footer"
++visible_working = true
++# Detached cells are removed from this footer on settlement; transcript cell boxes
++# and passive monitor/loop status text are deliberately not activity evidence.
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[ \t]+)?↗ (?:(?:js|py|rb|jl|ruby|julia) · |eval [1-9][0-9]*: )[^\n]+ \([0-9dhms ]+\)(?:[ \t]+(?:Pursuing goal|Goal (?:paused|blocked)|[▰▱]|Loop |◉ watching|mem:)[^\n]*)?[ \t]*$']
++# A completed goal objective can exactly reproduce live-eval + goal bytes.
++# Keep the conservative result for that unresolved information collision.
++not = [{ contains = [' · Goal achieved'] }]
++
++[[rules]]
++id = "btw_answering_working"
++state = "working"
++priority = 904
++region = "senpi_current_btw_panel"
++visible_working = true
++# Match the live panel's final cancellation row, not an answer quoting that row.
++regex = ['(?m)^[ \t]*btw: [^\n]+\n(?:[^\n]*\n)*[ \t]*answering… \(Esc to cancel\)[ \t]*\n[ \t]*─{3,}[ \t]*\n?[ \t]*\z']
++
++[[rules]]
++id = "wrapped_interrupt_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Working|Running [^\n]+)[^\n]*\([^)─❯\n]*(?:\n[ \t]*[^)─❯\n]*){1,3}to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "native_task_activity_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Exclude both "suspended" and its eight-column rendering "suspe...".
++# Rust regex has no lookaround: other lengths, or a differing character,
++# exclude exactly these fields without hiding another live task row.
++any = [
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^·\n]{1,7}|[^·\n]{10,}) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{7}|[^·\n]{1}[^u·\n][^·\n]{6}|[^·\n]{2}[^s·\n][^·\n]{5}|[^·\n]{3}[^p·\n][^·\n]{4}|[^·\n]{4}[^e·\n][^·\n]{3}|[^·\n]{5}[^\.·\n][^·\n]{2}|[^·\n]{6}[^\.·\n][^·\n]{1}|[^·\n]{7}[^\.·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{8}|[^·\n]{1}[^u·\n][^·\n]{7}|[^·\n]{2}[^s·\n][^·\n]{6}|[^·\n]{3}[^p·\n][^·\n]{5}|[^·\n]{4}[^e·\n][^·\n]{4}|[^·\n]{5}[^n·\n][^·\n]{3}|[^·\n]{6}[^d·\n][^·\n]{2}|[^·\n]{7}[^e·\n][^·\n]{1}|[^·\n]{8}[^d·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++]
++
++[[rules]]
++id = "active_dag_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Header fields may wrap at word boundaries. Only indented child rows may
++# intervene before the running node: never borrow a node from another parent.
++regex = ['(?m)^[ \t]*(?:▶ [^\n]+[ \t\n]+running|· [^\n]+[ \t\n]+resuming)[ \t\n]+wave[ \t\n]+[0-9]+/[0-9]+[ \t\n]+[0-9]+/[0-9]+[ \t\n]+done,[ \t\n]+[1-9][0-9]*[ \t\n]+running(?:,[ \t\n]+[0-9]+[ \t\n]+failed)?[ \t]*\n(?:[ \t]{3,}[^\n]*\n)*[ \t]{3,}▶ [^\n]+ · (?:agent|category):[^\n]+$']
++
++[[rules]]
++id = "goal_continuation_working"
++state = "working"
++priority = 905
++region = "senpi_current_footer"
++visible_working = true
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[^\n]*\b)?Pursuing goal(?: \([0-9dhms ]+\))?(?:[ \t]+.*)?$']
++not = [{ contains = ["Goal achieved"] }]
++
++[[rules]]
++id = "interrupt_suffix_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ \([^)\n]+ to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "custom_tool_indicator_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Running [a-zA-Z0-9_.-]+(?:: [^\n]+)?[ \t]*$']
++
++[[rules]]
++id = "working_literal"
++state = "working"
++priority = 100
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)\n]+\)|…|\.\.\.)?[ \t]*$']
+diff --git a/src/detect/manifest/senpi_regions.rs b/src/detect/manifest/senpi_regions.rs
+new file mode 100644
+index 00000000..6c95f176
+--- /dev/null
++++ b/src/detect/manifest/senpi_regions.rs
+@@ -0,0 +1,393 @@
++//! Senpi's current dock, distinct from the legacy generic border heuristics.
++//!
++//! The snapshot owns every byte. Parsing uses only borrowed slices and line
++//! offsets; the manifest evaluator caches this view once, not once per rule.
++
++use unicode_width::UnicodeWidthStr;
++
++pub(super) const ENGINE_VERSION: u32 = 4;
++
++#[derive(Debug, Clone, Copy)]
++pub(super) enum Region {
++    Dialog,
++    Status,
++    BtwPanel,
++    Footer,
++}
++
++impl Region {
++    pub(super) fn parse(name: &str) -> Option<Self> {
++        match name.trim() {
++            "senpi_current_dialog" => Some(Self::Dialog),
++            "senpi_current_status" => Some(Self::Status),
++            "senpi_current_btw_panel" => Some(Self::BtwPanel),
++            "senpi_current_footer" => Some(Self::Footer),
++            _ => None,
++        }
++    }
++}
++
++#[derive(Default)]
++pub(super) struct Regions<'a> {
++    dialog: &'a str,
++    status: &'a str,
++    btw_panel: &'a str,
++    footer: &'a str,
++}
++
++impl<'a> Regions<'a> {
++    pub(super) fn parse(screen: &'a str) -> Self {
++        let mut borders =
++            lines_rev(screen).filter_map(|line| border(line.text).map(|shape| (line, shape)));
++        let Some((bottom, bottom_shape)) = borders.next() else {
++            // Legacy captures can end at an unbordered prompt. Retain that
++            // bounded prefix, never the entire snapshot or a pasted prompt body.
++            let Some(prompt) = lines_rev(screen).find(|line| prompt_line(line.text)) else {
++                return Self::default();
++            };
++            return Self::dock(&screen[..prompt.start]);
++        };
++        let Some((top, top_shape)) = borders.next() else {
++            return Self::default();
++        };
++        if top_shape.width != bottom_shape.width
++            || bottom_shape.scrolled_up
++            || bottom_shape.status.is_some()
++        {
++            return Self::default();
++        }
++        let body = &screen[top.end..bottom.start];
++        let first = body
++            .lines()
++            .find(|line| !line.trim().is_empty())
++            .unwrap_or("");
++        let editor = prompt_line(first)
++            || (top_shape.scrolled_up
++                && body
++                    .lines()
++                    .all(|line| line.starts_with("  ") || line.trim().is_empty()));
++        let dialog = first.starts_with(" Permission required: ") || first.trim_end() == " Feedback";
++        if !editor && !dialog {
++            // Do not search behind an unknown current selector for an old editor.
++            return Self::default();
++        }
++        let mut result = Self::dock(&screen[..top.start]);
++        if let (true, Some(status)) = (editor, top_shape.status) {
++            result.status = status;
++        }
++        if dialog {
++            result.dialog = body;
++        }
++        result.footer = screen[bottom.end..]
++            .lines()
++            .rev()
++            .find(|line| !line.trim().is_empty())
++            .filter(|line| !line.starts_with([' ', '\t']))
++            .unwrap_or("");
++        result
++    }
++
++    pub(super) const fn get(&self, region: Region) -> &'a str {
++        match region {
++            Region::Dialog => self.dialog,
++            Region::Status => self.status,
++            Region::BtwPanel => self.btw_panel,
++            Region::Footer => self.footer,
++        }
++    }
++
++    fn dock(prefix: &'a str) -> Self {
++        let mut result = Self::default();
++        let mut block = DockBlock::Unknown;
++        let mut status_start = 0;
++        let mut rows = lines(prefix).peekable();
++        while let Some(line) = rows.next() {
++            if line.text.trim().is_empty() {
++                continue;
++            }
++            if let Some(shape) = border(line.text) {
++                if !block.valid_todo() {
++                    result.status = "";
++                }
++                if rows
++                    .peek()
++                    .is_some_and(|next| next.text.starts_with(" btw: "))
++                {
++                    // Text pads the question/answer, so its user-controlled
++                    // horizontal lines cannot close this column-zero panel.
++                    let closing = rows.find(|next| border(next.text).is_some());
++                    if let Some(closing) = closing.filter(|closing| {
++                        border(closing.text)
++                            .is_some_and(|closing_shape| closing_shape.width == shape.width)
++                    }) {
++                        result.btw_panel = &prefix[line.start..closing.end];
++                        block = DockBlock::Auxiliary;
++                        continue;
++                    }
++                }
++                result.status = "";
++                result.btw_panel = "";
++                block = DockBlock::Unknown;
++                continue;
++            }
++            if matches!(block, DockBlock::Todo { .. }) && line.text.starts_with(' ') {
++                if todo_task(line.text) {
++                    block = DockBlock::Todo { has_task: true };
++                }
++                continue;
++            }
++            if line.text.trim_end() == " Todo" {
++                block = DockBlock::Todo { has_task: false };
++                continue;
++            }
++            let trimmed = line.text.trim_start();
++            if trimmed.starts_with("Tip:")
++                || trimmed.starts_with('↳')
++                || trimmed.starts_with("Running PreToolUse hook")
++                || trimmed.starts_with("Running PostToolUse hook")
++            {
++                block = DockBlock::Auxiliary;
++                continue;
++            }
++            if spinner_line(trimmed) {
++                status_start = line.start;
++                result.status = &prefix[status_start..line.end];
++                block = DockBlock::Primary {
++                    compaction: trimmed.contains(" to cancel)") && trimmed.contains("ompacting"),
++                    stale_rows: 0,
++                };
++                continue;
++            }
++            match &mut block {
++                DockBlock::Primary {
++                    compaction,
++                    stale_rows,
++                } if line.text.starts_with([' ', '\t']) || (*compaction && *stale_rows < 3) => {
++                    // Older compaction captures include a few unindented
++                    // overwritten continuation rows. They cannot cross a border.
++                    *stale_rows += 1;
++                    result.status = &prefix[status_start..line.end];
++                }
++                DockBlock::Auxiliary if line.text.starts_with([' ', '\t']) => {}
++                DockBlock::Unknown
++                | DockBlock::Primary { .. }
++                | DockBlock::Auxiliary
++                | DockBlock::Todo { .. } => {
++                    result.status = "";
++                    result.btw_panel = "";
++                    block = DockBlock::Unknown;
++                }
++            }
++        }
++        if !block.valid_todo() {
++            result.status = "";
++            result.btw_panel = "";
++        }
++        result
++    }
++}
++
++#[derive(Default)]
++enum DockBlock {
++    #[default]
++    Unknown,
++    Primary {
++        compaction: bool,
++        stale_rows: usize,
++    },
++    Auxiliary,
++    Todo {
++        has_task: bool,
++    },
++}
++
++impl DockBlock {
++    const fn valid_todo(&self) -> bool {
++        !matches!(self, Self::Todo { has_task: false })
++    }
++}
++
++fn todo_task(line: &str) -> bool {
++    [" [ ] ", " [•] ", " [✓] ", " [×] "]
++        .iter()
++        .any(|prefix| line.starts_with(prefix))
++}
++
++fn spinner_line(line: &str) -> bool {
++    let mut chars = line.chars();
++    matches!(
++        chars.next(),
++        Some(
++            '•' | '◦'
++                | '●'
++                | '⠋'
++                | '⠙'
++                | '⠹'
++                | '⠸'
++                | '⠼'
++                | '⠴'
++                | '⠦'
++                | '⠧'
++                | '⠇'
++                | '⠏'
++        )
++    ) && chars.next() == Some(' ')
++}
++
++fn prompt_line(line: &str) -> bool {
++    line.trim_end() == "❯" || line.starts_with("❯ ")
++}
++
++struct Border<'a> {
++    width: usize,
++    scrolled_up: bool,
++    status: Option<&'a str>,
++}
++
++fn border(line: &str) -> Option<Border<'_>> {
++    // Keep indentation: trim_start() is exactly what lets editor content
++    // impersonate chrome in the legacy generic region.
++    let line = line.trim_end();
++    if let Some((status, _)) = line
++        .strip_prefix("── ")
++        .and_then(|text| text.rsplit_once(" ─"))
++        .filter(|(status, tail)| spinner_line(status) && tail.chars().all(|ch| ch == '─'))
++    {
++        return Some(Border {
++            width: line.width(),
++            scrolled_up: false,
++            status: Some(status),
++        });
++    }
++    if !line.starts_with("───") {
++        return None;
++    }
++    let scrolled_up = line.starts_with("─── ↑ ");
++    if let Some(scroll) = line
++        .strip_prefix("─── ↑ ")
++        .or_else(|| line.strip_prefix("─── ↓ "))
++    {
++        let (count, tail) = scroll.split_once(" more ")?;
++        if count.is_empty()
++            || count.starts_with('0')
++            || !count.bytes().all(|byte| byte.is_ascii_digit())
++            || !tail.chars().all(|ch| ch == '─')
++        {
++            return None;
++        }
++    } else if !line.chars().all(|ch| ch == '─') {
++        return None;
++    }
++    Some(Border {
++        width: line.chars().count(),
++        scrolled_up,
++        status: None,
++    })
++}
++
++struct Line<'a> {
++    start: usize,
++    end: usize,
++    text: &'a str,
++}
++
++fn lines(text: &str) -> impl Iterator<Item = Line<'_>> {
++    let mut offset = 0;
++    text.split_inclusive('\n').map(move |chunk| {
++        let start = offset;
++        offset += chunk.len();
++        Line {
++            start,
++            end: offset,
++            text: chunk.trim_end_matches(['\r', '\n']),
++        }
++    })
++}
++
++fn lines_rev(text: &str) -> impl Iterator<Item = Line<'_>> {
++    let mut offset = text.len();
++    text.split_inclusive('\n').rev().map(move |chunk| {
++        let end = offset;
++        offset -= chunk.len();
++        Line {
++            start: offset,
++            end,
++            text: chunk.trim_end_matches(['\r', '\n']),
++        }
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn status_embedded_in_current_editor_border_is_live() {
++        let status = "• Working (12s • esc to interrupt)";
++        let top = format!("── {status} {}", "─".repeat(40));
++        let bottom = "─".repeat(top.chars().count());
++        let screen = format!("old output\n{top}\n❯\n{bottom}\nfooter\n");
++        let parsed = Regions::parse(&screen);
++        assert_eq!(parsed.get(Region::Status), status);
++        assert_eq!(parsed.get(Region::Footer), "footer");
++    }
++
++    #[test]
++    fn status_pasted_inside_editor_border_is_not_live() {
++        let screen = "────────────────────────────────────────────────────\n❯ text\n  ── • Working (12s • esc to interrupt) ───────────────\n────────────────────────────────────────────────────\nfooter\n";
++        assert_eq!(Regions::parse(screen).get(Region::Status), "");
++    }
++
++    #[test]
++    fn indented_separators_remain_inside_the_editor() {
++        let screen =
++            " ⠋ Working\n──────────\n❯ text\n  ──────\n  ⠋ Running eval\n──────────\nfooter\n";
++        let parsed = Regions::parse(screen);
++        assert_eq!(parsed.get(Region::Status), " ⠋ Working\n");
++        assert_eq!(parsed.get(Region::Footer), "footer");
++        assert_eq!(parsed.get(Region::Dialog), "");
++    }
++
++    #[test]
++    fn scrolled_editor_cannot_be_a_permission_dialog() {
++        let screen = "─── ↑ 1 more ───────\n  Permission required: bash\n  → Allow once\n────────────────────\nfooter\n";
++        let parsed = Regions::parse(screen);
++        assert_eq!(parsed.get(Region::Dialog), "");
++        assert_eq!(parsed.get(Region::Footer), "footer");
++    }
++
++    #[test]
++    fn unknown_current_dialog_does_not_expose_the_previous_editor() {
++        let screen = " ⠋ Working\n──────────\n❯\n──────────\n──────────\n Unrelated dialog\n──────────\nfooter\n";
++        let parsed = Regions::parse(screen);
++        assert_eq!(parsed.get(Region::Status), "");
++        assert_eq!(parsed.get(Region::Dialog), "");
++    }
++
++    #[test]
++    fn selected_regions_are_borrowed_for_varied_unicode_and_line_endings() {
++        for width in [20, 40, 80, 110] {
++            for text in ["plain", "한글", "😺", "e\u{301}", "─"] {
++                for newline in ["\n", "\r\n"] {
++                    let border = "─".repeat(width);
++                    let screen = format!(" ⠋ Working{newline}{border}{newline}❯ {text}{newline}{border}{newline}{text}{newline}");
++                    let parsed = Regions::parse(&screen);
++                    assert_eq!(parsed.get(Region::Status).trim_end(), " ⠋ Working");
++                    assert_eq!(parsed.get(Region::Footer), text);
++                    for region in [
++                        Region::Status,
++                        Region::Dialog,
++                        Region::BtwPanel,
++                        Region::Footer,
++                    ] {
++                        let selected = parsed.get(region);
++                        if !selected.is_empty() {
++                            let offset = selected.as_ptr().addr() - screen.as_ptr().addr();
++                            assert_eq!(&screen[offset..offset + selected.len()], selected);
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/src/detect/manifests/senpi.toml b/src/detect/manifests/senpi.toml
+new file mode 100644
+index 00000000..2121f34d
+--- /dev/null
++++ b/src/detect/manifests/senpi.toml
+@@ -0,0 +1,176 @@
++id = "senpi"
++version = "2026.09.05.2"
++min_engine_version = 4
++updated_at = "2026-09-05T00:00:00Z"
++aliases = ["omo", "omo-senpi", "omo-native"]
++
++# Senpi powers the OmO Native coding-agent CLIs: npm @code-yeongyu/senpi
++# uses process.title / comm "senpi", while npm omo-ai exposes "omo".
++#
++# Working chrome (live herdr detection buffer, senpi 2026.8.7):
++#   "• Working (4m 27s • esc to interrupt)"
++# Context compaction uses a braille spinner and may leave overwritten text:
++#   "  ⠙ Compacting context... (esc to cancel)"
++#   "  ⠦ Compacting... (esc to cancel) ent benchmark implementation"
++# Active subagents render below the prompt box:
++#   " ⠏ Oracle review · agent:oracle(...) · turn 11 (...) · running · 3m 14s"
++# Latest source (Senpi 4df67dc87), rendered through a real Herdr PTY:
++# custom working indicators omit elapsed/interrupt hints: "⠴ Running eval".
++# Retry, branch summary, and automatic compaction use cancellation hints.
++# Default working alternates between • and ◦ without truecolor.
++# Permission prompts show
++# "Allow once" / "Allow always" / "Deny". Idle shows a bordered prompt
++# with "❯" and no interrupt suffix.
++
++[[rules]]
++id = "permission_prompt_blocked"
++state = "blocked"
++priority = 980
++region = "bottom_non_empty_lines(8)"
++visible_blocker = true
++line_regex = [
++  '^Permission required for .+$',
++  '^[ \t]*Allow once[ \t]*$',
++  '^[ \t]*Allow always[ \t]*$',
++  '^[ \t]*Deny[ \t]*$',
++]
++
++[[rules]]
++id = "permission_selector_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++# Current Senpi replaces the editor with a selector, including a selected arrow,
++# four choices and navigation hints. Retain the legacy prompt rule above.
++line_regex = [
++  '^ Permission required: [^\n]+$',
++  '^ → (?:Allow once|Allow always|Deny|Deny with feedback)[ \t]*$',
++  '^[ \t]*(?:→ )?Allow once[ \t]*$',
++  '^[ \t]*(?:→ )?Allow always[ \t]*$',
++  '^[ \t]*(?:→ )?Deny[ \t]*$',
++  '^[ \t]*(?:→ )?Deny with feedback[ \t]*$',
++]
++regex = ['(?m)^[ \t]*↑↓[ \t\n]+navigate[ \t\n]+[^ \t\n]+[ \t\n]+select[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "permission_feedback_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++line_regex = ['^ Feedback[ \t]*$', '^>[^\n]*$']
++regex = ['(?m)^[ \t]*[^ \t\n]+[ \t\n]+submit[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "compacting_context_working"
++state = "working"
++# Preserve goal/native attribution when compaction is displaced by widgets.
++priority = 904
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Compacting(?: context| before next prompt)?|Auto-compacting|Context overflow detected, compacting)(?:\.\.\.|…) \([^)\n]+ to cancel\)(?:[ \t]+[^\n]*)?(?:\n[^\n]*){0,3}\z']
++
++[[rules]]
++id = "retry_or_branch_summary_working"
++state = "working"
++priority = 910
++region = "senpi_current_status"
++visible_working = true
++regex = ['\A[ \t\n]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Retrying \([0-9]+/[0-9]+\)[ \t\n]+in[ \t\n]+[0-9]+s|Summarizing[ \t\n]+branch)(?:\.\.\.|…)[ \t\n]+\([^)]+[ \t\n]to[ \t\n]+cancel\)[ \t\n]*\z']
++
++[[rules]]
++id = "active_subagent_working"
++state = "working"
++priority = 905
++region = "after_last_horizontal_rule"
++visible_working = true
++line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category):.+ · running ·(?: .*)?[ \t]*$']
++
++[[rules]]
++id = "detached_eval_working"
++state = "working"
++priority = 904
++region = "senpi_current_footer"
++visible_working = true
++# Detached cells are removed from this footer on settlement; transcript cell boxes
++# and passive monitor/loop status text are deliberately not activity evidence.
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[ \t]+)?↗ (?:(?:js|py|rb|jl|ruby|julia) · |eval [1-9][0-9]*: )[^\n]+ \([0-9dhms ]+\)(?:[ \t]+(?:Pursuing goal|Goal (?:paused|blocked)|[▰▱]|Loop |◉ watching|mem:)[^\n]*)?[ \t]*$']
++# A completed goal objective can exactly reproduce live-eval + goal bytes.
++# Keep the conservative result for that unresolved information collision.
++not = [{ contains = [' · Goal achieved'] }]
++
++[[rules]]
++id = "btw_answering_working"
++state = "working"
++priority = 904
++region = "senpi_current_btw_panel"
++visible_working = true
++# Match the live panel's final cancellation row, not an answer quoting that row.
++regex = ['(?m)^[ \t]*btw: [^\n]+\n(?:[^\n]*\n)*[ \t]*answering… \(Esc to cancel\)[ \t]*\n[ \t]*─{3,}[ \t]*\n?[ \t]*\z']
++
++[[rules]]
++id = "wrapped_interrupt_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Working|Running [^\n]+)[^\n]*\([^)─❯\n]*(?:\n[ \t]*[^)─❯\n]*){1,3}to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "native_task_activity_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Exclude both "suspended" and its eight-column rendering "suspe...".
++# Rust regex has no lookaround: other lengths, or a differing character,
++# exclude exactly these fields without hiding another live task row.
++any = [
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^·\n]{1,7}|[^·\n]{10,}) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{7}|[^·\n]{1}[^u·\n][^·\n]{6}|[^·\n]{2}[^s·\n][^·\n]{5}|[^·\n]{3}[^p·\n][^·\n]{4}|[^·\n]{4}[^e·\n][^·\n]{3}|[^·\n]{5}[^\.·\n][^·\n]{2}|[^·\n]{6}[^\.·\n][^·\n]{1}|[^·\n]{7}[^\.·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{8}|[^·\n]{1}[^u·\n][^·\n]{7}|[^·\n]{2}[^s·\n][^·\n]{6}|[^·\n]{3}[^p·\n][^·\n]{5}|[^·\n]{4}[^e·\n][^·\n]{4}|[^·\n]{5}[^n·\n][^·\n]{3}|[^·\n]{6}[^d·\n][^·\n]{2}|[^·\n]{7}[^e·\n][^·\n]{1}|[^·\n]{8}[^d·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++]
++
++[[rules]]
++id = "active_dag_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Header fields may wrap at word boundaries. Only indented child rows may
++# intervene before the running node: never borrow a node from another parent.
++regex = ['(?m)^[ \t]*(?:▶ [^\n]+[ \t\n]+running|· [^\n]+[ \t\n]+resuming)[ \t\n]+wave[ \t\n]+[0-9]+/[0-9]+[ \t\n]+[0-9]+/[0-9]+[ \t\n]+done,[ \t\n]+[1-9][0-9]*[ \t\n]+running(?:,[ \t\n]+[0-9]+[ \t\n]+failed)?[ \t]*\n(?:[ \t]{3,}[^\n]*\n)*[ \t]{3,}▶ [^\n]+ · (?:agent|category):[^\n]+$']
++
++[[rules]]
++id = "goal_continuation_working"
++state = "working"
++priority = 905
++region = "senpi_current_footer"
++visible_working = true
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[^\n]*\b)?Pursuing goal(?: \([0-9dhms ]+\))?(?:[ \t]+.*)?$']
++not = [{ contains = ["Goal achieved"] }]
++
++[[rules]]
++id = "interrupt_suffix_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ \([^)\n]+ to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "custom_tool_indicator_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Running [a-zA-Z0-9_.-]+(?:: [^\n]+)?[ \t]*$']
++
++[[rules]]
++id = "working_literal"
++state = "working"
++priority = 100
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)\n]+\)|…|\.\.\.)?[ \t]*$']
+diff --git a/src/integration/assets/senpi/herdr-agent-state.test.ts b/src/integration/assets/senpi/herdr-agent-state.test.ts
+new file mode 100644
+index 00000000..3e7c07ca
+--- /dev/null
++++ b/src/integration/assets/senpi/herdr-agent-state.test.ts
+@@ -0,0 +1,246 @@
++import { describe, expect, test } from "bun:test";
++import { mkdtemp, rm } from "node:fs/promises";
++import net from "node:net";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import extension, { createReporter, sendSignal } from "./herdr-agent-state";
++
++const count = (activeCount: number) => ({ source: "senpi-codemode", activeCount });
++
++function fixture() {
++  let active = false;
++  const reports: { active: boolean; seq: number }[] = [];
++  const reporter = createReporter(async (next, seq) => {
++    active = next;
++    reports.push({ active: next, seq });
++  });
++  return { reporter, reports, isActive: () => active };
++}
++
++describe("Senpi detached eval authority", () => {
++  test("reports live detached work and releases when the last cell settles", async () => {
++    const f = fixture();
++    await f.reporter.start(true);
++    await f.reporter.observe(count(1));
++    expect(f.isActive()).toBe(true);
++    await f.reporter.observe(count(0));
++    expect(f.isActive()).toBe(false);
++    expect(f.reports.map((r) => r.active)).toEqual([true, false]);
++    expect(f.reports[1]?.seq).toBeGreaterThan(f.reports[0]?.seq ?? 0);
++  });
++
++  test("full snapshots do not double count or republish unchanged authority", async () => {
++    const f = fixture();
++    await f.reporter.start(true);
++    for (const n of [1, 2, 2, 1]) await f.reporter.observe(count(n));
++    expect(f.isActive()).toBe(true);
++    expect(f.reports).toHaveLength(1);
++    await f.reporter.observe(count(0));
++    expect(f.isActive()).toBe(false);
++  });
++
++  test("preserves a producer snapshot delivered before session-start binding", async () => {
++    const f = fixture();
++    await f.reporter.observe(count(1));
++    expect(f.isActive()).toBe(false);
++    await f.reporter.start(true);
++    expect(f.isActive()).toBe(true);
++  });
++
++  test("headless contexts and unrelated or malformed sources cannot claim the pane", async () => {
++    const f = fixture();
++    await f.reporter.start(false);
++    await f.reporter.observe(count(1));
++    expect(f.reports).toHaveLength(0);
++    await f.reporter.stop();
++    await f.reporter.start(true);
++    for (const event of [
++      { source: "terminal", activeCount: 1 }, count(-1), count(0.5),
++      count(Number.NaN), count(Number.POSITIVE_INFINITY), null, {},
++    ]) await f.reporter.observe(event);
++    expect(f.isActive()).toBe(false);
++    expect(f.reports).toHaveLength(0);
++  });
++
++  test("session teardown invalidates reports that have not started", async () => {
++    const f = fixture();
++    await f.reporter.start(true);
++    const pending = f.reporter.observe(count(1));
++    const stopped = f.reporter.stop();
++    await Promise.all([pending, stopped]);
++    expect(f.isActive()).toBe(false);
++    expect(f.reports).toHaveLength(0);
++  });
++
++  test("teardown releases an in-flight old generation before new work reports", async () => {
++    const entered = Promise.withResolvers<void>();
++    const acknowledge = Promise.withResolvers<void>();
++    const states: boolean[] = [];
++    let first = true;
++    const reporter = createReporter(async (active) => {
++      states.push(active);
++      if (active && first) {
++        first = false;
++        entered.resolve();
++        await acknowledge.promise;
++      }
++    });
++    await reporter.start(true);
++    const oldReport = reporter.observe(count(1));
++    await entered.promise;
++    const stop = reporter.stop();
++    const snapshot = reporter.observe(count(1));
++    const start = reporter.start(true);
++    acknowledge.resolve();
++    await Promise.all([oldReport, stop, snapshot, start]);
++    expect(states).toEqual([true, false, true]);
++    await reporter.stop();
++    expect(states.at(-1)).toBe(false);
++  });
++
++  test("failed acknowledgement still requires release of possibly applied authority", async () => {
++    let active = false;
++    let first = true;
++    const reporter = createReporter(async (next) => {
++      active = next;
++      if (first) {
++        first = false;
++        throw new Error("acknowledgement lost after applying report");
++      }
++    });
++    await reporter.start(true);
++    await expect(reporter.observe(count(1))).rejects.toThrow("acknowledgement lost");
++    expect(active).toBe(true);
++    await reporter.observe(count(0));
++    expect(active).toBe(false);
++  });
++});
++
++async function withServer(
++  reply: (request: { id: string; method: string; params: Record<string, unknown> }) => unknown,
++  run: (socket: string) => Promise<void>,
++) {
++  const dir = await mkdtemp(path.join(tmpdir(), "herdr-senpi-"));
++  const socketPath = process.platform === "win32" ? path.basename(dir) : path.join(dir, "s.sock");
++  const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
++  const server = net.createServer((socket) => {
++    let data = "";
++    socket.on("data", (chunk) => {
++      data += chunk.toString();
++      if (!data.includes("\n")) return;
++      socket.end(JSON.stringify(reply(JSON.parse(data.trim()))) + "\n");
++    });
++  });
++  try {
++    await new Promise<void>((resolve, reject) => {
++      server.once("error", reject);
++      server.listen(endpoint, resolve);
++    });
++    await run(socketPath);
++  } finally {
++    await new Promise<void>((resolve) => server.close(() => resolve()));
++    await rm(dir, { recursive: true, force: true });
++  }
++}
++
++test("rejects mismatched API acknowledgement rather than assuming delivery", async () => {
++  await withServer(
++    () => ({ id: "another-request", result: { type: "ok" } }),
++    (socket) => expect(sendSignal(socket, "w1:p1", true, 11)).rejects.toThrow(),
++  );
++});
++
++test("report and release use acknowledged API methods without an idle report", async () => {
++  const methods: string[] = [];
++  let active = false;
++  await withServer((request) => {
++    expect(request.params.pane_id).toBe("w1:p1");
++    expect(request.params.agent).toBe("omo");
++    expect(request.params.source).toBe("herdr:senpi-detached-eval");
++    methods.push(request.method);
++    if (request.method === "pane.report_agent") {
++      expect(request.params.state).toBe("working");
++      active = true;
++    } else {
++      expect(request.params.state).toBeUndefined();
++      active = false;
++    }
++    return { id: request.id, result: { type: "ok" } };
++  }, async (socket) => {
++    await sendSignal(socket, "w1:p1", true, 12);
++    expect(active).toBe(true);
++    await sendSignal(socket, "w1:p1", false, 13);
++    expect(active).toBe(false);
++  });
++  expect(methods).toEqual(["pane.report_agent", "pane.release_agent"]);
++});
++
++test("rejects explicit API errors", async () => {
++  await withServer(
++    (request) => ({ id: request.id, error: { code: "rejected", message: "not owner" } }),
++    (socket) => expect(sendSignal(socket, "w1:p1", true, 14)).rejects.toThrow(),
++  );
++});
++
++function extensionHost() {
++  type Api = Parameters<typeof extension>[0];
++  type Handler = Parameters<Api["on"]>[1];
++  const handlers = new Map<string, Handler>();
++  const events = new Map<string, (event: unknown) => Promise<void>>();
++  const api: Api = {
++    events: {
++      on(channel, handler) {
++        events.set(channel, handler);
++        return () => { events.delete(channel); };
++      },
++    },
++    on(event, handler) { handlers.set(event, handler); },
++  };
++  return {
++    api,
++    events,
++    async lifecycle(name: string, hasUI = true) {
++      await handlers.get(name)?.({}, { hasUI });
++    },
++    async snapshot(activeCount: number) {
++      await events.get("wake_source_state")?.(count(activeCount));
++    },
++  };
++}
++
++test("real extension wiring retains detached work after foreground end and releases on switch", async () => {
++  let active = false;
++  await withServer((request) => {
++    active = request.method === "pane.report_agent";
++    return { id: request.id, result: { type: "ok" } };
++  }, async (socket) => {
++    const host = extensionHost();
++    extension(host.api, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "w1:p1" });
++    await host.snapshot(1);
++    expect(active).toBe(false);
++    await host.lifecycle("session_start");
++    expect(active).toBe(true);
++    await host.lifecycle("agent_end");
++    expect(active).toBe(true);
++    await host.lifecycle("session_before_switch");
++    expect(active).toBe(false);
++    await host.snapshot(1);
++    expect(active).toBe(false);
++    await host.lifecycle("session_start");
++    expect(active).toBe(true);
++    await host.lifecycle("session_shutdown");
++    expect(active).toBe(false);
++    expect(host.events.size).toBe(0);
++  });
++});
++
++test("team children cannot attach an inherited parent-pane reporter", async () => {
++  const host = extensionHost();
++  extension(host.api, {
++    HERDR_ENV: "1", HERDR_SOCKET_PATH: "unused", HERDR_PANE_ID: "w1:p1",
++    SENPI_TASK_MEMBER: "reviewer",
++  });
++  await host.lifecycle("session_start");
++  await host.snapshot(1);
++  expect(host.events.size).toBe(0);
++});
+diff --git a/src/integration/assets/senpi/herdr-agent-state.ts b/src/integration/assets/senpi/herdr-agent-state.ts
+new file mode 100644
+index 00000000..48a1bfe1
+--- /dev/null
++++ b/src/integration/assets/senpi/herdr-agent-state.ts
+@@ -0,0 +1,170 @@
++// installed by herdr
++// managed by herdr; reinstall this integration after updating herdr.
++// HERDR_INTEGRATION_ID=senpi
++// HERDR_INTEGRATION_VERSION=1
++
++import net from "node:net";
++
++const source = "herdr:senpi-detached-eval";
++let sequence = Date.now() * 1000;
++
++export type Publish = (active: boolean, seq: number) => Promise<void>;
++
++class IntegrationError extends Error {
++  constructor(message: string, options?: ErrorOptions) {
++    super(message, options);
++    this.name = "HerdrSenpiIntegrationError";
++  }
++}
++
++function acknowledged(value: unknown, id: string): boolean {
++  return value !== null && typeof value === "object"
++    && "id" in value && value.id === id
++    && !("error" in value)
++    && "result" in value && value.result !== null && typeof value.result === "object"
++    && "type" in value.result && value.result.type === "ok";
++}
++
++export function sendSignal(
++  socketPath: string, paneId: string, active: boolean, seq: number,
++): Promise<void> {
++  const id = `${source}:${seq}`;
++  const request = {
++    id,
++    method: active ? "pane.report_agent" : "pane.release_agent",
++    params: {
++      pane_id: paneId, source, agent: "omo", seq,
++      ...(active ? { state: "working" } : {}),
++    },
++  };
++  const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
++  return new Promise<void>((resolve, reject) => {
++    const socket = net.createConnection(endpoint);
++    let response = "";
++    let settled = false;
++    const finish = (error?: Error) => {
++      if (settled) return;
++      settled = true;
++      socket.destroy();
++      if (error) reject(error);
++      else resolve();
++    };
++    socket.setTimeout(2000, () => finish(new IntegrationError("Herdr acknowledgement timed out")));
++    socket.once("error", (error) => finish(error));
++    socket.once("end", () => finish(new IntegrationError("Herdr closed before acknowledgement")));
++    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
++    socket.on("data", (chunk: Buffer) => {
++      response += chunk.toString("utf8");
++      if (response.length > 65536) {
++        finish(new IntegrationError("Herdr response exceeded 64 KiB"));
++        return;
++      }
++      const end = response.indexOf("\n");
++      if (end < 0) return;
++      try {
++        const value: unknown = JSON.parse(response.slice(0, end));
++        finish(acknowledged(value, id) ? undefined : new IntegrationError("Herdr rejected the state report"));
++      } catch (error) {
++        if (!(error instanceof SyntaxError)) throw error;
++        finish(new IntegrationError("Invalid Herdr acknowledgement", { cause: error }));
++      }
++    });
++  });
++}
++
++function detachedCount(event: unknown): number | undefined {
++  if (event === null || typeof event !== "object"
++    || !("source" in event) || event.source !== "senpi-codemode"
++    || !("activeCount" in event) || typeof event.activeCount !== "number"
++    || !Number.isSafeInteger(event.activeCount) || event.activeCount < 0) return undefined;
++  return event.activeCount;
++}
++
++export function createReporter(publish: Publish) {
++  let enabled = false;
++  let count: number | undefined;
++  let generation = 0;
++  let published: "released" | "working" | "unknown" = "released";
++  let queue = Promise.resolve();
++
++  const enqueue = (operation: () => Promise<void>) => {
++    // A later release must still run after an earlier request failed.
++    // Each returned rejection is observed by Senpi's extension error boundary.
++    queue = queue.then(operation, operation);
++    return queue;
++  };
++  const publishState = async (active: boolean) => {
++    if (published === (active ? "working" : "released")) return;
++    // A request can be applied even if its acknowledgement is lost.
++    // Keep release mandatory until its own acknowledgement succeeds.
++    published = "unknown";
++    await publish(active, ++sequence);
++    published = active ? "working" : "released";
++  };
++  const reconcile = () => {
++    const current = generation;
++    return enqueue(async () => {
++      if (current !== generation) return;
++      await publishState(enabled && count !== undefined && count > 0);
++    });
++  };
++
++  return {
++    start(hasUI: boolean): Promise<void> {
++      enabled = hasUI;
++      // Do not erase a producer snapshot delivered earlier in session_start.
++      return reconcile();
++    },
++    observe(event: unknown): Promise<void> {
++      const next = detachedCount(event);
++      if (next === undefined) return Promise.resolve();
++      count = next;
++      return reconcile();
++    },
++    stop(): Promise<void> {
++      enabled = false;
++      count = undefined;
++      generation += 1;
++      // Unconditionally reconcile the OLD ownership before a new session reports.
++      return enqueue(() => publishState(false));
++    },
++  };
++}
++
++type SessionContext = { readonly hasUI: boolean };
++type SessionHandler = (event: unknown, context: SessionContext) => Promise<void>;
++type LifecycleEvent = "session_start" | "session_before_switch" | "session_before_fork" | "session_shutdown";
++interface SenpiExtensionApi {
++  readonly events: {
++    on(channel: string, handler: (event: unknown) => Promise<void>): () => void;
++  };
++  on(event: LifecycleEvent, handler: SessionHandler): void;
++}
++
++type Environment = {
++  readonly HERDR_ENV?: string;
++  readonly HERDR_SOCKET_PATH?: string;
++  readonly HERDR_PANE_ID?: string;
++  readonly SENPI_TASK_MEMBER?: string;
++};
++
++// Senpi's extension loader requires a default entry point.
++export default function senpiDetachedEval(
++  pi: SenpiExtensionApi, env: Environment = process.env,
++): void {
++  const socketPath = env.HERDR_SOCKET_PATH;
++  const paneId = env.HERDR_PANE_ID;
++  if (env.HERDR_ENV !== "1" || !socketPath || !paneId || env.SENPI_TASK_MEMBER) return;
++  const reporter = createReporter((active, seq) => sendSignal(socketPath, paneId, active, seq));
++  const unsubscribe = pi.events.on("wake_source_state", (event) => reporter.observe(event));
++  pi.on("session_start", (_event, ctx) => reporter.start(ctx.hasUI));
++  pi.on("session_before_switch", () => reporter.stop());
++  pi.on("session_before_fork", () => reporter.stop());
++  pi.on("session_shutdown", async () => {
++    try {
++      await reporter.stop();
++    } finally {
++      unsubscribe();
++    }
++  });
++}
+diff --git a/src/integration/senpi.rs b/src/integration/senpi.rs
+new file mode 100644
+index 00000000..22e646df
+--- /dev/null
++++ b/src/integration/senpi.rs
+@@ -0,0 +1,261 @@
++//! Local CLI packaging only: these brands must not enter the frozen API target enum.
++use std::fs::{self, OpenOptions};
++use std::io::{self, Write};
++use std::path::{Path, PathBuf};
++
++use super::env::{expand_tilde_path, home_dir, omp_extension_dir, pi_extension_dir};
++use super::file_ops::remove_file_if_exists;
++use super::registry::parse_integration_version;
++use super::IntegrationStatusKind;
++
++const INSTALL_NAME: &str = "herdr-senpi-agent-state.ts";
++const ASSET: &str = include_str!("assets/senpi/herdr-agent-state.ts");
++pub(crate) const VERSION: u32 = 1;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum Brand {
++    Omo,
++    Senpi,
++}
++
++impl Brand {
++    pub(crate) const ALL: [Self; 2] = [Self::Omo, Self::Senpi];
++
++    pub(crate) const fn label(self) -> &'static str {
++        match self {
++            Self::Omo => "omo",
++            Self::Senpi => "senpi",
++        }
++    }
++
++    const fn config_name(self) -> &'static str {
++        match self {
++            Self::Omo => ".omo",
++            Self::Senpi => ".senpi",
++        }
++    }
++
++    const fn env_names(self) -> &'static [&'static str] {
++        match self {
++            Self::Omo => &[
++                "OMO_CODING_AGENT_DIR",
++                "SENPI_CODING_AGENT_DIR",
++                "PI_CODING_AGENT_DIR",
++            ],
++            Self::Senpi => &["SENPI_CODING_AGENT_DIR", "PI_CODING_AGENT_DIR"],
++        }
++    }
++
++    pub(crate) fn path(self) -> io::Result<PathBuf> {
++        let agent_dir = match self {
++            Self::Omo => {
++                // OMO's launcher pins the engine directory before starting Senpi.
++                let configured = self.env_names().iter().find_map(|name| {
++                    std::env::var(name)
++                        .ok()
++                        .map(|value| value.trim().to_owned())
++                        .filter(|value| !value.is_empty())
++                });
++                match configured {
++                    Some(path) => std::path::absolute(path)?,
++                    None => home_dir()?.join(".omo").join("agent"),
++                }
++            }
++            Self::Senpi => {
++                // Senpi uses the first DEFINED value, including empty values.
++                let override_dir = self.env_names().iter().find_map(std::env::var_os);
++                if let Some(value) = override_dir.filter(|value| !value.is_empty()) {
++                    let path = PathBuf::from(value);
++                    let raw = path.to_string_lossy();
++                    if raw.starts_with("file://") {
++                        return Err(io::Error::other(
++                            "use a native filesystem path for the agent directory, not a file URL",
++                        ));
++                    }
++                    let expand = raw == "~" || raw.starts_with("~/");
++                    #[cfg(windows)]
++                    let expand = expand || raw.starts_with("~\\");
++                    if expand {
++                        expand_tilde_path(path)?
++                    } else {
++                        path
++                    }
++                } else {
++                    project_agent_dir(self, &std::env::current_dir()?, &home_dir()?)
++                }
++            }
++        };
++        Ok(agent_dir.join("extensions").join(INSTALL_NAME))
++    }
++}
++
++// Mirrors Senpi 4df67dc87 resolveAgentDir/findNearestParentConfigDir:
++// home excluded, depth 0..=100, neither config nor agent may be a symlink.
++fn project_agent_dir(brand: Brand, cwd: &Path, home: &Path) -> PathBuf {
++    for current in cwd.ancestors().take(101) {
++        if current == home {
++            break;
++        }
++        let config = current.join(brand.config_name());
++        let agent = config.join("agent");
++        if [config, agent.clone()]
++            .iter()
++            .all(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
++        {
++            return agent;
++        }
++    }
++    home.join(brand.config_name()).join("agent")
++}
++
++pub(crate) struct Status {
++    pub path: PathBuf,
++    pub state: IntegrationStatusKind,
++    pub installed_version: Option<u32>,
++}
++
++pub(crate) fn status(brand: Brand) -> io::Result<Status> {
++    status_at(brand.path()?)
++}
++
++fn status_at(path: PathBuf) -> io::Result<Status> {
++    let content = owned_content(&path)?;
++    let installed_version = content.as_deref().and_then(parse_integration_version);
++    let state = match content.as_deref() {
++        None => IntegrationStatusKind::NotInstalled,
++        Some(content) if content == ASSET => IntegrationStatusKind::Current,
++        Some(_) => IntegrationStatusKind::Outdated,
++    };
++    Ok(Status {
++        path,
++        state,
++        installed_version,
++    })
++}
++
++fn owned_content(path: &Path) -> io::Result<Option<String>> {
++    // Do not follow an extensions-directory alias into another agent's files.
++    if let Some(dir) = path.parent() {
++        match fs::symlink_metadata(dir) {
++            Ok(metadata) if metadata.file_type().is_symlink() => {
++                return Err(io::Error::other(format!(
++                    "refusing symlinked extensions directory at {}",
++                    dir.display()
++                )));
++            }
++            Ok(_) => {}
++            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
++            Err(err) => return Err(err),
++        }
++    }
++    let metadata = match fs::symlink_metadata(path) {
++        Ok(metadata) => metadata,
++        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
++        Err(err) => return Err(err),
++    };
++    if metadata.is_file() {
++        let content = fs::read_to_string(path)?;
++        if content
++            .lines()
++            .any(|line| line.trim() == "// HERDR_INTEGRATION_ID=senpi")
++            && parse_integration_version(&content).is_some()
++        {
++            return Ok(Some(content));
++        }
++    }
++    Err(io::Error::other(format!(
++        "refusing unrelated or symlinked integration file at {}",
++        path.display()
++    )))
++}
++
++pub(crate) fn install(brand: Brand) -> io::Result<Vec<String>> {
++    let path = brand.path()?;
++    let agent_dir = path
++        .parent()
++        .and_then(Path::parent)
++        .ok_or_else(|| io::Error::other("missing agent directory"))?;
++    let canonical_agent = fs::canonicalize(agent_dir)?;
++    // Legacy aliases can resolve to Pi/OMP's active directory. Never put a
++    // Senpi-only extension there, even when the installed filenames differ.
++    for other in [pi_extension_dir()?, omp_extension_dir()?] {
++        let Some(other_agent) = other.parent() else {
++            continue;
++        };
++        let other_agent = match fs::canonicalize(other_agent) {
++            Ok(dir) => dir,
++            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
++            Err(err) => return Err(err),
++        };
++        if other_agent == canonical_agent {
++            return Err(io::Error::other(format!("{} and Pi/OMP resolve to the same agent directory; configure separate agent directories", brand.label())));
++        }
++    }
++    install_at(&path)?;
++    Ok(vec![format!(
++        "installed {} integration to {}",
++        brand.label(),
++        path.display()
++    )])
++}
++
++fn install_at(path: &Path) -> io::Result<()> {
++    let dir = path
++        .parent()
++        .ok_or_else(|| io::Error::other("missing extension directory"))?;
++    if !dir.parent().is_some_and(Path::is_dir) {
++        return Err(io::Error::other(format!(
++            "agent directory not found at {}; install the agent first",
++            dir.display()
++        )));
++    }
++    for name in [
++        super::PI_EXTENSION_INSTALL_NAME,
++        super::OMP_EXTENSION_INSTALL_NAME,
++    ] {
++        match fs::symlink_metadata(dir.join(name)) {
++            Ok(_) => {
++                return Err(io::Error::other(format!(
++                    "Pi/OMP extension already exists at {}; configure separate agent directories",
++                    dir.display()
++                )))
++            }
++            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
++            Err(err) => return Err(err),
++        }
++    }
++    let content = owned_content(path)?;
++    fs::create_dir_all(dir)?;
++    if content.as_deref() != Some(ASSET) {
++        match content {
++            Some(_) => fs::write(path, ASSET)?,
++            None => OpenOptions::new()
++                .write(true)
++                .create_new(true)
++                .open(path)?
++                .write_all(ASSET.as_bytes())?,
++        }
++    }
++    Ok(())
++}
++
++pub(crate) fn uninstall(brand: Brand) -> io::Result<Vec<String>> {
++    let path = brand.path()?;
++    let removed = uninstall_at(&path)?;
++    Ok(vec![format!(
++        "{} {} integration at {}",
++        if removed { "removed" } else { "no installed" },
++        brand.label(),
++        path.display()
++    )])
++}
++
++fn uninstall_at(path: &Path) -> io::Result<bool> {
++    if owned_content(path)?.is_none() {
++        return Ok(false);
++    }
++    remove_file_if_exists(path)
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src/integration/senpi/tests.rs b/src/integration/senpi/tests.rs
+new file mode 100644
+index 00000000..351f013f
+--- /dev/null
++++ b/src/integration/senpi/tests.rs
+@@ -0,0 +1,282 @@
++use super::*;
++use std::ffi::OsString;
++use std::sync::atomic::{AtomicUsize, Ordering};
++
++struct Fixture {
++    root: PathBuf,
++    env: Vec<(&'static str, Option<OsString>)>,
++    _lock: crate::integration::env::IntegrationEnvLock,
++}
++
++impl Fixture {
++    fn new() -> Self {
++        let lock = crate::integration::integration_env_lock();
++        static NEXT: AtomicUsize = AtomicUsize::new(0);
++        let root = std::env::temp_dir().join(format!(
++            "herdr-senpi-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ));
++        fs::create_dir(&root).unwrap();
++        let env = [
++            "HOME",
++            "OMO_CODING_AGENT_DIR",
++            "SENPI_CODING_AGENT_DIR",
++            "PI_CODING_AGENT_DIR",
++            "PI_CONFIG_DIR",
++        ]
++        .into_iter()
++        .map(|key| {
++            let value = std::env::var_os(key);
++            std::env::remove_var(key);
++            (key, value)
++        })
++        .collect();
++        std::env::set_var("HOME", &root);
++        Self {
++            root,
++            env,
++            _lock: lock,
++        }
++    }
++
++    fn agent(&self, relative: &str) -> PathBuf {
++        let path = self.root.join(relative);
++        fs::create_dir_all(&path).unwrap();
++        path
++    }
++}
++
++impl Drop for Fixture {
++    fn drop(&mut self) {
++        for (key, value) in &self.env {
++            if let Some(value) = value {
++                std::env::set_var(key, value);
++            } else {
++                std::env::remove_var(key);
++            }
++        }
++        fs::remove_dir_all(&self.root).unwrap();
++    }
++}
++
++#[test]
++fn local_senpi_install_status_uninstall_and_pi_omp_coexistence() {
++    let fixture = Fixture::new();
++    std::env::set_var("OMO_CODING_AGENT_DIR", fixture.agent(".omo/agent"));
++    std::env::set_var("SENPI_CODING_AGENT_DIR", fixture.agent(".senpi/agent"));
++    fixture.agent(".pi/agent");
++    fixture.agent(".omp/agent");
++    let pi = crate::integration::targets::install_pi().unwrap();
++    let omp = crate::integration::targets::install_omp()
++        .unwrap()
++        .extension_path;
++    for brand in Brand::ALL {
++        let path = fixture
++            .root
++            .join(brand.config_name())
++            .join("agent/extensions")
++            .join(INSTALL_NAME);
++        assert_eq!(brand.path().unwrap(), path);
++        assert_eq!(
++            status(brand).unwrap().state,
++            IntegrationStatusKind::NotInstalled
++        );
++        install(brand).unwrap();
++        install(brand).unwrap();
++        assert_eq!(fs::read_to_string(&path).unwrap(), ASSET);
++        let current = status(brand).unwrap();
++        assert_eq!(current.state, IntegrationStatusKind::Current);
++        assert_eq!(current.installed_version, Some(VERSION));
++        fs::write(
++            &path,
++            "// HERDR_INTEGRATION_ID=senpi\n// HERDR_INTEGRATION_VERSION=0\n",
++        )
++        .unwrap();
++        assert_eq!(
++            status(brand).unwrap().state,
++            IntegrationStatusKind::Outdated
++        );
++        install(brand).unwrap();
++        let user_file = path.with_file_name("user.ts");
++        fs::write(&user_file, "user extension").unwrap();
++        uninstall(brand).unwrap();
++        uninstall(brand).unwrap();
++        assert_eq!(
++            status(brand).unwrap().state,
++            IntegrationStatusKind::NotInstalled
++        );
++        assert_eq!(fs::read_to_string(user_file).unwrap(), "user extension");
++    }
++    assert_eq!(
++        fs::read_to_string(pi).unwrap(),
++        crate::integration::PI_EXTENSION_ASSET
++    );
++    assert_eq!(
++        fs::read_to_string(omp).unwrap(),
++        crate::integration::OMP_EXTENSION_ASSET
++    );
++}
++
++#[test]
++fn omo_installer_matches_launcher_nonempty_override_precedence() {
++    let fixture = Fixture::new();
++    // Given an empty OMO override and the fallback used by the OMO launcher.
++    let fallback = fixture.agent("fallback");
++    std::env::set_var("OMO_CODING_AGENT_DIR", " \t ");
++    std::env::set_var(
++        "SENPI_CODING_AGENT_DIR",
++        format!("  {}  ", fallback.display()),
++    );
++    // When installing through the branded CLI.
++    install(Brand::Omo).unwrap();
++    // Then the extension lands in the directory the launcher actually loads.
++    let expected = fallback.join("extensions").join(INSTALL_NAME);
++    assert_eq!(Brand::Omo.path().unwrap(), expected);
++    assert_eq!(fs::read_to_string(expected).unwrap(), ASSET);
++}
++
++#[test]
++fn local_senpi_overrides_follow_defined_value_precedence() {
++    let fixture = Fixture::new();
++    let default_senpi = Brand::Senpi.path().unwrap();
++    let extension = |path: PathBuf| path.join("extensions").join(INSTALL_NAME);
++    std::env::set_var("PI_CODING_AGENT_DIR", fixture.root.join("legacy"));
++    for brand in Brand::ALL {
++        assert_eq!(
++            brand.path().unwrap(),
++            extension(fixture.root.join("legacy"))
++        );
++    }
++    std::env::set_var("SENPI_CODING_AGENT_DIR", "~/standalone");
++    assert_eq!(
++        Brand::Senpi.path().unwrap(),
++        extension(fixture.root.join("standalone"))
++    );
++    assert_eq!(
++        Brand::Omo.path().unwrap(),
++        extension(std::env::current_dir().unwrap().join("~/standalone"))
++    );
++    std::env::set_var("OMO_CODING_AGENT_DIR", "relative-agent");
++    assert_eq!(
++        Brand::Omo.path().unwrap(),
++        extension(std::env::current_dir().unwrap().join("relative-agent"))
++    );
++    std::env::set_var("OMO_CODING_AGENT_DIR", "");
++    assert_eq!(
++        Brand::Omo.path().unwrap(),
++        extension(std::env::current_dir().unwrap().join("~/standalone"))
++    );
++    std::env::set_var("SENPI_CODING_AGENT_DIR", "");
++    assert_eq!(Brand::Senpi.path().unwrap(), default_senpi);
++    assert_eq!(
++        Brand::Omo.path().unwrap(),
++        extension(fixture.root.join("legacy"))
++    );
++    std::env::remove_var("PI_CODING_AGENT_DIR");
++    assert_eq!(
++        Brand::Omo.path().unwrap(),
++        extension(fixture.root.join(".omo/agent"))
++    );
++    std::env::set_var("OMO_CODING_AGENT_DIR", "~someone/agent");
++    assert_eq!(
++        Brand::Omo.path().unwrap(),
++        extension(std::env::current_dir().unwrap().join("~someone/agent"))
++    );
++}
++
++#[test]
++fn local_senpi_project_override_is_nearest_with_home_boundary() {
++    let fixture = Fixture::new();
++    let brand = Brand::Senpi;
++    let outer = fixture.agent(&format!("project/{}/agent", brand.config_name()));
++    let inner = fixture.agent(&format!("project/nested/{}/agent", brand.config_name()));
++    let cwd = fixture.agent("project/nested/deeper");
++    assert_eq!(project_agent_dir(brand, &cwd, &fixture.root), inner);
++    fs::remove_dir(&inner).unwrap();
++    assert_eq!(project_agent_dir(brand, &cwd, &fixture.root), outer);
++    assert_eq!(
++        project_agent_dir(brand, &fixture.root, &fixture.root),
++        fixture.root.join(brand.config_name()).join("agent")
++    );
++}
++
++#[test]
++fn local_senpi_refuses_unowned_files_and_pi_omp_collisions() {
++    let fixture = Fixture::new();
++    let agent = fixture.agent("custom/extensions");
++    let path = agent.join(INSTALL_NAME);
++    for content in [
++        "user extension",
++        "// HERDR_INTEGRATION_ID=senpi-other\n// HERDR_INTEGRATION_VERSION=1\n",
++        crate::integration::PI_EXTENSION_ASSET,
++    ] {
++        fs::write(&path, content).unwrap();
++        assert!(install_at(&path).is_err());
++        assert!(uninstall_at(&path).is_err());
++        assert!(status_at(path.clone()).is_err());
++        assert_eq!(fs::read_to_string(&path).unwrap(), content);
++    }
++    fs::remove_file(&path).unwrap();
++    for name in [
++        crate::integration::PI_EXTENSION_INSTALL_NAME,
++        crate::integration::OMP_EXTENSION_INSTALL_NAME,
++    ] {
++        let other = agent.join(name);
++        fs::write(&other, "keep").unwrap();
++        assert!(install_at(&path).is_err());
++        assert!(!path.exists());
++        assert_eq!(fs::read_to_string(&other).unwrap(), "keep");
++        fs::remove_file(other).unwrap();
++    }
++    let pi_agent = fixture.agent(".pi/agent");
++    std::env::set_var("OMO_CODING_AGENT_DIR", pi_agent);
++    assert!(install(Brand::Omo).is_err());
++    let shared = fixture.agent("legacy");
++    std::env::set_var("PI_CODING_AGENT_DIR", shared);
++    assert!(install(Brand::Senpi).is_err());
++}
++
++#[cfg(unix)]
++#[test]
++fn local_senpi_refuses_file_symlinks_and_skips_project_symlinks() {
++    use std::os::unix::fs::symlink;
++    let fixture = Fixture::new();
++    let agent = fixture.agent("custom/extensions");
++    let unrelated = fixture.root.join("unrelated.ts");
++    fs::write(&unrelated, ASSET).unwrap();
++    let path = agent.join(INSTALL_NAME);
++    symlink(&unrelated, &path).unwrap();
++    assert!(install_at(&path).is_err());
++    assert!(uninstall_at(&path).is_err());
++    assert_eq!(fs::read_to_string(&unrelated).unwrap(), ASSET);
++    fs::remove_file(&unrelated).unwrap();
++    assert!(install_at(&path).is_err());
++    assert!(uninstall_at(&path).is_err());
++    let other_agent = fixture.agent("other-agent");
++    symlink(&agent, other_agent.join("extensions")).unwrap();
++    let alias_path = other_agent.join("extensions").join(INSTALL_NAME);
++    assert!(install_at(&alias_path).is_err());
++    assert!(uninstall_at(&alias_path).is_err());
++    let cwd = fixture.agent("project");
++    fixture.agent("custom/agent");
++    symlink(fixture.root.join("custom"), cwd.join(".senpi")).unwrap();
++    assert_eq!(
++        project_agent_dir(Brand::Senpi, &cwd, &fixture.root),
++        fixture.root.join(".senpi/agent")
++    );
++    let pi = fixture.agent(".pi/agent");
++    let alias = fixture.root.join("pi-alias");
++    symlink(pi, &alias).unwrap();
++    std::env::set_var("OMO_CODING_AGENT_DIR", alias);
++    assert!(install(Brand::Omo).is_err());
++}
++
++#[test]
++fn local_senpi_requires_existing_agent_directory() {
++    let fixture = Fixture::new();
++    let path = fixture.root.join("missing/extensions").join(INSTALL_NAME);
++    assert!(install_at(&path).is_err());
++    assert!(!path.exists());
++    assert!(!uninstall_at(&path).unwrap());
++}

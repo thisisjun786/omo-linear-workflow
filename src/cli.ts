@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Result } from "./core/contracts";
+import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator } from "./orchestrator";
 
 type Options = Readonly<Record<string, string | true | readonly string[]>>;
@@ -117,10 +118,11 @@ function requireOptions(options: Options, keys: readonly string[]): Result<Recor
 
 async function doctor(root: string, herdrSocket?: string): Promise<Result<unknown>> {
   const paths = new Orchestrator(root, herdrSocket).paths();
+  const herdr = await resolveHerdrArtifact(root);
   const checks = {
     bun: process.execPath,
     omo: Bun.which(join(root, "node_modules/.bin/omo")),
-    herdr: Bun.which("herdr"),
+    herdr: herdr.binaryPath,
     git: Bun.which("git"),
     extension: join(root, "dist/extension/index.js"),
   };
@@ -136,7 +138,7 @@ async function doctor(root: string, herdrSocket?: string): Promise<Result<unknow
       },
     };
   }
-  if (checks.omo === null || checks.herdr === null || checks.git === null) {
+  if (checks.omo === null || checks.git === null) {
     return {
       ok: false,
       error: {

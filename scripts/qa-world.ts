@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { RpcClient } from "@code-yeongyu/senpi";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
+import { loadHerdrBuild, resolveHerdrArtifact } from "../src/herdr/artifact";
 import { QaError } from "./qa-rpc";
 
 export async function runQaCommand(
@@ -12,7 +13,11 @@ export async function runQaCommand(
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   const [command, ...args] = argv;
   if (command === undefined) throw new QaError("QA command must not be empty");
-  const executable = command === "herdr" ? (env["QA_HERDR_BINARY"] ?? command) : command;
+  const executable =
+    command === "herdr"
+      ? (env["QA_HERDR_BINARY"] ??
+        (await resolveHerdrArtifact(resolve(import.meta.dir, ".."))).binaryPath)
+      : command;
   const child = Bun.spawn([executable, ...args], {
     cwd,
     env,
@@ -45,12 +50,14 @@ export async function checkedQaCommand(
 export async function prepareQaWorld() {
   if (process.env["HERDR_ENV"] !== "1") throw new QaError("Herdr QA requires HERDR_ENV=1");
   const installRoot = resolve(import.meta.dir, "..");
+  const artifact = await resolveHerdrArtifact(installRoot);
   const scratch = await mkdtemp(join(installRoot, ".omo/evidence/qa-world-"));
   const controlRoot = join(scratch, "control");
   const repository = join(scratch, "fixture-repo");
   const sessionName = `oi-qa-${crypto.randomUUID().slice(0, 12)}`;
   const environment = {
     ...process.env,
+    QA_HERDR_BINARY: process.env["QA_HERDR_BINARY"] ?? artifact.binaryPath,
     HERDR_SESSION: sessionName,
     HERDR_SOCKET_PATH: undefined,
     HERDR_CLIENT_SOCKET_PATH: undefined,
@@ -61,6 +68,13 @@ export async function prepareQaWorld() {
   await cp(join(installRoot, "dist"), join(controlRoot, "dist"), { recursive: true });
   await cp(join(installRoot, "skills"), join(controlRoot, "skills"), { recursive: true });
   await cp(join(installRoot, "package.json"), join(controlRoot, "package.json"));
+  await cp(join(installRoot, "vendor/herdr"), join(controlRoot, "vendor/herdr"), {
+    recursive: true,
+  });
+  await mkdir(join(controlRoot, "patches"), { recursive: true });
+  await cp(artifact.patchPath, join(controlRoot, artifact.manifest.patch));
+  const fixtureBuild = await loadHerdrBuild(controlRoot);
+  await cp(artifact.artifactDir, fixtureBuild.artifactDir, { recursive: true });
   await checkedQaCommand(
     [
       "/usr/bin/cp",
@@ -88,16 +102,13 @@ export async function prepareQaWorld() {
     ],
     repository,
   );
-  const herdr = Bun.spawn(
-    [process.env["QA_HERDR_BINARY"] ?? "herdr", "--session", sessionName, "server"],
-    {
-      cwd: repository,
-      env: environment,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  const herdr = Bun.spawn([environment.QA_HERDR_BINARY, "--session", sessionName, "server"], {
+    cwd: repository,
+    env: environment,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const ready = Promise.withResolvers<string>();
   const timer = setTimeout(
     () => ready.reject(new QaError("Herdr server readiness timeout")),

@@ -184,10 +184,19 @@ class FakeHerdr implements HerdrClient {
     this.workspaces.set(id, workspace);
     return workspace;
   }
-  async run(_pane: string, argv: readonly string[]): Promise<void> {
+  async run(
+    _pane: string,
+    argv: readonly string[],
+    env: Readonly<Record<string, string>>,
+  ): Promise<void> {
     this.events.push("run");
+    const separator = process.platform === "win32" ? ";" : ":";
+    expect(env).toEqual({
+      PATH: `${join(this.root, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
+    });
     expect(argv).toContain(join(this.root, "node_modules/.bin/omo"));
     expect(argv).not.toContain("omo");
+    expect(argv).toContain(join(this.root, "dist/extension/index.js"));
     if (this.verifyIdentity) {
       const fileIndex = argv.indexOf("--session");
       const idIndex = argv.indexOf("--session-id");
@@ -347,7 +356,14 @@ describe("orchestrator startup", () => {
       const dependencies: OrchestratorDependencies = {
         openRegistry,
         createHerdrClient: () => herdr,
-        ensureHost: async () => {
+        resolveHerdrArtifact: async (controlRoot) => ({
+          artifactDir: join(controlRoot, ".managed-herdr"),
+        }),
+        ensureHost: async (controlRoot, _socket, env) => {
+          const separator = process.platform === "win32" ? ";" : ":";
+          expect(env["PATH"]).toBe(
+            `${join(controlRoot, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
+          );
           events.push("host");
         },
         gitTip: async () => "commit",
@@ -551,6 +567,63 @@ describe("orchestrator startup", () => {
     },
   );
 
+  test("fails role startup before reservation when the managed Herdr artifact is unavailable", async () => {
+    const root = await ownedRoot("omo-orchestrator-managed-herdr-");
+    const events: string[] = [];
+    const herdr = new FakeHerdr(events);
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async () => {
+        throw new Error("Managed Herdr executable is missing; run bun run herdr:build");
+      },
+      ensureHost: async () => {
+        events.push("host");
+      },
+      gitTip: async () => "commit",
+      now: () => "2026-09-23T00:00:00.000Z",
+      uuid: () => "must-not-reserve",
+      attachBinding: async () => {
+        throw new Error("must not attach");
+      },
+      terminateBinding: async () => {},
+      prompt: async () => {
+        throw new Error("must not prompt");
+      },
+    };
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+      projects: [],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(scope));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+
+    expect(
+      await orchestrator.createSupervisor({
+        initiativeId: "initiative",
+        scopeDigest: imported.value.digest,
+        designationId: "designation",
+        execute: true,
+        fixture: true,
+      }),
+    ).toEqual({
+      ok: false,
+      error: {
+        code: "runtime_unavailable",
+        message: "Managed Herdr runtime is unavailable",
+        details: "Managed Herdr executable is missing; run bun run herdr:build",
+      },
+    });
+    expect(events).toEqual([]);
+    expect(orchestrator.status()).toEqual({ ok: true, value: [] });
+  });
+
   test.each([false, true])(
     "handles startup failure without confusing definite and uncertain outcomes (%s)",
     async (hostFailure) => {
@@ -564,6 +637,9 @@ describe("orchestrator startup", () => {
       const dependencies: OrchestratorDependencies = {
         openRegistry,
         createHerdrClient: () => herdr,
+        resolveHerdrArtifact: async (controlRoot) => ({
+          artifactDir: join(controlRoot, ".managed-herdr"),
+        }),
         ensureHost: async () => {
           if (hostFailure) throw new Error("Host failed before any role was launched");
         },

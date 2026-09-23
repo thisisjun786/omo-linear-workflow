@@ -14,6 +14,8 @@
     "lint": "biome check src tests scripts",
     "cli": "bun src/cli.ts",
     "build": "bun scripts/build.ts",
+    "herdr": "bun scripts/herdr.ts",
+    "herdr:build": "bun scripts/build-herdr.ts",
     "qa:herdr": "bun scripts/qa-herdr.ts",
     "qa:events": "bun scripts/qa-events.ts",
     "qa:linear": "bun scripts/qa-linear.ts"

@@ -5,6 +5,7 @@ dist/
 !.omo/evidence/.gitkeep
 .omo/discovery/
 .omo/state/
+.omo/herdr/
 .omo/worktrees/
 .omo/thread-tools/
 omo-host.json

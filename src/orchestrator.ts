@@ -17,6 +17,7 @@ import type {
 import { initializationMessageId, matchesRuntime, modelForRole } from "./core/policy";
 import { openRegistry } from "./core/store";
 import { createHerdrClient, type HerdrClient } from "./herdr";
+import { resolveHerdrArtifact } from "./herdr/artifact";
 import { createHostProfile } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot } from "./linear";
 import { removeReadiness, subscribeReadiness } from "./readiness";
@@ -89,7 +90,12 @@ export interface OrchestratorDependencies {
   readonly createHerdrClient: (socket: string) => HerdrClient;
   readonly attachBinding: (binding: Binding) => Promise<NativeSession>;
   readonly terminateBinding: (binding: Binding) => Promise<void>;
-  readonly ensureHost: (root: string, socket: string) => Promise<void>;
+  readonly resolveHerdrArtifact: (root: string) => Promise<{ readonly artifactDir: string }>;
+  readonly ensureHost: (
+    root: string,
+    socket: string,
+    env: Readonly<Record<string, string | undefined>>,
+  ) => Promise<void>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
   readonly gitTip: (repo: string, revision: string) => Promise<string>;
   readonly now: () => string;
@@ -107,6 +113,14 @@ function failure<T>(code: string, message: string, details?: unknown): Result<T>
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+function managedHerdrPath(artifactDir: string): string {
+  const inheritedPath = process.env["PATH"];
+  if (!inheritedPath) return artifactDir;
+  return `${artifactDir}${process.platform === "win32" ? ";" : ":"}${inheritedPath}`;
+}
+function launchEnvironment(managedPath: string): Readonly<Record<string, string | undefined>> {
+  return { ...process.env, PATH: managedPath };
+}
 
 /** Decode either P2's normalized pane callback or Herdr's pane.updated envelope. */
 export function readSessionPath(event: unknown, paneId: string): string | null {
@@ -119,7 +133,11 @@ export function readSessionPath(event: unknown, paneId: string): string | null {
   return source.data.data.pane.agent_session?.value ?? null;
 }
 
-async function defaultEnsureHost(root: string, socket: string): Promise<void> {
+async function defaultEnsureHost(
+  root: string,
+  socket: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
   const profile = await createHostProfile(root);
   const process = Bun.spawn(
     [
@@ -133,7 +151,7 @@ async function defaultEnsureHost(root: string, socket: string): Promise<void> {
       "--policy",
       "never",
     ],
-    { cwd: root, stdout: "pipe", stderr: "pipe" },
+    { cwd: root, env, stdout: "pipe", stderr: "pipe" },
   );
   const [code, stderr] = await Promise.all([process.exited, new Response(process.stderr).text()]);
   if (code !== 0) throw new Error(`omo host ensure failed (${code}): ${stderr.trim()}`);
@@ -242,6 +260,7 @@ const defaults: OrchestratorDependencies = {
   createHerdrClient,
   attachBinding,
   terminateBinding: defaultTerminateBinding,
+  resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
   prompt: defaultPrompt,
   gitTip: defaultGitTip,
@@ -495,7 +514,9 @@ export class Orchestrator {
         await herdr.closeWorkspace(workspace.workspaceId);
       }
       if (binding.sessionPath !== null) {
-        await this.#deps.ensureHost(this.#root, binding.omoSocket);
+        const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+        const managedPath = managedHerdrPath(artifact.artifactDir);
+        await this.#deps.ensureHost(this.#root, binding.omoSocket, launchEnvironment(managedPath));
         await this.#deps.terminateBinding(binding);
       }
       await removeReadiness(this.#root, binding.id);
@@ -639,6 +660,18 @@ export class Orchestrator {
     checkout: Checkout | null,
     fixedBindingId?: string,
   ): Promise<Result<CreationResult>> {
+    let managedPath: string;
+    try {
+      const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+      managedPath = managedHerdrPath(artifact.artifactDir);
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Managed Herdr runtime is unavailable",
+        messageOf(cause),
+      );
+    }
+    const environment = launchEnvironment(managedPath);
     const bindingId = fixedBindingId ?? this.#deps.uuid();
     const reserved = this.#withRegistry((registry) =>
       registry.reserve({
@@ -655,7 +688,7 @@ export class Orchestrator {
     );
     if (!reserved.ok) return reserved;
     try {
-      await this.#deps.ensureHost(this.#root, this.#omoSocket);
+      await this.#deps.ensureHost(this.#root, this.#omoSocket, environment);
     } catch (cause) {
       this.#withRegistry((registry) => {
         const closing = registry.beginClose(bindingId);
@@ -746,7 +779,7 @@ export class Orchestrator {
           "--no-model-fallback",
           "--no-recommended-models",
         ],
-        {},
+        { PATH: managedPath },
       );
       const timeout = setTimeout(
         () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),

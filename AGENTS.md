@@ -1,4 +1,4 @@
-# OMO Initiative
+# OMO Linear Workflow (OLW)
 
 This repository owns a Herdr-based OMO initiative orchestrator. Source repositories
 and the user's existing workspaces are read-only unless explicitly assigned.

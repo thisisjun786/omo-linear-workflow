@@ -1,9 +1,9 @@
 ---
-name: oi-check
-description: "Compare delivered work against the full canonical Linear criteria and accepted decisions, classify each obligation, and route in-scope corrections to the existing owner one level down. Use for requirement drift or completion checks; oi-run executes, oi-plan changes the roadmap. A check never merges, closes issues or wakes anyone by polling."
+name: olw-check
+description: "Compare delivered work against the full canonical Linear criteria and accepted decisions, classify each obligation, and route in-scope corrections to the existing owner one level down. Use for requirement drift or completion checks; olw-run executes, olw-plan changes the roadmap. A check never merges, closes issues or wakes anyone by polling."
 ---
 
-# OI Check
+# OLW Check
 
 Check delivered work against what was agreed, with Linear as the canonical source of what was
 agreed. Read [Linear through OMO's native MCP](../references/linear.md) for access and
@@ -57,7 +57,7 @@ Where the checked subjects carry agreed dates, compare them with delivery eviden
 check: ahead, on plan, at risk, late or undecidable, judged against both the baseline and the
 current date with the timezone stated. A passed deadline never lowers a criterion, and a
 schedule verdict is its own field, never a per-criterion disposition. Return needed date
-changes to [oi-plan](../plan/SKILL.md).
+changes to [olw-plan](../plan/SKILL.md).
 
 ## Resolve findings and report
 
@@ -81,7 +81,7 @@ verified or a real blocker needs a decision.
 
 Explicit read-only, report-only and no-contact instructions win. A passing check alone
 authorizes no requirement change, issue closure, merge or deployment; route roadmap changes to
-`oi-plan` and integration to the owning parent under [oi-run](../run/SKILL.md).
+`olw-plan` and integration to the owning parent under [olw-run](../run/SKILL.md).
 
 Lead the report with the verdict and the action actually taken: correction sent, awaiting
 delivery, recheck passed, integrated, or blocked. Keep "correction sent", "owner resumed" and

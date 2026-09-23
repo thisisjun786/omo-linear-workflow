@@ -54,7 +54,7 @@ export async function prepareQaWorld() {
   const scratch = await mkdtemp(join(installRoot, ".omo/evidence/qa-world-"));
   const controlRoot = join(scratch, "control");
   const repository = join(scratch, "fixture-repo");
-  const sessionName = `oi-qa-${crypto.randomUUID().slice(0, 12)}`;
+  const sessionName = `olw-qa-${crypto.randomUUID().slice(0, 12)}`;
   const environment = {
     ...process.env,
     QA_HERDR_BINARY: process.env["QA_HERDR_BINARY"] ?? artifact.binaryPath,

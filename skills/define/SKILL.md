@@ -1,16 +1,16 @@
 ---
-name: oi-define
-description: "Explore an idea and define a goal-based Linear initiative: purpose, desired change, success evidence, scope and open decisions. Use when intent or an initiative needs definition; hand an agreed goal to oi-plan for projects and issues. Definition creates no supervisor and approves no execution."
+name: olw-define
+description: "Explore an idea and define a goal-based Linear initiative: purpose, desired change, success evidence, scope and open decisions. Use when intent or an initiative needs definition; hand an agreed goal to olw-plan for projects and issues. Definition creates no supervisor and approves no execution."
 ---
 
-# OI Define
+# OLW Define
 
 Make the intended change clear enough to decide whether and what to plan. An initiative is a
 goal with an observable finish, not a permanent product bucket. Read
 [Linear through OMO's native MCP](../references/linear.md) for access and write rules and
 [Supervisor, parent and child](../references/roles.md) for what a definition does and doesn't
 create. Defining an initiative binds no supervisor and moves no project's ownership; a
-supervisor begins only from an explicit designation through `oi-run`.
+supervisor begins only from an explicit designation through `olw-run`.
 
 ## Recover the intent
 
@@ -55,5 +55,5 @@ retrying it.
 
 Return the agreed goal, success evidence, scope, open decisions and source IDs with their
 revisions. If both a definition and a plan were requested, continue into
-[oi-plan](../plan/SKILL.md) in the same operation with that write scope. Definition-only ends
+[olw-plan](../plan/SKILL.md) in the same operation with that write scope. Definition-only ends
 here. Neither artifact launches a role session, imports a scope snapshot or designates anyone.

@@ -20,10 +20,10 @@ type Frontmatter = z.infer<typeof frontmatterSchema>;
 
 const skillsRoot = resolve(import.meta.dir, "../skills");
 const expectedSkills: ReadonlyArray<{ readonly dir: string; readonly name: string }> = [
-  { dir: "define", name: "oi-define" },
-  { dir: "plan", name: "oi-plan" },
-  { dir: "run", name: "oi-run" },
-  { dir: "check", name: "oi-check" },
+  { dir: "define", name: "olw-define" },
+  { dir: "plan", name: "olw-plan" },
+  { dir: "run", name: "olw-run" },
+  { dir: "check", name: "olw-check" },
 ];
 
 function readFrontmatter(path: string): Frontmatter {
@@ -72,7 +72,7 @@ function markdownFiles(): ReadonlyArray<string> {
   return files.filter((file) => existsSync(file));
 }
 
-describe("oi skills", () => {
+describe("olw skills", () => {
   test("four skills exist with unique valid frontmatter names", () => {
     const names = expectedSkills.map((skill) => {
       const path = join(skillsRoot, skill.dir, "SKILL.md");

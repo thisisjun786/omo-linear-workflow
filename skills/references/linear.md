@@ -37,7 +37,7 @@ and semantic scope; if that fails, ask rather than pick.
 
 ## Scope snapshot for the CLI
 
-`oi-plan` turns the pinned reads into a scope snapshot file. The shape is the orchestrator's
+`olw-plan` turns the pinned reads into a scope snapshot file. The shape is the orchestrator's
 `ScopeSnapshot` contract (validated with Zod by `scope import`):
 
 ```json

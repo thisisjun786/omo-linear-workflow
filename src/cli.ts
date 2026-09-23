@@ -163,7 +163,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       {
         ok: true,
         value: {
-          usage: "oi [--root PATH] [--herdr-socket PATH] COMMAND [OPTIONS] [--json]",
+          usage: "olw [--root PATH] [--herdr-socket PATH] COMMAND [OPTIONS] [--json]",
           commands: [
             "doctor",
             "scope import",

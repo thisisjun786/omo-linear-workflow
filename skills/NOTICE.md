@@ -13,7 +13,7 @@ What was ported is the policy: role ownership, definition versus execution appro
 versus integration, stable IDs, and no goal loops or polling. The Codex runtime pieces
 (`codex-thread-bridge`, `codex-session-relay`, `crw-loop`, hooks and wiring) were not ported.
 Cross-session delivery here uses OMO's native thread tools through the orchestrator in this
-repository. Skill names were changed to `oi-define`, `oi-plan`, `oi-run` and `oi-check` so they
+repository. Skill names were changed to `olw-define`, `olw-plan`, `olw-run` and `olw-check` so they
 can coexist with an installed CRW plugin.
 
 ## Upstream license (MIT)

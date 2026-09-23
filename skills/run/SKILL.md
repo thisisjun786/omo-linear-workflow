@@ -1,9 +1,9 @@
 ---
-name: oi-run
-description: "Execute approved Linear scope as one of three roles: a supervisor over one initiative's parents, a parent over one project's issue children, or a child over one issue. Uses the omo-initiative CLI for designation, creation, instructions and reports; no goals, no polling, native delivery wakes the next turn. Use oi-plan for planning and oi-check for drift."
+name: olw-run
+description: "Execute approved Linear scope as one of three roles: a supervisor over one initiative's parents, a parent over one project's issue children, or a child over one issue. Uses the omo-linear-workflow CLI for designation, creation, instructions and reports; no goals, no polling, native delivery wakes the next turn. Use olw-plan for planning and olw-check for drift."
 ---
 
-# OI Run
+# OLW Run
 
 Carry approved scope through delivery at exactly one level. Read
 [Supervisor, parent and child](../references/roles.md) first: it fixes the three roles, their
@@ -21,12 +21,12 @@ not impersonate an existing supervisor, parent or child or execute their assigne
 ## Determine the requested operation
 
 - **Designate a supervisor:** only an explicit request to execute a named initiative's approved
-  projects. Requires an imported snapshot digest from [oi-plan](../plan/SKILL.md). A link, a
+  projects. Requires an imported snapshot digest from [olw-plan](../plan/SKILL.md). A link, a
   status question, a plan request or a quoted example is not a designation.
 - **Run a project or milestone:** carry its agreed scope, including successors that become
   ready, through delivery. A milestone or named batch narrows the same assignment.
 - **Status only:** read the registry and Linear without waking anyone.
-- **Verify completed work:** use [oi-check](../check/SKILL.md) and route corrections through
+- **Verify completed work:** use [olw-check](../check/SKILL.md) and route corrections through
   the existing owner.
 
 Explicit read-only, plan-only, no-create, no-merge, pause or no-contact limits win over the

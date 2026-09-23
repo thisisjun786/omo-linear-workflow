@@ -1,9 +1,9 @@
 ---
-name: oi-plan
-description: "Decompose an agreed goal into Linear projects, milestones and one-PR implementation issues, then read the full canonical criteria back and generate the validated scope snapshot JSON that the omo-initiative CLI imports. Use oi-define for intent, oi-run for execution, oi-check for drift. Planning and importing create no supervisor."
+name: olw-plan
+description: "Decompose an agreed goal into Linear projects, milestones and one-PR implementation issues, then read the full canonical criteria back and generate the validated scope snapshot JSON that the omo-linear-workflow CLI imports. Use olw-define for intent, olw-run for execution, olw-check for drift. Planning and importing create no supervisor."
 ---
 
-# OI Plan
+# OLW Plan
 
 Build a usable plan from what exists and what the user wants next, and produce the scope
 snapshot the orchestrator consumes. Linear holds the canonical planning and decision
@@ -12,7 +12,7 @@ documents; repositories hold implementation and reproducible evidence. Read
 
 Take an agreed initiative definition as input, then cover its requested scope in one
 operation: projects, useful milestones, issues and dependencies. If the goal itself needs
-definition, use [oi-define](../define/SKILL.md). An existing project or standalone issue can
+definition, use [olw-define](../define/SKILL.md). An existing project or standalone issue can
 supply the goal without an initiative. Reuse existing levels; don't invent an initiative or
 extra projects to fill the hierarchy. Consultation, plan-only, draft-only and read-only
 requests authorize no Linear writes, and invoking this skill doesn't supply write intent.
@@ -96,4 +96,4 @@ Return Linear links, meaningful changes, unresolved decisions, the snapshot dige
 reason there is none) and the next ready issue batch with prerequisites. For a full plan, cover
 the entire agreed scope with issue-level criteria and dependencies; an outline isn't a
 completed plan. Creating the plan executes nothing: no role session, no branch, no PR, no
-merge. Hand executable work to [oi-run](../run/SKILL.md) only when execution was requested.
+merge. Hand executable work to [olw-run](../run/SKILL.md) only when execution was requested.

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { QaError, startQaRpc } from "./qa-rpc";
 
 const root = resolve(import.meta.dir, "..");
-const scratch = await mkdtemp(join(tmpdir(), "omo-initiative-linear-"));
+const scratch = await mkdtemp(join(tmpdir(), "omo-linear-workflow-linear-"));
 const agentDir = join(scratch, "agent");
 const requestSchema = z.object({
   jsonrpc: z.literal("2.0"),
@@ -176,7 +176,7 @@ try {
   const commands = z
     .object({ commands: z.array(z.object({ name: z.string() })) })
     .parse(await rpc.request({ type: "get_commands" }));
-  for (const name of ["oi-define", "oi-plan", "oi-run", "oi-check"]) {
+  for (const name of ["olw-define", "olw-plan", "olw-run", "olw-check"]) {
     if (!commands.commands.some((command) => command.name === `skill:${name}`)) {
       throw new QaError(`Ported skill not loaded by actual OMO: ${name}`);
     }

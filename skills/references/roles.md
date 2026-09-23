@@ -1,6 +1,6 @@
 # Supervisor, parent and child
 
-Shared role contract for `oi-define`, `oi-plan`, `oi-run` and `oi-check`. Adapted from
+Shared role contract for `olw-define`, `olw-plan`, `olw-run` and `olw-check`. Adapted from
 the CRW `integrations.md`, `initiative-supervision.md` and `operations.md` policy at the
 pinned revision named in [NOTICE.md](../NOTICE.md). This file describes policy the
 skills follow. The orchestrator enforces routes and ownership in code; nothing written

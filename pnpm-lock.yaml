@@ -8,6 +8,9 @@ patchedDependencies:
   '@code-yeongyu/senpi@2026.9.22-4':
     hash: 7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179
     path: patches/@code-yeongyu__senpi@2026.9.22-4.patch
+  omo-ai@5.0.0-0.beta.84:
+    hash: 90aea8907d58061b8a349e37bce4b9beaa137dcc69ac57e854d88eb9d4b8d01b
+    path: patches/omo-ai@5.0.0-0.beta.84.patch
 
 importers:
 
@@ -18,7 +21,7 @@ importers:
         version: 2026.9.22-4(patch_hash=7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179)
       omo-ai:
         specifier: 5.0.0-0.beta.84
-        version: 5.0.0-0.beta.84
+        version: 5.0.0-0.beta.84(patch_hash=90aea8907d58061b8a349e37bce4b9beaa137dcc69ac57e854d88eb9d4b8d01b)
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
@@ -764,7 +767,7 @@ snapshots:
     dependencies:
       '@types/node': 26.6.2
 
-  omo-ai@5.0.0-0.beta.84:
+  omo-ai@5.0.0-0.beta.84(patch_hash=90aea8907d58061b8a349e37bce4b9beaa137dcc69ac57e854d88eb9d4b8d01b):
     dependencies:
       '@babel/parser': 8.0.4
       '@code-yeongyu/senpi': 2026.9.22-4(patch_hash=7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179)

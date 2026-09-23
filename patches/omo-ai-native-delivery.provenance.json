@@ -1,0 +1,42 @@
+{
+  "inputs": {
+    "format": "olw-downstream-bundle-v1",
+    "package": "omo-ai",
+    "version": "5.0.0-0.beta.84",
+    "path": "plugin/extensions/omo.js",
+    "upstreamSha256": "8578aa9ef89b5ffd3ace8e579acf9cbd4fbd9be842f504801ced12d1bb862860",
+    "upstreamMarker": "// omo:awN5_oJk80Ci4kwQlrzWSJnh5iSzCKuvyqtTrFxrk0k:tuFhngOrVAODT5xlNpXxo7QsKYTaQOxjf14k7azi0jA",
+    "edits": [
+      {
+        "offset": 1198812,
+        "old": "if(void 0===e||r.turn_id!==e){h(i,mee(\"turn_conflict\",",
+        "new": "if(void 0===e||r.turn_id!==e){h(i,mee(\"turn_conflict_before_delivery\","
+      },
+      {
+        "offset": 1199169,
+        "old": "catch(e){if(hee(e))return h(i,pee(i,n.length)),void p(t);h(i,mee(\"turn_conflict\",`The active turn for ${t} changed before delivery.`,\"Read the target again and retry with the current turn id.\"))",
+        "new": "catch(e){if(hee(e))return h(i,pee(i,n.length)),void p(t);h(i,mee(\"idempotency_uncertain\",`Delivery to ${t} may have been accepted before its acknowledgement failed.`,\"Inspect the original delivery; do not retry with a fresh key without proof of non-delivery.\"))"
+      },
+      {
+        "offset": 1199673,
+        "old": "h(i,mee(\"internal_error\",`Delivery to ${t} could not start a turn.`,\"Retry the message after checking the target status.\"))",
+        "new": "h(i,mee(\"idempotency_uncertain\",`Delivery to ${t} may have been accepted before its acknowledgement failed.`,\"Inspect the original delivery; do not retry with a fresh key without proof of non-delivery.\"))"
+      },
+      {
+        "offset": 1192429,
+        "old": "\"no_active_turn\",\"turn_conflict\",\"not_steerable\"",
+        "new": "\"no_active_turn\",\"turn_conflict\",\"turn_conflict_before_delivery\",\"not_steerable\""
+      },
+      {
+        "offset": 1272834,
+        "old": "",
+        "new": "\n"
+      }
+    ]
+  },
+  "sourceDigestAlgorithm": "sha256-base64url(JSON.stringify(inputs))",
+  "output": {
+    "marker": "// omo:G38vrcL9Z4tKLtIvFDpLCCOD_Prj3SlplgkucBJWNaU:avJIAa8Sw3JyTvvbnX1n5huy1XEOy8hpbL-n5qEfDHM",
+    "bodySha256": "6af24801af12c372724efbdb9d7d67e61bb2d5710ecbc8696cbfa7e6a11f0c73"
+  }
+}

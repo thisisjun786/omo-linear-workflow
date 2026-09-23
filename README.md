@@ -188,6 +188,15 @@ provider and thinking level recorded at their initial session as the verificatio
 baseline, and reconcile doesn't automatically switch running sessions to the new
 policy.
 
+New issue children start in **mass-ulw mode**, but wait for the parent's explicit
+issue packet before creating a goal or workflow. The child uses native DAG workers
+inside that issue, verifies their artifacts and reports once to its parent. Those
+workers are category-routed tasks, not extra OLW/Linear roles; the parent still
+verifies and integrates the delivery. See the [child execution contract](skills/run/SKILL.md#child)
+for scope, phase keys, evidence and recovery. This is an execution policy using
+OMO's existing workflow engine, not a new sandbox or scheduler. Existing bindings
+aren't reinitialized automatically.
+
 ## Behavior
 
 Herdr creates the workspace and the parent and child worktrees. The parent branch is `omo/<designation>/projects/<project>-<binding>`, the child branch is `omo/<designation>/issues/<issue>-<binding>`, and the child's base is a verified commit on the parent branch. The new binding suffix lets you replace a role while keeping the earlier working branch.
@@ -212,10 +221,20 @@ bun run typecheck
 bun run lint
 bun run build
 bun run qa:events
+bun run qa:child-workflow happy
+bun run qa:child-workflow failed-node
 bun run qa:linear
 ```
 
 `qa:events` runs against an isolated Herdr server and a Git fixture. It checks the three roles' actual models, worktree ancestry, focus preservation, automatic resume on report, duplicate prevention, runtime-loss detection and data retention on close, then cleans up its resources. The default Herdr is the managed artifact, and the same manifest, patch and receipt are passed to the QA control root. `qa:linear` wires a local HTTP fixture into the real OMO MCP execution path and confirms that all four skills load. To test compatibility with a different server build, set `QA_HERDR_BINARY=/abs/herdr` explicitly. A passing isolated QA run doesn't by itself prove the TUI behavior of the server currently in use.
+
+`qa:child-workflow` uses real proxy models and an isolated three-role fixture.
+`happy` checks a child-owned DAG with parallel producers and dependent verification,
+then one claimed report. `failed-node` checks an invalid completed producer, recovery
+by amending the same run, and reuse of successful work. After the native parent
+acknowledgment, it checks durable run/node history and independent file-verification
+receipts, then cleans up the owned runtime. It does not trust the agent's completion
+claim or access live Linear.
 
 ## Recovery and shutdown
 

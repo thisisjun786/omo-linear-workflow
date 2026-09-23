@@ -13,6 +13,20 @@ published.
 
 ## [Unreleased]
 
+### Added
+
+- Issue children start in packet-bound mass-ulw mode, using native phase workflows
+  and independent artifact verification before reporting to the existing parent.
+- Real child workflow QA for successful execution and recovery of invalid work
+  without repeating successful nodes: `qa:child-workflow happy|failed-node`.
+
+### Changed
+
+- Child fixture standby permits internal workers only after explicit instruction;
+  creating additional OLW roles and accessing live Linear remain forbidden.
+- Only children may hold an issue-packet goal. Supervisor/parent waiting and model
+  assignments remain unchanged; existing bindings are not reinitialized.
+
 ## [0.1.0]
 
 Released: 2026-09-23

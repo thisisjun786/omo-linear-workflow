@@ -68,7 +68,10 @@ bun run build
 
 `bun run build` includes the managed Herdr build on first run. The isolated QA
 scripts (`bun run qa:events`, `qa:linear`, `qa:proxy`, `qa:routing`) are useful
-for runtime-facing changes. `qa:events` needs Herdr plus real model access;
+for runtime-facing changes. For child execution changes, also run
+`bun run qa:child-workflow happy` and `bun run qa:child-workflow failed-node`;
+these use real models, native DAG events and isolated role fixtures with cleanup.
+`qa:events` needs Herdr plus real model access;
 `qa:proxy` and `qa:routing` need proxy access files. `qa:linear` uses a local MCP
 fixture and no live Linear account. CI has no live provider credentials, so
 its automatic checks must not depend on them.

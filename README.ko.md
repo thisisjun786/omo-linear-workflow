@@ -171,6 +171,15 @@ bun run cli -- --root "$PWD" close --binding BINDING
 사고 수준을 검증 기준으로 유지하며, reconcile이 실행 중 세션을 새 정책으로
 자동 전환하지 않습니다.
 
+새 이슈 자식은 **mass-ulw 모드**로 시작하지만, 부모의 명시적 이슈 작업 지시가
+오기 전에는 goal이나 workflow를 만들지 않습니다. 자식이 해당 이슈 안에서
+네이티브 DAG 작업자를 실행하고 산출물을 검증한 뒤 부모에게 한 번 보고합니다.
+내부 작업자는 카테고리 라우팅을 쓰는 task이며 추가 OLW/Linear 역할이 아닙니다.
+부모는 계속 결과 검증과 통합을 맡습니다. 범위·단계별 키·증거·복구는
+[자식 실행 계약](skills/run/SKILL.md#child)을 따릅니다. 기존 OMO workflow 엔진을
+활용하는 실행 정책이며 새로운 샌드박스나 스케줄러가 아닙니다. 기존 binding의
+초기 지시를 자동으로 다시 보내지는 않습니다.
+
 ## 동작
 
 Herdr가 workspace와 부모·자식 worktree를 만듭니다. 부모 브랜치는 `omo/<designation>/projects/<project>-<binding>`, 자식 브랜치는 `omo/<designation>/issues/<issue>-<binding>`이며, 자식의 base는 부모 브랜치의 확인된 commit입니다. 새 binding suffix 덕분에 이전 작업 브랜치를 보존한 채 역할을 교체할 수 있습니다.
@@ -195,10 +204,19 @@ bun run typecheck
 bun run lint
 bun run build
 bun run qa:events
+bun run qa:child-workflow happy
+bun run qa:child-workflow failed-node
 bun run qa:linear
 ```
 
 `qa:events`는 격리 Herdr server와 Git fixture에서 세 역할의 실제 모델, worktree ancestry, focus 유지, 보고에 따른 자동 재개, 중복 방지, runtime 유실 감지와 종료 시 데이터 보존을 검사하고 자원을 정리합니다. 기본 Herdr는 관리형 산출물이며 QA control root에도 같은 manifest·patch·receipt를 전달합니다. `qa:linear`는 실제 OMO MCP 실행 경로에 로컬 HTTP fixture를 연결하고 네 개 skill의 로딩을 확인합니다. 다른 서버 빌드와의 호환성을 시험하려면 `QA_HERDR_BINARY=/abs/herdr`를 명시합니다. 격리 QA 성공만으로 현재 사용 중인 서버의 TUI 동작까지 검증됐다고 간주하지 않습니다.
+
+`qa:child-workflow`는 실제 프록시 모델과 격리된 세 역할 fixture를 사용합니다.
+`happy`는 자식 소유 DAG의 병렬 작업자·후속 검증과 단일 claimed report를 검사합니다.
+`failed-node`는 잘못된 결과로 완료된 작업자를 같은 run에서 amend하여 복구하고
+성공한 작업은 재실행하지 않는지 확인합니다. 부모의 네이티브 수신 확인 뒤
+영속 run/node 기록과 독립적인 파일 검증 결과를 검사하고 생성한 런타임 자원을
+정리합니다. 에이전트의 완료 주장만 믿거나 실제 Linear에 접근하지 않습니다.
 
 ## 복구와 종료
 

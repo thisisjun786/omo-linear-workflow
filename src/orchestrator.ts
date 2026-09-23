@@ -25,6 +25,7 @@ import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { createHostProfile } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot } from "./linear";
+import { ensureRouting } from "./proxy/routing-launch";
 import { removeReadiness, subscribeReadiness } from "./readiness";
 import { attachBinding, type NativeSession } from "./transport";
 
@@ -143,6 +144,7 @@ async function defaultEnsureHost(
   socket: string,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
+  await ensureRouting(root);
   const profile = await createHostProfile(root);
   const process = Bun.spawn(
     [

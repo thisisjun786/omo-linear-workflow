@@ -19,11 +19,14 @@
     "qa:herdr": "bun scripts/qa-herdr.ts",
     "qa:events": "bun scripts/qa-events.ts",
     "qa:linear": "bun scripts/qa-linear.ts",
-    "qa:proxy": "bun scripts/qa-proxy.ts"
+    "qa:proxy": "bun scripts/qa-proxy.ts",
+    "qa:routing": "bun scripts/qa-routing.ts",
+    "proxy:routing": "bun scripts/proxy-routing.ts"
   },
   "dependencies": {
     "@code-yeongyu/senpi": "2026.9.22-4",
     "omo-ai": "5.0.0-0.beta.84",
+    "typescript": "^5.9.0",
     "zod": "^4.0.0"
   },
   "pnpm": {
@@ -34,7 +37,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
-    "@types/bun": "^1.3.0",
-    "typescript": "^5.9.0"
+    "@types/bun": "^1.3.0"
   }
 }

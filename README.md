@@ -60,9 +60,37 @@ OMO의 `settings.json`에 있는 `extensions` 배열에 같은 경로를 등록�
 Messages 또는 Chat Completions 전송으로 연결합니다.
 
 `models.json`의 `providers.cliproxyapi.modelOverrides`는 컨텍스트 등 사용자 설정에
-계속 적용됩니다. OLW 역할별 모델은 아래 표의 명시적 배정을 사용합니다.
-프록시 확장은 다른 제공자를 활성화하거나 직접 인증을 복원하지 않습니다.
+계속 적용됩니다. 카테고리·에이전트의 업스트림 모델 체인은 관리형 OMO 런처가
+시작 전에 확인하고 프록시 경로로 동기화합니다. OLW 역할별 명시적 모델 지정은
+별도로 유지합니다. 이 기능이 다른 제공자를 활성화하거나 직접 인증을 복원하지는 않습니다.
 등록 가격이 없는 모델의 비용 `0`은 무료가 아니라 정보 없음입니다.
+
+### 모델 등록과 비활성화 정책
+
+모델 등록과 사용 여부는 사용자가 CLIProxyAPI 관리 화면에서 직접 관리합니다.
+OAuth 모델은 **OAuth Model Disablement**로 켜고 끄며, OLW는 이 정책을 읽기만 합니다.
+수동 등록·활성화·비활성화가 자동 라우팅 추천보다 우선합니다. 현재 OMO 목록 제한은
+`scope all`로 해제했고, 시작할 때 미사용 모델을 자동으로 다시 차단하지 않습니다.
+MiMo처럼 직접 등록한 OpenAI 호환 제공자는 OAuth 정책 대상이 아니므로 별도 모델
+등록 목록을 보존합니다. 관리 파일·예외·복구 절차는
+[수동 우선 모델 정책](docs/proxy-model-policy.md)을 따릅니다.
+
+### 업스트림 라우팅 자동 추적
+
+일반 `omo`·`omon` 시작과 OLW 공유 호스트 준비 전에 설치된 전역 OMO의 버전과
+실제 정책 번들 해시를 확인합니다. 변경되면 카테고리·에이전트 모델 순서와 사고 수준을
+현재 프록시 목록에 맞춰 반영합니다. 이후 사용자가 직접 바꾼 라우팅은 보호하고,
+매핑할 수 없는 체인이나 새로운 번들 형식이면 이전 설정을 유지한 채 오류를 알립니다.
+현재 세션을 재시작하거나 OLW의 Parent·Child 모델 지정을 바꾸지는 않습니다.
+
+```sh
+bun run proxy:routing status
+bun run proxy:routing check --force
+bun run proxy:routing sync --force
+```
+
+최초 활성화·소유 범위·복구와 실행 경로는
+[자동 라우팅 운영 안내](docs/proxy-routing.md)에 있습니다.
 
 검증: `bun test tests/proxy`, `bun run typecheck`, `bun run qa:proxy`.
 마지막 명령은 실제 계정을 사용해 세 역할 모델의 파일 읽기 도구 호출을 검증합니다.

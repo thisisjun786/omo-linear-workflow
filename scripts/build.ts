@@ -32,4 +32,8 @@ await build("src/cli.ts", "dist/cli.js", "bun");
 await build("src/core/worker.ts", "dist/core/worker.js", "bun");
 await build("src/extension/index.ts", "dist/extension/index.js", "node");
 await build("src/proxy/index.ts", "dist/proxy/index.js", "node");
-process.stdout.write("Built CLI, worker, session and proxy extensions\n");
+await build("scripts/proxy-routing.ts", "dist/proxy/routing.js", "bun");
+await build("scripts/omo.ts", "dist/omo.js", "bun");
+process.stdout.write(
+  "Built CLI, worker, extensions, routing synchronizer and managed OMO launcher\n",
+);

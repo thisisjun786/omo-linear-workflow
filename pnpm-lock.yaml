@@ -19,6 +19,9 @@ importers:
       omo-ai:
         specifier: 5.0.0-0.beta.84
         version: 5.0.0-0.beta.84
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
       zod:
         specifier: ^4.0.0
         version: 4.6.5
@@ -29,9 +32,6 @@ importers:
       '@types/bun':
         specifier: ^1.3.0
         version: 1.4.2
-      typescript:
-        specifier: ^5.9.0
-        version: 5.9.3
 
 packages:
 

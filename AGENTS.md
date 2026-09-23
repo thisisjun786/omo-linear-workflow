@@ -18,6 +18,18 @@ and the user's existing workspaces are read-only unless explicitly assigned.
   and its patch. `bun run build` prepares it; never fall back to a global PATH
   binary or restart existing servers as part of a build.
 
+## Proxy model policy
+
+- Read [the manual-first model policy](docs/proxy-model-policy.md) before changing
+  CLIProxyAPI registration, model visibility or `oauth-excluded-models`.
+- The user's direct registrations and management-UI enable/disable choices are
+  authoritative. Do not automatically regenerate exclusions or prune manually
+  registered OpenAI-compatible models from current OMO routing preferences.
+- Keep OMO picker scope at `all` unless the user explicitly requests a local
+  restriction again. OLW routing reads proxy availability; it does not own it.
+- Back up policy before an authorized change, preserve unrelated user entries,
+  and verify the live catalog without restarting existing sessions.
+
 ## Engineering
 
 Use strict TypeScript on Bun. Use Zod at input boundaries and bun:sqlite for any

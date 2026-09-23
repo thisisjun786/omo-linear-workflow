@@ -33,6 +33,7 @@ activation policy. Existing role guidance and approved Linear scope still apply.
 ```sh
 pnpm install --frozen-lockfile
 bun test tests/runtime
+bun scripts/qa-monitor.ts
 bun scripts/qa-linear.ts discovery
 bun scripts/qa-linear.ts discovery-reload
 bun scripts/qa-linear.ts discovery-host
@@ -49,7 +50,14 @@ caches, server and RPC process.
 
 The monitor regressions invoke the real file-monitor implementation with a
 virtual clock, actual filesystem create/modify events, cancellation and restored
-registry state. No fixed sleep or polling delay determines their result.
+registry state. `qa-monitor.ts` additionally closes and restarts the actual pinned
+RPC process using the same durable session file. It verifies retained monitor
+IDs, no false arrival on an unchanged restart, one notification per create/modify,
+and cancellation distinct from arrival or timeout. A local offline provider handles
+notification wakes; no user credentials or cloud model are used. Its raw receipts,
+manifests and cleanup record are written to
+`.omo/evidence/real-use-repairs/lina-146-native/native-run.json`.
+No fixed sleep or polling delay determines these results.
 
 These fixture checks are not live Linear OAuth, authorized-write, or OLW
 supervisor/parent acceptance evidence. Those checks remain distinct in the

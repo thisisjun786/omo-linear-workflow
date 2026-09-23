@@ -6,14 +6,32 @@ Linear에서 승인된 initiative 범위를 Herdr worktree와 OMO native thread�
 
 ## 준비
 
+공식 설치 대상은 **Linux x64**입니다. Bun >=1.4.0, Node.js >=24.20.0,
+pnpm 10.33.3과 Git을 먼저 준비합니다. Node/npm 설치 후
+`npm install --global pnpm@10.33.3`으로 필요한 pnpm 버전을 선택할 수 있습니다.
+그다음 계속 유지할 경로에 저장소를 받습니다.
+
 ```sh
+git clone https://github.com/thisisjun786/omo-linear-workflow.git ~/code/omo-linear-workflow
 cd ~/code/omo-linear-workflow
-pnpm install
-bun run build
+bun run install:local
+"$HOME/.local/bin/olw" --help
 bun run herdr --version
 bun run cli -- doctor --json
-bun run cli -- --help
 ```
+
+설치기는 lockfile을 고정한 의존성 설치와 관리형 전체 빌드를 실행한 뒤
+`~/.local/bin/olw`를 만듭니다. 다른 경로는
+`bun run install:local -- --bin-dir "$HOME/bin"`으로 지정합니다. 인수는 실행기
+파일명이 아닌 디렉터리입니다. `bun run install:local --help`에서 옵션을 확인할 수 있습니다. 다른 프로그램의
+파일이나 심볼릭 링크는 덮어쓰지 않고, 같은 체크아웃에서 재실행할 수 있습니다.
+설치한 체크아웃 경로를 유지하고 필요하면 bin 디렉터리를 PATH에 직접 추가합니다.
+실행기는 호출한 작업 디렉터리를 보존하고 이 체크아웃을 기본 control root로 사용합니다.
+
+선행 도구 자동 설치, 셸 설정 편집, 인증 설정, 프록시 정책 변경, 서비스·세션
+재시작은 하지 않습니다. 기존 `omo` 실행기도 교체하지 않습니다. 제거할 때는
+설치된 `olw` 실행기를 확인한 뒤 그 파일만 삭제합니다. 체크아웃, `.omo/` 상태와
+외부 접근 파일은 그대로 남습니다.
 
 `git`이 PATH에 있어야 합니다. 최초 빌드는 Rustup의 Rust 1.96.1과 Zig 0.16.0을 사용해
 OMO 지원 패치가 포함된 Herdr도 함께 준비합니다. `cargo`나 `zig`가 PATH에 없다면
@@ -24,6 +42,17 @@ Herdr는 별도로 맞춰 설치하는 선택 항목이 아니라 OLW의 필수 
 `bun run herdr`로 이 빌드를 실행할 수 있으며, OLW 역할 생성은 Herdr 안에서 실행합니다.
 TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하므로 전역 OMO 업데이트와 버전이 섞이지 않습니다. 아래 역할 모델을 제공하는 CLIProxyAPI와 프록시 접근 설정도 필요합니다.
 이 저장소가 제공사 자격 증명을 발급하거나 복사하지는 않습니다. 계정 로그인은 CLIProxyAPI에서 관리합니다.
+
+## 기여와 릴리즈
+
+[CONTRIBUTING.md](CONTRIBUTING.md)는 이슈, 변경 단위별 PR, 검증과 리뷰 규칙을
+설명합니다. GitHub에는 버그·기능 요청 양식과 PR 템플릿이 제공됩니다.
+[버전·릴리즈 정책](docs/releases.md)은 SemVer, `vVERSION` 태그, 소스 배포,
+업그레이드와 롤백을 다룹니다. 릴리즈 노트는 [CHANGELOG.md](CHANGELOG.md)에
+기록하며, `bun run release:check`로 패키지 버전과 노트를 검증합니다.
+CI는 제공자 인증 없이 필수 네이티브 Herdr 빌드와 격리 설치 검사까지 실행합니다.
+관리자가 버전 태그를 푸시하면 이 검사들이 통과한 뒤 GitHub 릴리즈를 발행합니다.
+아직 최초 태그는 발행하지 않았으며 위 clone 명령은 `main`을 설치합니다.
 
 ## 프록시 모델 확장
 

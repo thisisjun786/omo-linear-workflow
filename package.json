@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Herdr worktree sessions and event-driven Linear initiative orchestration for OMO",
   "engines": {
-    "bun": ">=1.4.0"
+    "bun": ">=1.4.0",
+    "node": ">=24.20.0"
   },
   "packageManager": "pnpm@10.33.3",
   "scripts": {
@@ -14,6 +15,8 @@
     "lint": "biome check src tests scripts",
     "cli": "bun src/cli.ts",
     "build": "bun scripts/build.ts",
+    "install:local": "bun scripts/install.ts",
+    "release:check": "bun scripts/release.ts",
     "herdr": "bun scripts/herdr.ts",
     "herdr:build": "bun scripts/build-herdr.ts",
     "qa:herdr": "bun scripts/qa-herdr.ts",

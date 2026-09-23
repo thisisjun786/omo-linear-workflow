@@ -6,14 +6,33 @@ A Bun CLI that connects an approved Linear initiative scope to Herdr worktrees a
 
 ## Setup
 
+The supported installation target is **Linux x64**. Install Bun >=1.4.0,
+Node.js >=24.20.0, pnpm 10.33.3 and Git first. With Node/npm already installed,
+`npm install --global pnpm@10.33.3` selects the required pnpm version.
+Then use a stable checkout path:
+
 ```sh
+git clone https://github.com/thisisjun786/omo-linear-workflow.git ~/code/omo-linear-workflow
 cd ~/code/omo-linear-workflow
-pnpm install
-bun run build
+bun run install:local
+"$HOME/.local/bin/olw" --help
 bun run herdr --version
 bun run cli -- doctor --json
-bun run cli -- --help
 ```
+
+The installer runs a frozen dependency install and the complete managed build,
+then creates `~/.local/bin/olw`. For another directory, use
+`bun run install:local -- --bin-dir "$HOME/bin"`; the argument is a directory,
+not the launcher filename. `bun run install:local --help` shows the options. It refuses to overwrite an
+unrelated command or symlink. Re-running it from the same checkout is supported.
+Keep the checkout at its installed path, and add the bin directory to PATH
+manually if needed. The launcher preserves your working directory and passes
+this checkout as the default control root.
+
+No prerequisite installer, shell-profile edit, credential setup, proxy-policy
+change or service/session restart is performed. The existing `omo` launcher is
+not replaced. To uninstall, inspect and remove only the installed `olw` launcher;
+your checkout, `.omo/` state and external access files remain.
 
 `git` must be on PATH. The first build uses Rust 1.96.1 from Rustup and Zig 0.16.0
 to prepare Herdr with the OMO support patch applied. If `cargo` or `zig` isn't on
@@ -27,6 +46,18 @@ roles inside Herdr. The TUI and the shared host run this repository's
 CLIProxyAPI serving the role models below, plus the proxy access configuration.
 This repository doesn't issue or copy provider credentials. Account logins are
 managed in CLIProxyAPI.
+
+## Contributing and releases
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers issues, focused PRs, verification and
+review expectations; GitHub supplies bug/feature forms and a PR template.
+[Version and release policy](docs/releases.md) defines SemVer, `vVERSION` tags,
+source-only releases, upgrades and rollback. [CHANGELOG.md](CHANGELOG.md) holds
+release notes. `bun run release:check` validates the package version and notes.
+CI runs without provider credentials and includes the required native Herdr
+build and an isolated installation smoke test. A maintainer-pushed version tag
+runs those checks before publishing a GitHub release. No initial tag has been
+published yet; the clone above installs `main`.
 
 ## Proxy model extension
 

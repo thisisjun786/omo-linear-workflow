@@ -6,8 +6,8 @@ settings:
 
 patchedDependencies:
   '@code-yeongyu/senpi@2026.9.22-4':
-    hash: 8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07
-    path: patches/senpi-mcp-optional-types.patch
+    hash: 7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179
+    path: patches/@code-yeongyu__senpi@2026.9.22-4.patch
 
 importers:
 
@@ -15,7 +15,7 @@ importers:
     dependencies:
       '@code-yeongyu/senpi':
         specifier: 2026.9.22-4
-        version: 2026.9.22-4(patch_hash=8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07)
+        version: 2026.9.22-4(patch_hash=7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179)
       omo-ai:
         specifier: 5.0.0-0.beta.84
         version: 5.0.0-0.beta.84
@@ -637,7 +637,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.14':
     optional: true
 
-  '@code-yeongyu/senpi@2026.9.22-4(patch_hash=8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07)':
+  '@code-yeongyu/senpi@2026.9.22-4(patch_hash=7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179)':
     optionalDependencies:
       '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.278
       '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.278
@@ -767,7 +767,7 @@ snapshots:
   omo-ai@5.0.0-0.beta.84:
     dependencies:
       '@babel/parser': 8.0.4
-      '@code-yeongyu/senpi': 2026.9.22-4(patch_hash=8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07)
+      '@code-yeongyu/senpi': 2026.9.22-4(patch_hash=7b9632b08d41cc97712fd3180d23c812f070d1b73d70c4b0528cc834e7aeb179)
 
   typescript@5.9.3: {}
 

@@ -36,7 +36,7 @@
   "pnpm": {
     "onlyBuiltDependencies": ["omo-ai"],
     "patchedDependencies": {
-      "@code-yeongyu/senpi@2026.9.22-4": "patches/senpi-mcp-optional-types.patch"
+      "@code-yeongyu/senpi@2026.9.22-4": "patches/@code-yeongyu__senpi@2026.9.22-4.patch"
     }
   },
   "devDependencies": {

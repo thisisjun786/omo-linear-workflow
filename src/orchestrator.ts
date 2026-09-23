@@ -14,7 +14,12 @@ import type {
   Result,
   ScopeSnapshot,
 } from "./core/contracts";
-import { initializationMessageId, matchesRuntime, modelForRole } from "./core/policy";
+import {
+  initializationMessageId,
+  matchesRuntime,
+  modelForBinding,
+  modelForRole,
+} from "./core/policy";
 import { openRegistry } from "./core/store";
 import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
@@ -768,6 +773,8 @@ export class Orchestrator {
           join(this.#root, "node_modules/.bin/omo"),
           "-e",
           join(this.#root, "dist/extension/index.js"),
+          "-e",
+          join(this.#root, "dist/proxy/index.js"),
           "--session",
           seedPath,
           "--name",
@@ -834,7 +841,7 @@ export class Orchestrator {
     let session: NativeSession | undefined;
     try {
       session = await this.#deps.attachBinding(binding);
-      await session.configure(modelForRole(binding.assignment.role));
+      await session.configure(modelForBinding(binding));
       const identity = await session.describe();
       if (!identity.ok) return identity;
       return this.#withRegistry((registry) => registry.activate(binding.id, identity.value));

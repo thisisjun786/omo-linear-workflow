@@ -125,9 +125,9 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
       clients.push(client);
       const state = await client.getState();
       const expected = {
-        supervisor: ["chatgpt-subscription", "gpt-6-astra", "high"],
-        parent: ["kimi-coding", "k3", "max"],
-        child: ["anthropic-subscription", "claude-opus-5", "xhigh"],
+        supervisor: ["cliproxyapi", "gpt-6-astra", "high"],
+        parent: ["cliproxyapi", "claude-opus-5-5", "xhigh"],
+        child: ["cliproxyapi", "claude-opus-5-5", "xhigh"],
       } as const;
       const tuple = expected[binding.assignment.role];
       if (

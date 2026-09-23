@@ -8,6 +8,7 @@ await ensureHerdrBuild(root);
 await rm(output, { recursive: true, force: true });
 await mkdir(join(output, "core"), { recursive: true });
 await mkdir(join(output, "extension"), { recursive: true });
+await mkdir(join(output, "proxy"), { recursive: true });
 
 async function build(entrypoint: string, outfile: string, target: "bun" | "node"): Promise<void> {
   const result = await Bun.build({
@@ -17,6 +18,7 @@ async function build(entrypoint: string, outfile: string, target: "bun" | "node"
     target,
     format: "esm",
     packages: "external",
+    external: ["@earendil-works/pi-ai", "@earendil-works/pi-ai/*"],
     sourcemap: "external",
     minify: false,
   });
@@ -29,4 +31,5 @@ async function build(entrypoint: string, outfile: string, target: "bun" | "node"
 await build("src/cli.ts", "dist/cli.js", "bun");
 await build("src/core/worker.ts", "dist/core/worker.js", "bun");
 await build("src/extension/index.ts", "dist/extension/index.js", "node");
-process.stdout.write("Built dist/cli.js, dist/core/worker.js, dist/extension/index.js\n");
+await build("src/proxy/index.ts", "dist/proxy/index.js", "node");
+process.stdout.write("Built CLI, worker, session and proxy extensions\n");

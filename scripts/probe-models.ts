@@ -17,9 +17,9 @@ class ProbeError extends Error {
 }
 
 const roles = [
-  { role: "supervisor", model: "chatgpt-subscription/gpt-6-astra", thinking: "high" },
-  { role: "parent", model: "kimi-coding/k3", thinking: "max" },
-  { role: "child", model: "anthropic-subscription/claude-opus-5", thinking: "xhigh" },
+  { role: "supervisor", model: "cliproxyapi/gpt-6-astra", thinking: "high" },
+  { role: "parent", model: "cliproxyapi/claude-opus-5-5", thinking: "xhigh" },
+  { role: "child", model: "cliproxyapi/claude-opus-5-5", thinking: "xhigh" },
 ] as const;
 
 for (const role of roles) {

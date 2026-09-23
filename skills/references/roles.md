@@ -10,9 +10,9 @@ here is itself an enforcement, and Linear permissions aren't enforced by these s
 
 | Role | Bound to | Model / reasoning | Workspace | Instructs | Reports to |
 |---|---|---|---|---|---|
-| Supervisor | one initiative ID | `chatgpt-subscription/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
-| Parent | one project ID | `kimi-coding/k3` / `max` | Herdr worktree on the project integration branch | its own issue children only | its supervisor |
-| Child | one issue ID | `anthropic-subscription/claude-opus-5` / `xhigh` | Herdr worktree forked from its parent's branch | nobody | its parent |
+| Supervisor | one initiative ID | `cliproxyapi/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
+| Parent | one project ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | its supervisor |
+| Child | one issue ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | nobody | its parent |
 
 A task holds exactly one live scope in exactly one role. A parent doesn't also supervise, and a
 supervisor holds no checkout and merges nothing. Peer parents may coordinate directly, but neither

@@ -83,9 +83,9 @@ async function fixture(run: (fixture: Fixture) => Promise<void>): Promise<void> 
     Binding["assignment"]["role"],
     { readonly provider: string; readonly modelId: string; readonly thinking: string }
   > = {
-    supervisor: { provider: "chatgpt-subscription", modelId: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "kimi-coding", modelId: "k3", thinking: "max" },
-    child: { provider: "anthropic-subscription", modelId: "claude-opus-5", thinking: "xhigh" },
+    supervisor: { provider: "cliproxyapi", modelId: "gpt-6-astra", thinking: "high" },
+    parent: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
+    child: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
   };
   const activate = (binding: Binding) => {
     value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
@@ -244,9 +244,9 @@ function context(binding: Binding, mode: SessionContextPort["mode"] = "rpc"): Se
     Binding["assignment"]["role"],
     { readonly provider: string; readonly id: string; readonly thinking: string }
   > = {
-    supervisor: { provider: "chatgpt-subscription", id: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "kimi-coding", id: "k3", thinking: "max" },
-    child: { provider: "anthropic-subscription", id: "claude-opus-5", thinking: "xhigh" },
+    supervisor: { provider: "cliproxyapi", id: "gpt-6-astra", thinking: "high" },
+    parent: { provider: "cliproxyapi", id: "claude-opus-5-5", thinking: "xhigh" },
+    child: { provider: "cliproxyapi", id: "claude-opus-5-5", thinking: "xhigh" },
   };
   return {
     cwd: binding.cwd,

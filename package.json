@@ -18,7 +18,8 @@
     "herdr:build": "bun scripts/build-herdr.ts",
     "qa:herdr": "bun scripts/qa-herdr.ts",
     "qa:events": "bun scripts/qa-events.ts",
-    "qa:linear": "bun scripts/qa-linear.ts"
+    "qa:linear": "bun scripts/qa-linear.ts",
+    "qa:proxy": "bun scripts/qa-proxy.ts"
   },
   "dependencies": {
     "@code-yeongyu/senpi": "2026.9.22-4",

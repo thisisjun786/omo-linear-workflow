@@ -72,6 +72,7 @@ describe("host profile", () => {
     const root = await ownedRoot("omo-cli-profile-");
     await Bun.write(join(root, "node_modules/omo-ai/plugin/extensions/omo-member.js"), "");
     await Bun.write(join(root, "dist/extension/index.js"), "");
+    await Bun.write(join(root, "dist/proxy/index.js"), "");
     await chmod(join(root, "node_modules/omo-ai/plugin"), 0o755);
 
     const path = await createHostProfile(root);
@@ -85,6 +86,7 @@ describe("host profile", () => {
           "./node_modules/omo-ai/plugin",
           "./node_modules/omo-ai/plugin/extensions/omo-member.js",
           "./dist/extension/index.js",
+          "./dist/proxy/index.js",
         ],
       },
       tunables: { coldStart: "persistent" },
@@ -197,6 +199,7 @@ class FakeHerdr implements HerdrClient {
     expect(argv).toContain(join(this.root, "node_modules/.bin/omo"));
     expect(argv).not.toContain("omo");
     expect(argv).toContain(join(this.root, "dist/extension/index.js"));
+    expect(argv).toContain(join(this.root, "dist/proxy/index.js"));
     if (this.verifyIdentity) {
       const fileIndex = argv.indexOf("--session");
       const idIndex = argv.indexOf("--session-id");
@@ -212,7 +215,7 @@ class FakeHerdr implements HerdrClient {
       const restored = SessionManager.open(file, join(this.cwd, "sessions"), this.cwd);
       expect(restored.getSessionId()).toBe(requestedId);
       expect(restored.buildSessionContext().model).toEqual({
-        provider: "chatgpt-subscription",
+        provider: "cliproxyapi",
         modelId: "gpt-6-astra",
       });
       expect(restored.buildSessionContext().thinkingLevel).toBe("high");

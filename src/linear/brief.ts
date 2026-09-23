@@ -52,9 +52,15 @@ function roleBehavior(role: Binding["assignment"]["role"]): string {
     lines.push("  scope: one designated issue");
     lines.push("  report_to_parent: true");
     lines.push("  implement_only_this_issue: true");
+    lines.push("  execution_mode: mass-ulw");
+    lines.push("  execution_trigger: explicit_issue_packet");
+    lines.push("  execution_skills: [olw-run, mass-ulw]");
+    lines.push("  internal_workers: native_workflow_nodes_not_roles");
+    lines.push("  issue_goal: packet_bound");
+    lines.push("  verify_artifacts_before_report: true");
   }
   lines.push("  wait_for_explicit_instruction: true");
-  lines.push("  no_autonomous_goal_loop: true");
+  if (role !== "child") lines.push("  no_autonomous_goal_loop: true");
   return lines.join("\n");
 }
 
@@ -77,7 +83,9 @@ export function buildRoleBrief(binding: Binding, snapshot: ScopeSnapshot): strin
       "qa_standby: true",
       "respond_only_to_explicit_messages: true",
       "never_fetch_live_linear: true",
-      "never_create_additional_sessions: true",
+      binding.assignment.role === "child"
+        ? "never_create_additional_olw_roles: true"
+        : "never_create_additional_sessions: true",
       "never_implement_repository_work_autonomously: true",
     );
   }

@@ -1,6 +1,6 @@
 ---
 name: olw-run
-description: "Execute approved Linear scope as one of three roles: a supervisor over one initiative's parents, a parent over one project's issue children, or a child over one issue. Uses the omo-linear-workflow CLI for designation, creation, instructions and reports; no goals, no polling, native delivery wakes the next turn. Use olw-plan for planning and olw-check for drift."
+description: "Execute approved Linear scope as one of three roles: a supervisor over one initiative's parents, a parent over one project's issue children, or a child over one issue. Uses the omo-linear-workflow CLI for designation, creation, instructions and reports; issue children execute with mass-ulw, while parents and supervisors wait on native delivery without goal loops or polling. Use olw-plan for planning and olw-check for drift."
 ---
 
 # OLW Run
@@ -62,9 +62,11 @@ bun "$OMO_INITIATIVE_ROOT/dist/cli.js" send --from <PARENT> --to <CHILD> --id <M
 ```
 
 The child's base branch comes from the registry, not the packet. The packet carries the issue
-ID, the criteria verbatim, the integration branch, the delivery limits, what evidence to return
-and how to report. Creation returns readiness separately from execution state; a created child
-has done nothing yet.
+ID, the criteria verbatim, the integration branch, allowed write scope, delivery limits, an
+absolute evidence directory, and what evidence to return. Its envelope ID identifies this
+packet; the child uses `report:<packet-id>` for its single final report. Creation selects
+mass-ulw mode but returns readiness separately from execution: a created child has done
+nothing yet. Only an explicit issue packet starts work.
 
 When a child's report arrives, verify before integrating: compare the reported head and
 evidence against the criteria at that head, re-read the base, and merge into the project
@@ -84,10 +86,46 @@ supervisor judges it.
 
 ## Child
 
-Own one issue on a worktree forked from the parent's branch. Implement against the criteria in
-the packet, run the repository's checks, commit on the branch, and push or open a PR only where
-the packet allows. Never merge, never touch the parent branch, never write Linear records, and
-never contact anyone but the parent. Then report:
+Own one issue on a worktree forked from the parent's branch. Startup selects `mass-ulw` mode
+and the `olw-run` and `mass-ulw` execution skills; it does not create a goal, run or worker.
+Wait for the parent's explicit issue packet. Check its issue ID against the binding and read
+its full criteria and limits. If they disagree, report `blocked` without launching work.
+Fixture standby still forbids live Linear access and autonomous work; only an explicit fixture
+packet can authorize internal workflow nodes, never additional OLW roles or direct
+`thread_create` calls.
+
+Load the installed `mass-ulw` skill and its complete planning reference before defining a graph.
+It owns native DAG syntax, category routing and recovery. Apply these OLW boundaries:
+
+1. Register one goal for this packet's assigned issue, with the criteria and independent
+   artifact/check verification. Reuse it across phases; never create a goal per node or expand
+   it to the project. If the packet supplies no evidence directory, use
+   `$OMO_INITIATIVE_ROOT/.omo/evidence/olw/<binding-id>/<packet-id>/`.
+2. Start one native workflow run per phase, keyed `olw:<binding-id>:<packet-id>:p<n>`, and retain
+   its actual `run_id`. Workers use the child's checkout or native task isolation derived from
+   it, with absolute artifact paths and disjoint write scopes. They are category workers, not
+   OLW/Linear owners. Each self-contained English node prompt starts with `TASK:` and names
+   `DELIVERABLE`, `SCOPE`, `VERIFY` and `STOP WHEN`. Workers must not invoke the OLW CLI, create
+   roles, delegate further, open goals, contact Linear or other roles, merge, commit, push or open
+   a PR. The child remains responsible for the work and any authorized commit.
+3. Include a verification node depending on the producers, using the repository's real checks
+   and artifacts. Dependency edges only order work: pass artifact paths explicitly. Start
+   returns immediately; node and settlement notifications resume the same packet. End the
+   turn while only waiting remains. Do not poll snapshots or keep a cell blocked on `wait`.
+4. Treat node/run completion as a claim. Inspect actual artifacts and check outputs yourself.
+   Recover in the same run with `retry`, `amend` or `send` as the native skill specifies;
+   completed-but-wrong work needs `amend`, not a fresh run key. Preserve valid completed work.
+   A missing artifact, failed check or blocked node is not completed issue delivery.
+5. Record binding/issue/packet IDs, the goal, each run key/ID, node states and attempts, artifact
+   paths, checks and results, recovery actions, head and branch in `evidence.json`. Implement
+   and commit only within the packet's permissions; push or open a PR only if it allows.
+   Recheck the head and evidence before reporting once with `report:<packet-id>`. Complete
+   the issue goal after verified delivery, not after the last node finishes. Parent acceptance
+   is separate and is not part of the child's goal. A later correction packet reuses the
+   existing issue owner and applicable run evidence; it is not a reason to duplicate workers.
+
+Never merge, touch the parent branch or write Linear records. Among OLW roles, contact only
+the parent. Report through the existing claimed route, never directly from an internal node:
 
 ```sh
 bun "$OMO_INITIATIVE_ROOT/dist/cli.js" report --from <CHILD> --id <MESSAGE_ID> --outcome completed --evidence <ABS_PATH> --text-file result.txt --json
@@ -101,9 +139,11 @@ make is `blocked` with the exact question; a check that failed and can't be fixe
 ## Waiting and recovery
 
 After sending instructions, end the turn when only waiting remains. The child's `report`
-wakes this session through native delivery; don't poll `status`, hold a goal or re-prompt
-yourself. On any wake, re-read your own outstanding assignments from `status` before acting on
-the payload that woke you, so events that arrived mid-turn aren't lost.
+wakes a parent or supervisor through native delivery; they must not poll `status`, hold a goal
+or re-prompt themselves. A child's packet-bound execution goal is the sole exception: native
+workflow notifications resume its active phase, without polling or starting unrelated work.
+On any wake, re-read your own outstanding assignments from `status` before acting on the
+payload that woke you, so events that arrived mid-turn aren't lost.
 
 Choose each message ID once. Retrying an uncertain send reuses the same ID and text; exit 4
 means uncertain, and the answer is one `reconcile`, never a resend under a new ID. Pause a

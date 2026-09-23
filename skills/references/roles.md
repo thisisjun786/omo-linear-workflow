@@ -12,7 +12,7 @@ here is itself an enforcement, and Linear permissions aren't enforced by these s
 |---|---|---|---|---|---|
 | Supervisor | one initiative ID | `cliproxyapi/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
 | Parent | one project ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | its supervisor |
-| Child | one issue ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | nobody | its parent |
+| Child | one issue ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
 
 A task holds exactly one live scope in exactly one role. A parent doesn't also supervise, and a
 supervisor holds no checkout and merges nothing. Peer parents may coordinate directly, but neither
@@ -21,6 +21,14 @@ assigns the other's work; a supervisor settles only what the pair can't settle a
 Identity is the stable ID: the Linear initiative, project or issue ID plus the durable OMO
 session ID recorded in the registry. A title, folder, branch, pane, chat link or display name
 makes no role and moves no ownership. Don't route by the focused pane or a working directory.
+
+A child starts in mass-ulw mode but waits for an explicit issue packet. Its native workflow
+nodes are implementation workers, not another hierarchy level or registry owner. They use
+category routing rather than the child role's fixed model assignment. The child owns their
+scope, phase runs, verification and final report; the parent still owns acceptance and
+integration. The [child execution contract](../run/SKILL.md#child) defines the goal, keys,
+worker limits, evidence and recovery. These are execution instructions, not a filesystem
+sandbox or new permission enforcement in the native DAG engine.
 
 ## Definition is not execution approval
 
@@ -63,12 +71,17 @@ Five states stay distinct and are never collapsed into one word:
 
 Idle, `agent_end` or a Herdr "done" state is telemetry. It's never accepted delivery.
 
-## No goals, no polling
+## Event-driven waiting
 
 A parent or supervisor ends its turn when only waiting remains. The next turn starts when the
 native delivery path wakes it with a child's report; it doesn't hold a goal, loop on status reads
 or re-prompt itself. Status reads never wake anyone. A lost or uncertain send is reconciled by
 reading the registry once, never resent under a new ID.
+
+Only an issue child may hold a goal, bounded to its explicit issue packet. It starts phase
+runs through mass-ulw, ends its turn while waiting for native workflow notifications, verifies
+results and reports through the normal route. A DAG finishing is neither a verified child
+report nor parent/Linear acceptance. Startup alone never authorizes a goal or run.
 
 ## The CLI these roles use
 

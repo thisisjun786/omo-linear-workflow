@@ -11,7 +11,10 @@ and the user's existing workspaces are read-only unless explicitly assigned.
 - Runtime bindings use stable IDs, not display labels or the focused pane.
 - Linear owns accepted scope and decisions. Local storage owns runtime identity
   and delivery receipts. Never infer accepted delivery from an idle agent.
-- Event-driven delivery only. No agent goal loops or repeated prompt polling.
+- Event-driven delivery only. No supervisor/parent goal loops or repeated prompt
+  polling. An issue child may hold one explicit packet-bound goal and run native
+  mass-ulw phases; its workers are not OLW roles. Follow the child contract in
+  `skills/run/SKILL.md`, verify artifacts, and keep parent acceptance separate.
 - Preserve user focus with explicit IDs and `--no-focus`.
 - Do not silently replace a requested model or reasoning level.
 - Herdr is a required managed runtime, pinned by `vendor/herdr/manifest.json`

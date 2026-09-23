@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type { Binding, Result, ScopeSnapshot } from "../src/core/contracts";
 import { buildRoleBrief, readScopeSnapshot } from "../src/linear";
 
@@ -240,6 +241,55 @@ describe("buildRoleBrief", () => {
     expect(brief).toContain("project_id: project-omo-1");
     expect(brief).toContain("issue_id: issue-omo-1");
   });
+
+  test.each(["fixture", "linear-export"] as const)(
+    "child selects packet-bound workflow execution for %s scope",
+    (source) => {
+      const brief = buildRoleBrief(makeBinding("child"), { ...snapshot, source });
+      const parsed = z.record(z.string(), z.unknown()).parse(Bun.YAML.parse(brief));
+      expect(parsed).toMatchObject({
+        role: "child",
+        scope_refs: { issue_id: "issue-omo-1" },
+        behavior: {
+          execution_mode: "mass-ulw",
+          execution_trigger: "explicit_issue_packet",
+          execution_skills: ["olw-run", "mass-ulw"],
+          internal_workers: "native_workflow_nodes_not_roles",
+          issue_goal: "packet_bound",
+          verify_artifacts_before_report: true,
+          wait_for_explicit_instruction: true,
+        },
+      });
+      const behavior = z.record(z.string(), z.unknown()).parse(parsed["behavior"]);
+      expect(behavior["no_autonomous_goal_loop"]).toBeUndefined();
+      if (source === "fixture") {
+        expect(parsed).toMatchObject({
+          qa_standby: true,
+          respond_only_to_explicit_messages: true,
+          never_fetch_live_linear: true,
+          never_create_additional_olw_roles: true,
+          never_implement_repository_work_autonomously: true,
+        });
+        expect(parsed["never_create_additional_sessions"]).toBeUndefined();
+      } else {
+        expect(parsed["qa_standby"]).toBeUndefined();
+      }
+    },
+  );
+
+  test.each(["parent", "supervisor"] as const)(
+    "%s retains event-driven coordination without an issue workflow",
+    (role) => {
+      const brief = buildRoleBrief(makeBinding(role), snapshot);
+      const parsed = z
+        .object({ behavior: z.record(z.string(), z.unknown()) })
+        .parse(Bun.YAML.parse(brief.slice(brief.indexOf("behavior:"))));
+      expect(parsed.behavior["no_autonomous_goal_loop"]).toBe(true);
+      expect(parsed.behavior["wait_for_explicit_instruction"]).toBe(true);
+      expect(parsed.behavior["execution_mode"]).toBeUndefined();
+      expect(parsed.behavior["issue_goal"]).toBeUndefined();
+    },
+  );
 
   test("fixture brief instructs qa standby without autonomous loops", () => {
     const binding = makeBinding("supervisor");

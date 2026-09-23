@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding } from "../src/core/contracts";
-import { bindingSchema } from "../src/core/schema";
+import { bindingSchema, resultSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { createHerdrClient } from "../src/herdr";
 import { QaError } from "./qa-rpc";
 import { checkedQaCommand, prepareQaWorld } from "./qa-world";
@@ -138,6 +138,23 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
         throw new QaError(`Wrong actual model tuple for ${binding.assignment.role}`);
       }
       await idle(client);
+      const reloaded = await client.reload();
+      if (reloaded.cancelled) throw new QaError(`QA reload cancelled: ${reloaded.reason}`);
+      const described = resultSchema(runtimeIdentitySchema).parse(
+        await client.requestExtension("omo.initiative.describe"),
+      );
+      if (
+        !described.ok ||
+        described.value.durableSessionId !== binding.durableSessionId ||
+        described.value.sessionPath !== binding.sessionPath ||
+        described.value.cwd !== binding.cwd ||
+        described.value.provider !== tuple[0] ||
+        described.value.modelId !== tuple[1] ||
+        described.value.thinking !== tuple[2]
+      ) {
+        throw new QaError(`Wrong runtime identity after ${binding.assignment.role} reload`);
+      }
+      console.log("RELOAD_PASS", binding.assignment.role);
       console.log(
         "ROLE_PASS",
         JSON.stringify({

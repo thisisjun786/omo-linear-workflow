@@ -79,11 +79,29 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   const dbPath = join(config.root, ".omo/state/registry.sqlite");
   const workerPath = join(config.root, "dist/core/worker.js");
   let currentContext: SessionContextPort | undefined;
+  const sessionStarted = Promise.withResolvers<void>();
   const dispatch = new AsyncLocalStorage<{
     readonly senderSessionId: string;
     readonly input: z.infer<typeof nativeSendInputSchema>;
     used: boolean;
   }>();
+
+  async function contextWhenStarted(): Promise<SessionContextPort | undefined> {
+    if (currentContext !== undefined) return currentContext;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Reload registers RPC handlers before it emits session_start.
+      await Promise.race([
+        sessionStarted.promise,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, 10_000);
+        }),
+      ]);
+      return currentContext;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 
   async function worker<T>(
     action: WorkerAction,
@@ -132,6 +150,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
 
   port.onSessionStart(async (ctx) => {
     currentContext = ctx;
+    sessionStarted.resolve();
     if (config.hostRuntime || ctx.mode !== "tui") return;
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (sessionPath === undefined) return;
@@ -147,7 +166,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   });
 
   port.handleRpc("omo.initiative.describe", async () => {
-    const ctx = currentContext;
+    const ctx = await contextWhenStarted();
     if (ctx === undefined) return failure("session_unavailable", "Session has not started");
     const binding = await lookup(ctx.sessionManager.getSessionId());
     if (!binding.ok) return binding;
@@ -168,7 +187,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   });
 
   port.handleRpc("omo.initiative.send", async (data) => {
-    const ctx = currentContext;
+    const ctx = await contextWhenStarted();
     if (ctx === undefined) return failure("session_unavailable", "Session has not started");
     const envelope = envelopeSchema.safeParse(data);
     if (!envelope.success)

@@ -288,6 +288,48 @@ function resultState(value: unknown): string {
 }
 
 describe("native delivery extension", () => {
+  test("describes a live role when RPC arrives before session_start after reload", async () => {
+    await fixture(async ({ root, parent }) => {
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+
+      const pending = harness.rpc("omo.initiative.describe")(undefined);
+      await harness.start()(context(parent));
+
+      expect(await pending).toEqual({
+        ok: true,
+        value: {
+          durableSessionId: parent.durableSessionId,
+          sessionPath: parent.sessionPath,
+          cwd: parent.cwd,
+          provider: "cliproxyapi",
+          modelId: "claude-opus-5-5",
+          thinking: "xhigh",
+          extensionProtocol: 1,
+        },
+      });
+    });
+  });
+
+  test("delivers once when RPC arrives before session_start after reload", async () => {
+    await fixture(async ({ root, supervisor, parent, digest }) => {
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(supervisor));
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+
+      const pending = harness.rpc("omo.initiative.send")(
+        envelope(supervisor, parent, digest, "reload-message"),
+      );
+      await harness.start()(context(supervisor));
+
+      expect(resultState(await pending)).toBe("accepted");
+      expect(harness.executeCount).toBe(1);
+    });
+  });
+
   test("activates thread_send, persists acceptance, and replays without a native resend", async () => {
     await fixture(async ({ root, supervisor, parent, digest }) => {
       const harness = new Harness();

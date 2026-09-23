@@ -2,6 +2,9 @@
 
 The current executable result is [final-runtime.md](final-runtime.md), not the
 intermediate producer logs. Implementation commit: `621a21b`.
+The separately requested Herdr 0.9.1 patch is verified and installed:
+[port](herdr-0.9.1-port.md), [live QA](herdr-detection-qa.md),
+[installation and rollback](herdr-installation.md).
 
 | Requirement | Failing-first evidence | Current passing evidence |
 | --- | --- | --- |

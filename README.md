@@ -95,3 +95,11 @@ workspace 생성 응답 자체가 유실됐다면 Herdr를 직접 확인해야 �
 하나의 Herdr server와 하나의 native OMO host를 사용합니다. 자동 merge, release, Linear mutation은 제공하지 않습니다. native acceptance, 작업 완료 보고, Linear acceptance는 서로 다른 상태입니다. `pause`와 `resume`은 연락 허용 상태만 바꾸며 세션을 재생성하지 않습니다. 종료나 불확실한 작업 결과가 Linear 완료를 뜻하지는 않습니다.
 
 실제 Herdr/모델/보고 QA는 통과했습니다. Live Linear OAuth와 실제 Linear 쓰기는 실행하지 않았습니다. 기본 Herdr의 OMO 탐지 지원 여부는 이 CLI의 실행·통신과 별개입니다.
+
+## 이 머신의 Herdr 설치
+
+OMO 탐지 패치를 이식한 Herdr 0.9.1을 `~/.local/bin/herdr`에 설치했습니다. 소스는 `~/code/herdr-omo-0.9.1`에 있으며, 기존 `~/code/herdr-omo` 수정본은 보존했습니다. 실제 OMO의 `working → done` 전이와 detached-eval reporter의 보고·해제를 격리 서버에서 검증했습니다.
+
+현재 기본 Herdr 서버와 세션은 재시작하지 않았습니다. 새 탐지는 기본 서버를 나중에 재시작한 뒤 적용됩니다. 기존 바이너리는 `~/backups/herdr-0.9.1-stock-20260923T034357Z/herdr`에 보관했습니다.
+
+검증 결과와 설치 해시는 [evidence index](.omo/evidence/README.md) 및 [Herdr 설치 기록](.omo/evidence/herdr-installation.md)에 있습니다.

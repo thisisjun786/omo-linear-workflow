@@ -62,6 +62,10 @@ export async function prepareQaWorld() {
     HERDR_SOCKET_PATH: undefined,
     HERDR_CLIENT_SOCKET_PATH: undefined,
     OMO_CODING_AGENT_SESSION_DIR: join(scratch, "omo-sessions"),
+    // Bun caches the temporary runtime-shim path; isolate CLI and host caches.
+    // The host strips BUN_* but retains XDG_CACHE_HOME.
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(scratch, "bun-cache"),
+    XDG_CACHE_HOME: join(scratch, "xdg-cache"),
   };
   await mkdir(controlRoot);
   await mkdir(repository);
@@ -185,6 +189,15 @@ export async function prepareQaWorld() {
           for (const binding of bindings.value) {
             ownedSessions.add(binding.durableSessionId);
             if (binding.workspaceId === null) continue;
+            if (
+              binding.checkout !== null &&
+              (binding.checkout.originalRepoRoot !== repository ||
+                !binding.cwd.startsWith(`${controlRoot}/.omo/worktrees/`))
+            ) {
+              throw new QaError(
+                `Refusing to remove a worktree outside the QA fixture: ${binding.cwd}`,
+              );
+            }
             const ledger = binding.checkout === null ? workspaces : worktrees;
             if (!ledger.includes(binding.workspaceId)) ledger.push(binding.workspaceId);
           }
@@ -238,7 +251,14 @@ export async function prepareQaWorld() {
       }
       for (const workspace of worktrees.toReversed()) {
         if (activeWorkspaces.has(workspace))
-          await run(["worktree", "remove", "--workspace", workspace, "--trust-repository"]);
+          await run([
+            "worktree",
+            "remove",
+            "--workspace",
+            workspace,
+            "--trust-repository",
+            "--force",
+          ]);
       }
       for (const workspace of workspaces.toReversed()) {
         if (activeWorkspaces.has(workspace)) await run(["workspace", "close", workspace]);

@@ -21,6 +21,7 @@
     "herdr:build": "bun scripts/build-herdr.ts",
     "qa:herdr": "bun scripts/qa-herdr.ts",
     "qa:events": "bun scripts/qa-events.ts",
+    "qa:child-workflow": "bun scripts/qa-child-workflow.ts",
     "qa:linear": "bun scripts/qa-linear.ts",
     "qa:proxy": "bun scripts/qa-proxy.ts",
     "qa:routing": "bun scripts/qa-routing.ts",

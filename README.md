@@ -1,4 +1,4 @@
-# OMO Initiative
+# OMO Linear Workflow (OLW)
 
 Linear에서 승인된 initiative 범위를 Herdr worktree와 OMO native thread에 연결하는 Bun CLI입니다. Linear가 범위와 결정을 소유하고, 로컬 SQLite는 승인된 snapshot, 실행 권한, runtime identity와 delivery receipt를 보관합니다.
 

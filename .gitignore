@@ -6,6 +6,7 @@ dist/
 .omo/discovery/
 .omo/state/
 .omo/worktrees/
+.omo/thread-tools/
 omo-host.json
 *.sqlite
 *.sqlite-shm

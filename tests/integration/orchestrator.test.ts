@@ -95,6 +95,7 @@ describe("host profile", () => {
         OMO_INITIATIVE_HOST: "1",
         OMO_INITIATIVE_ROOT: root,
         OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
+        OMO_INITIATIVE_CACHE_V1: "1",
       },
     });
     await rm(root, { recursive: true, force: true });
@@ -195,6 +196,12 @@ class FakeHerdr implements HerdrClient {
     const separator = process.platform === "win32" ? ";" : ":";
     expect(env).toEqual({
       PATH: `${join(this.root, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: expect.stringMatching(
+        new RegExp(`^${RegExp.escape(join(this.root, ".omo/cache"))}/[^/]+/cli$`),
+      ),
+      XDG_CACHE_HOME: expect.stringMatching(
+        new RegExp(`^${RegExp.escape(join(this.root, ".omo/cache"))}/[^/]+/host$`),
+      ),
     });
     expect(argv).toContain(join(this.root, "node_modules/.bin/omo"));
     expect(argv).not.toContain("omo");
@@ -366,6 +373,12 @@ describe("orchestrator startup", () => {
           const separator = process.platform === "win32" ? ";" : ":";
           expect(env["PATH"]).toBe(
             `${join(controlRoot, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
+          );
+          expect(env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"]).toMatch(
+            new RegExp(`^${RegExp.escape(join(controlRoot, ".omo/cache"))}/[^/]+/cli$`),
+          );
+          expect(env["XDG_CACHE_HOME"]).toMatch(
+            new RegExp(`^${RegExp.escape(join(controlRoot, ".omo/cache"))}/[^/]+/host$`),
           );
           events.push("host");
         },

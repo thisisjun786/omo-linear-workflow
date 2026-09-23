@@ -23,7 +23,12 @@ import {
 import { openRegistry } from "./core/store";
 import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
-import { createHostProfile } from "./host-profile";
+import {
+  createHostProfile,
+  HostProfileMismatchError,
+  readHostStatus,
+  runtimeCacheEnvironment,
+} from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot } from "./linear";
 import { ensureRouting } from "./proxy/routing-launch";
 import { removeReadiness, subscribeReadiness } from "./readiness";
@@ -102,6 +107,11 @@ export interface OrchestratorDependencies {
     socket: string,
     env: Readonly<Record<string, string | undefined>>,
   ) => Promise<void>;
+  readonly checkHostProfile?: (
+    root: string,
+    socket: string,
+    env: Readonly<Record<string, string | undefined>>,
+  ) => Promise<void>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
   readonly gitTip: (repo: string, revision: string) => Promise<string>;
   readonly now: () => string;
@@ -124,8 +134,11 @@ function managedHerdrPath(artifactDir: string): string {
   if (!inheritedPath) return artifactDir;
   return `${artifactDir}${process.platform === "win32" ? ";" : ":"}${inheritedPath}`;
 }
-function launchEnvironment(managedPath: string): Readonly<Record<string, string | undefined>> {
-  return { ...process.env, PATH: managedPath };
+function launchEnvironment(
+  root: string,
+  managedPath: string,
+): Readonly<Record<string, string | undefined>> {
+  return { ...process.env, PATH: managedPath, ...runtimeCacheEnvironment(root) };
 }
 
 /** Decode either P2's normalized pane callback or Herdr's pane.updated envelope. */
@@ -160,7 +173,11 @@ async function defaultEnsureHost(
     ],
     { cwd: root, env, stdout: "pipe", stderr: "pipe" },
   );
-  const [code, stderr] = await Promise.all([process.exited, new Response(process.stderr).text()]);
+  const [code, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stderr).text(),
+    new Response(process.stdout).text(),
+  ]);
   if (code !== 0) throw new Error(`omo host ensure failed (${code}): ${stderr.trim()}`);
 }
 
@@ -269,6 +286,9 @@ const defaults: OrchestratorDependencies = {
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
+  checkHostProfile: async (root, socket, env) => {
+    await createHostProfile(root, await readHostStatus(root, socket, env));
+  },
   prompt: defaultPrompt,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
@@ -523,7 +543,11 @@ export class Orchestrator {
       if (binding.sessionPath !== null) {
         const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
         const managedPath = managedHerdrPath(artifact.artifactDir);
-        await this.#deps.ensureHost(this.#root, binding.omoSocket, launchEnvironment(managedPath));
+        await this.#deps.ensureHost(
+          this.#root,
+          binding.omoSocket,
+          launchEnvironment(this.#root, managedPath),
+        );
         await this.#deps.terminateBinding(binding);
       }
       await removeReadiness(this.#root, binding.id);
@@ -678,7 +702,7 @@ export class Orchestrator {
         messageOf(cause),
       );
     }
-    const environment = launchEnvironment(managedPath);
+    const environment = launchEnvironment(this.#root, managedPath);
     const bindingId = fixedBindingId ?? this.#deps.uuid();
     const reserved = this.#withRegistry((registry) =>
       registry.reserve({
@@ -695,12 +719,18 @@ export class Orchestrator {
     );
     if (!reserved.ok) return reserved;
     try {
+      await this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment);
       await this.#deps.ensureHost(this.#root, this.#omoSocket, environment);
     } catch (cause) {
       this.#withRegistry((registry) => {
         const closing = registry.beginClose(bindingId);
         return closing.ok ? registry.finishClose(bindingId) : closing;
       });
+      if (cause instanceof HostProfileMismatchError)
+        return failure("runtime_unavailable", cause.message, {
+          reason: "host_profile_mismatch",
+          ...cause.details,
+        });
       return failure("runtime_unavailable", "Native host launch failed", messageOf(cause));
     }
 
@@ -788,7 +818,7 @@ export class Orchestrator {
           "--no-model-fallback",
           "--no-recommended-models",
         ],
-        { PATH: managedPath },
+        { PATH: managedPath, ...runtimeCacheEnvironment(this.#root) },
       );
       const timeout = setTimeout(
         () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),

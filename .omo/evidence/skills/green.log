@@ -1,0 +1,12 @@
+bun test v1.4.0 (34cbb9a40)
+
+skills/skills.test.ts:
+(pass) oi skills > four skills exist with unique valid frontmatter names [1.23ms]
+(pass) oi skills > shared references and MIT notice are present [0.01ms]
+(pass) oi skills > every local relative link resolves to an existing file [0.17ms]
+
+ 3 pass
+ 0 fail
+ 14 expect() calls
+Ran 3 tests across 1 file. [23.00ms]
+exit=0

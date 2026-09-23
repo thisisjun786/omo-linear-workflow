@@ -1,0 +1,51 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/store.test.ts:
+185 |       }));
+186 |       const output = await new Response(worker.stdout).text();
+187 |       const stderr = await new Response(worker.stderr).text();
+188 |       expect(await worker.exited).toBe(0);
+189 |       expect(stderr).toBe("");
+190 |       expect(JSON.parse(output)).toEqual({ ok: true, value: binding });
+                                       ^
+error: expect(received).toEqual(expected)
+
+  {
+-   "ok": true,
+-   "value": {
+-     "assignment": {
+-       "initiativeId": "initiative-1",
+-       "role": "supervisor",
+-     },
+-     "checkout": null,
+-     "contactState": "active",
+-     "cwd": "/repo",
+-     "designationId": "designation-1",
+-     "durableSessionId": "session-worker-target",
+-     "herdrSocket": "/tmp/herdr.sock",
+-     "id": "worker-target",
+-     "launchState": "reserved",
+-     "omoSocket": "/tmp/omo.sock",
+-     "paneId": null,
+-     "sessionPath": null,
+-     "workspaceId": null,
++   "error": {
++     "code": "not_implemented",
++     "message": "worker not implemented",
+    },
++   "ok": false,
+  }
+
+- Expected  - 18
++ Received  + 4
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:190:34)
+      at async temporaryDatabase (/home/jun/code/omo-initiative/tests/store.test.ts:62:15)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:174:11)
+(fail) SQLite registry > worker executes one validated JSON operation and releases the database [65.99ms]
+
+ 0 pass
+ 4 filtered out
+ 1 fail
+ 3 expect() calls
+Ran 1 test across 1 file. [93.00ms]

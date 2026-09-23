@@ -1,0 +1,163 @@
+$ biome check src tests scripts
+scripts/qa-linear.ts:61:45 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    59 │       case "initialize":
+    60 │         result = {
+  > 61 │           protocolVersion: message.params?.["protocolVersion"],
+       │                                             ^^^^^^^^^^^^^^^^^
+    62 │           capabilities: { tools: {} },
+    63 │           serverInfo: { name: "linear-qa-fixture", version: "1.0.0" },
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    61 │ ··········protocolVersion:·message.params?.["protocolVersion"],
+       │                                            --               -- 
+
+scripts/qa-rpc.ts:86:76 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    84 │       const timer = setTimeout(() => {
+    85 │         pending.delete(id);
+  > 86 │         result.reject(new QaError(`RPC request timed out: ${String(command["type"])}`));
+       │                                                                            ^^^^^^
+    87 │       }, timeoutMs);
+    88 │       pending.set(id, { resolve: result.resolve, reject: result.reject, timer });
+  
+  i Unsafe fix: Use a literal key instead.
+  
+     84  84 │         const timer = setTimeout(() => {
+     85  85 │           pending.delete(id);
+     86     │ - ········result.reject(new·QaError(`RPC·request·timed·out:·${String(command["type"])}`));
+         86 │ + ········result.reject(new·QaError(`RPC·request·timed·out:·${String(command.type)}`));
+     87  87 │         }, timeoutMs);
+     88  88 │         pending.set(id, { resolve: result.resolve, reject: result.reject, timer });
+  
+
+scripts/qa-world.ts:32:19 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    31 │ export async function prepareQaWorld() {
+  > 32 │   if (process.env["HERDR_ENV"] !== "1") throw new QaError("Herdr QA requires HERDR_ENV=1");
+       │                   ^^^^^^^^^^^
+    33 │   const installRoot = resolve(import.meta.dir, "..");
+    34 │   const scratch = await mkdtemp(join(installRoot, ".omo/evidence/qa-world-"));
+  
+  i Unsafe fix: Use a literal key instead.
+  
+     30  30 │   
+     31  31 │   export async function prepareQaWorld() {
+     32     │ - ··if·(process.env["HERDR_ENV"]·!==·"1")·throw·new·QaError("Herdr·QA·requires·HERDR_ENV=1");
+         32 │ + ··if·(process.env.HERDR_ENV·!==·"1")·throw·new·QaError("Herdr·QA·requires·HERDR_ENV=1");
+     33  33 │     const installRoot = resolve(import.meta.dir, "..");
+     34  34 │     const scratch = await mkdtemp(join(installRoot, ".omo/evidence/qa-world-"));
+  
+
+scripts/qa-linear.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Sort the imported names.
+  
+  > 1 │ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    2 │ import { tmpdir } from "node:os";
+    3 │ import { join, resolve } from "node:path";
+  
+  i Safe fix: Organize imports and exports (Biome)
+  
+      1     │ - import·{·mkdtemp,·mkdir,·rm,·writeFile·}·from·"node:fs/promises";
+          1 │ + import·{·mkdir,·mkdtemp,·rm,·writeFile·}·from·"node:fs/promises";
+      2   2 │   import { tmpdir } from "node:os";
+      3   3 │   import { join, resolve } from "node:path";
+  
+
+scripts/qa-linear.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    152 152 │       },
+    153 153 │     );
+    154     │ - ··const·tools·=·z.array(z.string()).parse(
+    155     │ - ····await·rpc.request({·type:·"extension_request",·name:·"oi.qa.linear.tools"·}),
+    156     │ - ··);
+        154 │ + ··const·tools·=·z
+        155 │ + ····.array(z.string())
+        156 │ + ····.parse(await·rpc.request({·type:·"extension_request",·name:·"oi.qa.linear.tools"·}));
+    157 157 │     for (const name of names) {
+    158 158 │       const tool = `mcp_linear_${name}`;
+  
+
+scripts/qa-world.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Sort the imported names.
+  
+  > 1 │ import { cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    2 │ import { join, resolve } from "node:path";
+    3 │ import { QaError } from "./qa-rpc";
+  
+  i Safe fix: Organize imports and exports (Biome)
+  
+      1     │ - import·{·cp,·mkdtemp,·mkdir,·rm,·writeFile·}·from·"node:fs/promises";
+          1 │ + import·{·cp,·mkdir,·mkdtemp,·rm,·writeFile·}·from·"node:fs/promises";
+      2   2 │   import { join, resolve } from "node:path";
+      3   3 │   import { QaError } from "./qa-rpc";
+  
+
+scripts/qa-world.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+     24  24 │     const result = await runQaCommand(argv, cwd, env);
+     25  25 │     if (result.code !== 0) {
+     26     │ - ····throw·new·QaError(`${argv.join("·")}·exited·${result.code}:·${result.stderr}\n${result.stdout}`);
+         26 │ + ····throw·new·QaError(
+         27 │ + ······`${argv.join("·")}·exited·${result.code}:·${result.stderr}\n${result.stdout}`,
+         28 │ + ····);
+     27  29 │     }
+     28  30 │     return result.stdout;
+    ······· │ 
+     49  51 │     await cp(join(installRoot, "package.json"), join(controlRoot, "package.json"));
+     50  52 │     await checkedQaCommand(
+     51     │ - ····["/usr/bin/cp",·"-al",·"--",·join(installRoot,·"node_modules"),·join(controlRoot,·"node_modules")],
+         53 │ + ····[
+         54 │ + ······"/usr/bin/cp",
+         55 │ + ······"-al",
+         56 │ + ······"--",
+         57 │ + ······join(installRoot,·"node_modules"),
+         58 │ + ······join(controlRoot,·"node_modules"),
+         59 │ + ····],
+     52  60 │       installRoot,
+     53  61 │     );
+    ······· │ 
+     76  84 │     });
+     77  85 │     const ready = Promise.withResolvers<string>();
+     78     │ - ··const·timer·=·setTimeout(()·=>·ready.reject(new·QaError("Herdr·server·readiness·timeout")),·30000);
+         86 │ + ··const·timer·=·setTimeout(
+         87 │ + ····()·=>·ready.reject(new·QaError("Herdr·server·readiness·timeout")),
+         88 │ + ····30000,
+         89 │ + ··);
+     79  90 │     const output = new Response(herdr.stdout).text();
+     80  91 │     let log = "";
+    ······· │ 
+    165 176 │         await run(["session", "delete", sessionName, "--json"]);
+    166 177 │         if (failures.length) {
+    167     │ - ········throw·new·QaError(`Cleanup·failures;·fixture·retained·at·${scratch}:\n${failures.join("\n")}`);
+        178 │ + ········throw·new·QaError(
+        179 │ + ··········`Cleanup·failures;·fixture·retained·at·${scratch}:\n${failures.join("\n")}`,
+        180 │ + ········);
+    168 181 │         }
+    169 182 │         await rm(scratch, { recursive: true, force: true });
+  
+
+Checked 24 files in 10ms. No fixes applied.
+Found 4 errors.
+Found 3 infos.
+check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+
+error: script "lint" exited with code 1

@@ -1,0 +1,53 @@
+bun test v1.4.0 (34cbb9a40)
+
+skills/skills.test.ts:
+74 | 
+75 | describe("oi skills", () => {
+76 |   test("four skills exist with unique valid frontmatter names", () => {
+77 |     const names = expectedSkills.map((skill) => {
+78 |       const path = join(skillsRoot, skill.dir, "SKILL.md");
+79 |       expect(existsSync(path)).toBe(true);
+                                    ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/jun/code/omo-initiative/skills/skills.test.ts:79:32)
+      at map (1:11)
+      at <anonymous> (/home/jun/code/omo-initiative/skills/skills.test.ts:77:34)
+(fail) oi skills > four skills exist with unique valid frontmatter names [0.57ms]
+84 |     expect(new Set(names).size).toBe(expectedSkills.length);
+85 |   });
+86 | 
+87 |   test("shared references and MIT notice are present", () => {
+88 |     for (const file of ["references/roles.md", "references/linear.md", "NOTICE.md"]) {
+89 |       expect(existsSync(join(skillsRoot, file))).toBe(true);
+                                                      ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/jun/code/omo-initiative/skills/skills.test.ts:89:50)
+(fail) oi skills > shared references and MIT notice are present [0.08ms]
+90 |     }
+91 |   });
+92 | 
+93 |   test("every local relative link resolves to an existing file", () => {
+94 |     const files = markdownFiles();
+95 |     expect(files.length).toBeGreaterThan(0);
+                              ^
+error: expect(received).toBeGreaterThan(expected)
+
+Expected: > 0
+Received: 0
+
+      at <anonymous> (/home/jun/code/omo-initiative/skills/skills.test.ts:95:26)
+(fail) oi skills > every local relative link resolves to an existing file [0.14ms]
+
+ 0 pass
+ 3 fail
+ 3 expect() calls
+Ran 3 tests across 1 file. [41.00ms]
+exit=1

@@ -1,0 +1,17 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/store.test.ts:
+(pass) SQLite registry > uses a real transaction for unique live ownership and survives reopen [119.98ms]
+(pass) SQLite registry > validates scope membership, owner edges, and readiness identity [66.34ms]
+(pass) SQLite registry > enforces immediate-owner routes, designation contact permission, and paused state [103.22ms]
+(pass) SQLite registry > claims immutable payloads and preserves uncertain sends without retry [91.58ms]
+(pass) SQLite registry > worker executes one validated JSON operation and releases the database [85.06ms]
+
+tests/core/schema.test.ts:
+(pass) frozen core schemas and role policy > modelForRole returns exactly the three proven tuples [0.01ms]
+(pass) frozen core schemas and role policy > strict schemas reject unknown boundary fields [1.32ms]
+
+ 7 pass
+ 0 fail
+ 30 expect() calls
+Ran 7 tests across 2 files. [494.00ms]

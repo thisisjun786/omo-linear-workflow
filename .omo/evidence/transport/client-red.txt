@@ -1,0 +1,23 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/transport/client.test.ts:
+91 |     await expect(attachBindingWithClient(binding, created)).rejects.toThrow("did not attach the exact existing session");
+92 |     expect(created.stopped).toBe(1);
+93 | 
+94 |     const duplicate = new FakeRpc();
+95 |     duplicate.sessions.push({ ...duplicate.sessions[0], sessionId: "duplicate-row" });
+96 |     await expect(attachBindingWithClient(binding, duplicate)).rejects.toThrow("exactly one durable native session");
+                                                                           ^
+error: expect(received).rejects.toThrow(expected)
+
+Expected promise that rejects
+Received promise that resolved: Promise { <resolved> }
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/transport/client.test.ts:96:71)
+(fail) native session client > attaches only an exact existing durable id, path, and cwd [0.41ms]
+(pass) native session client > validates extension replies and close only disconnects the client [1.91ms]
+
+ 1 pass
+ 1 fail
+ 9 expect() calls
+Ran 2 tests across 1 file. [446.00ms]

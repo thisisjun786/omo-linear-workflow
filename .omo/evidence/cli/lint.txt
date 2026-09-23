@@ -1,0 +1,847 @@
+$ biome check owned files
+src/cli.ts:78:25 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    76 │ }
+    77 │ function evidence(options: Options): readonly string[] {
+  > 78 │   const value = options["evidence"];
+       │                         ^^^^^^^^^^
+    79 │   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+    80 │ }
+  
+  i Unsafe fix: Use a literal key instead.
+  
+     76  76 │   }
+     77  77 │   function evidence(options: Options): readonly string[] {
+     78     │ - ··const·value·=·options["evidence"];
+         78 │ + ··const·value·=·options.evidence;
+     79  79 │     return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+     80  80 │   }
+  
+
+src/cli.ts:169:55 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    167 │       const values = requireOptions(options, ["file"]);
+    168 │       result = values.ok
+  > 169 │         ? await orchestrator.importScope(values.value["file"] ?? "", has(options, "fixture"))
+        │                                                       ^^^^^^
+    170 │         : values;
+    171 │     } else if (command === "supervisor create") {
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    167 167 │         const values = requireOptions(options, ["file"]);
+    168 168 │         result = values.ok
+    169     │ - ········?·await·orchestrator.importScope(values.value["file"]·??·"",·has(options,·"fixture"))
+        169 │ + ········?·await·orchestrator.importScope(values.value.file·??·"",·has(options,·"fixture"))
+    170 170 │           : values;
+    171 171 │       } else if (command === "supervisor create") {
+  
+
+src/cli.ts:175:40 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    173 │       result = values.ok
+    174 │         ? await orchestrator.createSupervisor({
+  > 175 │             initiativeId: values.value["initiative"] ?? "",
+        │                                        ^^^^^^^^^^^^
+    176 │             scopeDigest: values.value["scope-digest"] ?? "",
+    177 │             designationId: values.value["designation"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    173 173 │         result = values.ok
+    174 174 │           ? await orchestrator.createSupervisor({
+    175     │ - ············initiativeId:·values.value["initiative"]·??·"",
+        175 │ + ············initiativeId:·values.value.initiative·??·"",
+    176 176 │               scopeDigest: values.value["scope-digest"] ?? "",
+    177 177 │               designationId: values.value["designation"] ?? "",
+  
+
+src/cli.ts:177:41 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    175 │             initiativeId: values.value["initiative"] ?? "",
+    176 │             scopeDigest: values.value["scope-digest"] ?? "",
+  > 177 │             designationId: values.value["designation"] ?? "",
+        │                                         ^^^^^^^^^^^^^
+    178 │             execute: has(options, "execute"),
+    179 │             fixture: has(options, "fixture"),
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    175 175 │               initiativeId: values.value["initiative"] ?? "",
+    176 176 │               scopeDigest: values.value["scope-digest"] ?? "",
+    177     │ - ············designationId:·values.value["designation"]·??·"",
+        177 │ + ············designationId:·values.value.designation·??·"",
+    178 178 │               execute: has(options, "execute"),
+    179 179 │               fixture: has(options, "fixture"),
+  
+
+src/cli.ts:186:40 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    184 │       result = values.ok
+    185 │         ? await orchestrator.createParent({
+  > 186 │             supervisorId: values.value["supervisor"] ?? "",
+        │                                        ^^^^^^^^^^^^
+    187 │             projectId: values.value["project"] ?? "",
+    188 │             repo: values.value["repo"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    184 184 │         result = values.ok
+    185 185 │           ? await orchestrator.createParent({
+    186     │ - ············supervisorId:·values.value["supervisor"]·??·"",
+        186 │ + ············supervisorId:·values.value.supervisor·??·"",
+    187 187 │               projectId: values.value["project"] ?? "",
+    188 188 │               repo: values.value["repo"] ?? "",
+  
+
+src/cli.ts:187:37 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    185 │         ? await orchestrator.createParent({
+    186 │             supervisorId: values.value["supervisor"] ?? "",
+  > 187 │             projectId: values.value["project"] ?? "",
+        │                                     ^^^^^^^^^
+    188 │             repo: values.value["repo"] ?? "",
+    189 │             base: values.value["base"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    185 185 │           ? await orchestrator.createParent({
+    186 186 │               supervisorId: values.value["supervisor"] ?? "",
+    187     │ - ············projectId:·values.value["project"]·??·"",
+        187 │ + ············projectId:·values.value.project·??·"",
+    188 188 │               repo: values.value["repo"] ?? "",
+    189 189 │               base: values.value["base"] ?? "",
+  
+
+src/cli.ts:188:32 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    186 │             supervisorId: values.value["supervisor"] ?? "",
+    187 │             projectId: values.value["project"] ?? "",
+  > 188 │             repo: values.value["repo"] ?? "",
+        │                                ^^^^^^
+    189 │             base: values.value["base"] ?? "",
+    190 │           })
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    186 186 │               supervisorId: values.value["supervisor"] ?? "",
+    187 187 │               projectId: values.value["project"] ?? "",
+    188     │ - ············repo:·values.value["repo"]·??·"",
+        188 │ + ············repo:·values.value.repo·??·"",
+    189 189 │               base: values.value["base"] ?? "",
+    190 190 │             })
+  
+
+src/cli.ts:189:32 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    187 │             projectId: values.value["project"] ?? "",
+    188 │             repo: values.value["repo"] ?? "",
+  > 189 │             base: values.value["base"] ?? "",
+        │                                ^^^^^^
+    190 │           })
+    191 │         : values;
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    187 187 │               projectId: values.value["project"] ?? "",
+    188 188 │               repo: values.value["repo"] ?? "",
+    189     │ - ············base:·values.value["base"]·??·"",
+        189 │ + ············base:·values.value.base·??·"",
+    190 190 │             })
+    191 191 │           : values;
+  
+
+src/cli.ts:196:36 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    194 │       result = values.ok
+    195 │         ? await orchestrator.createChild({
+  > 196 │             parentId: values.value["parent"] ?? "",
+        │                                    ^^^^^^^^
+    197 │             issueId: values.value["issue"] ?? "",
+    198 │           })
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    194 194 │         result = values.ok
+    195 195 │           ? await orchestrator.createChild({
+    196     │ - ············parentId:·values.value["parent"]·??·"",
+        196 │ + ············parentId:·values.value.parent·??·"",
+    197 197 │               issueId: values.value["issue"] ?? "",
+    198 198 │             })
+  
+
+src/cli.ts:197:35 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    195 │         ? await orchestrator.createChild({
+    196 │             parentId: values.value["parent"] ?? "",
+  > 197 │             issueId: values.value["issue"] ?? "",
+        │                                   ^^^^^^^
+    198 │           })
+    199 │         : values;
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    195 195 │           ? await orchestrator.createChild({
+    196 196 │               parentId: values.value["parent"] ?? "",
+    197     │ - ············issueId:·values.value["issue"]·??·"",
+        197 │ + ············issueId:·values.value.issue·??·"",
+    198 198 │             })
+    199 199 │           : values;
+  
+
+src/cli.ts:203:74 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    201 │       const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
+    202 │       const kind = values.ok
+  > 203 │         ? z.enum(["instruction", "coordination"]).safeParse(values.value["kind"])
+        │                                                                          ^^^^^^
+    204 │         : undefined;
+    205 │       const body = values.ok
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    201 201 │         const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
+    202 202 │         const kind = values.ok
+    203     │ - ········?·z.enum(["instruction",·"coordination"]).safeParse(values.value["kind"])
+        203 │ + ········?·z.enum(["instruction",·"coordination"]).safeParse(values.value.kind)
+    204 204 │           : undefined;
+    205 205 │         const body = values.ok
+  
+
+src/cli.ts:211:36 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    209 │         values.ok && kind?.success && body.ok
+    210 │           ? await orchestrator.send({
+  > 211 │               fromId: values.value["from"] ?? "",
+        │                                    ^^^^^^
+    212 │               toId: values.value["to"] ?? "",
+    213 │               messageId: values.value["id"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    209 209 │           values.ok && kind?.success && body.ok
+    210 210 │             ? await orchestrator.send({
+    211     │ - ··············fromId:·values.value["from"]·??·"",
+        211 │ + ··············fromId:·values.value.from·??·"",
+    212 212 │                 toId: values.value["to"] ?? "",
+    213 213 │                 messageId: values.value["id"] ?? "",
+  
+
+src/cli.ts:212:34 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    210 │           ? await orchestrator.send({
+    211 │               fromId: values.value["from"] ?? "",
+  > 212 │               toId: values.value["to"] ?? "",
+        │                                  ^^^^
+    213 │               messageId: values.value["id"] ?? "",
+    214 │               kind: kind.data,
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    210 210 │             ? await orchestrator.send({
+    211 211 │                 fromId: values.value["from"] ?? "",
+    212     │ - ··············toId:·values.value["to"]·??·"",
+        212 │ + ··············toId:·values.value.to·??·"",
+    213 213 │                 messageId: values.value["id"] ?? "",
+    214 214 │                 kind: kind.data,
+  
+
+src/cli.ts:213:39 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    211 │               fromId: values.value["from"] ?? "",
+    212 │               toId: values.value["to"] ?? "",
+  > 213 │               messageId: values.value["id"] ?? "",
+        │                                       ^^^^
+    214 │               kind: kind.data,
+    215 │               text: body.value,
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    211 211 │                 fromId: values.value["from"] ?? "",
+    212 212 │                 toId: values.value["to"] ?? "",
+    213     │ - ··············messageId:·values.value["id"]·??·"",
+        213 │ + ··············messageId:·values.value.id·??·"",
+    214 214 │                 kind: kind.data,
+    215 215 │                 text: body.value,
+  
+
+src/cli.ts:225:77 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    223 │       const values = requireOptions(options, ["from", "id", "outcome", "text-file"]);
+    224 │       const outcome = values.ok
+  > 225 │         ? z.enum(["completed", "blocked", "failed"]).safeParse(values.value["outcome"])
+        │                                                                             ^^^^^^^^^
+    226 │         : undefined;
+    227 │       const body = values.ok
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    223 223 │         const values = requireOptions(options, ["from", "id", "outcome", "text-file"]);
+    224 224 │         const outcome = values.ok
+    225     │ - ········?·z.enum(["completed",·"blocked",·"failed"]).safeParse(values.value["outcome"])
+        225 │ + ········?·z.enum(["completed",·"blocked",·"failed"]).safeParse(values.value.outcome)
+    226 226 │           : undefined;
+    227 227 │         const body = values.ok
+  
+
+src/cli.ts:233:36 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    231 │         values.ok && outcome?.success && body.ok
+    232 │           ? await orchestrator.report({
+  > 233 │               fromId: values.value["from"] ?? "",
+        │                                    ^^^^^^
+    234 │               messageId: values.value["id"] ?? "",
+    235 │               outcome: outcome.data,
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    231 231 │           values.ok && outcome?.success && body.ok
+    232 232 │             ? await orchestrator.report({
+    233     │ - ··············fromId:·values.value["from"]·??·"",
+        233 │ + ··············fromId:·values.value.from·??·"",
+    234 234 │                 messageId: values.value["id"] ?? "",
+    235 235 │                 outcome: outcome.data,
+  
+
+src/cli.ts:234:39 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    232 │           ? await orchestrator.report({
+    233 │               fromId: values.value["from"] ?? "",
+  > 234 │               messageId: values.value["id"] ?? "",
+        │                                       ^^^^
+    235 │               outcome: outcome.data,
+    236 │               evidence: evidence(options),
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    232 232 │             ? await orchestrator.report({
+    233 233 │                 fromId: values.value["from"] ?? "",
+    234     │ - ··············messageId:·values.value["id"]·??·"",
+        234 │ + ··············messageId:·values.value.id·??·"",
+    235 235 │                 outcome: outcome.data,
+    236 236 │                 evidence: evidence(options),
+  
+
+src/cli.ts:249:47 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    247 │       const values = requireOptions(options, ["binding"]);
+    248 │       result = values.ok
+  > 249 │         ? orchestrator.setPaused(values.value["binding"] ?? "", command === "pause")
+        │                                               ^^^^^^^^^
+    250 │         : values;
+    251 │     } else if (command === "reconcile") {
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    247 247 │         const values = requireOptions(options, ["binding"]);
+    248 248 │         result = values.ok
+    249     │ - ········?·orchestrator.setPaused(values.value["binding"]·??·"",·command·===·"pause")
+        249 │ + ········?·orchestrator.setPaused(values.value.binding·??·"",·command·===·"pause")
+    250 250 │           : values;
+    251 251 │       } else if (command === "reconcile") {
+  
+
+src/cli.ts:253:70 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    251 │     } else if (command === "reconcile") {
+    252 │       const values = requireOptions(options, ["initiative"]);
+  > 253 │       result = values.ok ? await orchestrator.reconcile(values.value["initiative"] ?? "") : values;
+        │                                                                      ^^^^^^^^^^^^
+    254 │     } else {
+    255 │       result = invalid(
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    251 251 │       } else if (command === "reconcile") {
+    252 252 │         const values = requireOptions(options, ["initiative"]);
+    253     │ - ······result·=·values.ok·?·await·orchestrator.reconcile(values.value["initiative"]·??·"")·:·values;
+        253 │ + ······result·=·values.ok·?·await·orchestrator.reconcile(values.value.initiative·??·"")·:·values;
+    254 254 │       } else {
+    255 255 │         result = invalid(
+  
+
+src/orchestrator.ts:215:19 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    213 │     this.#herdrSocket =
+    214 │       herdrSocket ??
+  > 215 │       process.env["HERDR_SOCKET_PATH"] ??
+        │                   ^^^^^^^^^^^^^^^^^^^
+    216 │       join(process.env["HOME"] ?? this.#root, ".config/herdr/herdr.sock");
+    217 │     this.#omoSocket = join(this.#root, ".omo/state/omo.sock");
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    213 213 │       this.#herdrSocket =
+    214 214 │         herdrSocket ??
+    215     │ - ······process.env["HERDR_SOCKET_PATH"]·??
+        215 │ + ······process.env.HERDR_SOCKET_PATH·??
+    216 216 │         join(process.env["HOME"] ?? this.#root, ".config/herdr/herdr.sock");
+    217 217 │       this.#omoSocket = join(this.#root, ".omo/state/omo.sock");
+  
+
+The number of diagnostics exceeds the limit allowed. Use --max-diagnostics to increase it.
+Diagnostics not shown: 2.
+Checked 5 files in 11ms. No fixes applied.
+Found 22 infos.
+exit=0
+$ bun run lint
+$ biome check src tests scripts
+scripts/qa-linear.ts:61:45 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    59 │       case "initialize":
+    60 │         result = {
+  > 61 │           protocolVersion: message.params?.["protocolVersion"],
+       │                                             ^^^^^^^^^^^^^^^^^
+    62 │           capabilities: { tools: {} },
+    63 │           serverInfo: { name: "linear-qa-fixture", version: "1.0.0" },
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    61 │ ··········protocolVersion:·message.params?.["protocolVersion"],
+       │                                            --               -- 
+
+scripts/qa-rpc.ts:86:76 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    84 │       const timer = setTimeout(() => {
+    85 │         pending.delete(id);
+  > 86 │         result.reject(new QaError(`RPC request timed out: ${String(command["type"])}`));
+       │                                                                            ^^^^^^
+    87 │       }, timeoutMs);
+    88 │       pending.set(id, { resolve: result.resolve, reject: result.reject, timer });
+  
+  i Unsafe fix: Use a literal key instead.
+  
+     84  84 │         const timer = setTimeout(() => {
+     85  85 │           pending.delete(id);
+     86     │ - ········result.reject(new·QaError(`RPC·request·timed·out:·${String(command["type"])}`));
+         86 │ + ········result.reject(new·QaError(`RPC·request·timed·out:·${String(command.type)}`));
+     87  87 │         }, timeoutMs);
+     88  88 │         pending.set(id, { resolve: result.resolve, reject: result.reject, timer });
+  
+
+scripts/qa-world.ts:34:19 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    33 │ export async function prepareQaWorld() {
+  > 34 │   if (process.env["HERDR_ENV"] !== "1") throw new QaError("Herdr QA requires HERDR_ENV=1");
+       │                   ^^^^^^^^^^^
+    35 │   const installRoot = resolve(import.meta.dir, "..");
+    36 │   const scratch = await mkdtemp(join(installRoot, ".omo/evidence/qa-world-"));
+  
+  i Unsafe fix: Use a literal key instead.
+  
+     32  32 │   
+     33  33 │   export async function prepareQaWorld() {
+     34     │ - ··if·(process.env["HERDR_ENV"]·!==·"1")·throw·new·QaError("Herdr·QA·requires·HERDR_ENV=1");
+         34 │ + ··if·(process.env.HERDR_ENV·!==·"1")·throw·new·QaError("Herdr·QA·requires·HERDR_ENV=1");
+     35  35 │     const installRoot = resolve(import.meta.dir, "..");
+     36  36 │     const scratch = await mkdtemp(join(installRoot, ".omo/evidence/qa-world-"));
+  
+
+src/cli.ts:78:25 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    76 │ }
+    77 │ function evidence(options: Options): readonly string[] {
+  > 78 │   const value = options["evidence"];
+       │                         ^^^^^^^^^^
+    79 │   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+    80 │ }
+  
+  i Unsafe fix: Use a literal key instead.
+  
+     76  76 │   }
+     77  77 │   function evidence(options: Options): readonly string[] {
+     78     │ - ··const·value·=·options["evidence"];
+         78 │ + ··const·value·=·options.evidence;
+     79  79 │     return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+     80  80 │   }
+  
+
+src/cli.ts:169:55 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    167 │       const values = requireOptions(options, ["file"]);
+    168 │       result = values.ok
+  > 169 │         ? await orchestrator.importScope(values.value["file"] ?? "", has(options, "fixture"))
+        │                                                       ^^^^^^
+    170 │         : values;
+    171 │     } else if (command === "supervisor create") {
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    167 167 │         const values = requireOptions(options, ["file"]);
+    168 168 │         result = values.ok
+    169     │ - ········?·await·orchestrator.importScope(values.value["file"]·??·"",·has(options,·"fixture"))
+        169 │ + ········?·await·orchestrator.importScope(values.value.file·??·"",·has(options,·"fixture"))
+    170 170 │           : values;
+    171 171 │       } else if (command === "supervisor create") {
+  
+
+src/cli.ts:175:40 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    173 │       result = values.ok
+    174 │         ? await orchestrator.createSupervisor({
+  > 175 │             initiativeId: values.value["initiative"] ?? "",
+        │                                        ^^^^^^^^^^^^
+    176 │             scopeDigest: values.value["scope-digest"] ?? "",
+    177 │             designationId: values.value["designation"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    173 173 │         result = values.ok
+    174 174 │           ? await orchestrator.createSupervisor({
+    175     │ - ············initiativeId:·values.value["initiative"]·??·"",
+        175 │ + ············initiativeId:·values.value.initiative·??·"",
+    176 176 │               scopeDigest: values.value["scope-digest"] ?? "",
+    177 177 │               designationId: values.value["designation"] ?? "",
+  
+
+src/cli.ts:177:41 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    175 │             initiativeId: values.value["initiative"] ?? "",
+    176 │             scopeDigest: values.value["scope-digest"] ?? "",
+  > 177 │             designationId: values.value["designation"] ?? "",
+        │                                         ^^^^^^^^^^^^^
+    178 │             execute: has(options, "execute"),
+    179 │             fixture: has(options, "fixture"),
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    175 175 │               initiativeId: values.value["initiative"] ?? "",
+    176 176 │               scopeDigest: values.value["scope-digest"] ?? "",
+    177     │ - ············designationId:·values.value["designation"]·??·"",
+        177 │ + ············designationId:·values.value.designation·??·"",
+    178 178 │               execute: has(options, "execute"),
+    179 179 │               fixture: has(options, "fixture"),
+  
+
+src/cli.ts:186:40 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    184 │       result = values.ok
+    185 │         ? await orchestrator.createParent({
+  > 186 │             supervisorId: values.value["supervisor"] ?? "",
+        │                                        ^^^^^^^^^^^^
+    187 │             projectId: values.value["project"] ?? "",
+    188 │             repo: values.value["repo"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    184 184 │         result = values.ok
+    185 185 │           ? await orchestrator.createParent({
+    186     │ - ············supervisorId:·values.value["supervisor"]·??·"",
+        186 │ + ············supervisorId:·values.value.supervisor·??·"",
+    187 187 │               projectId: values.value["project"] ?? "",
+    188 188 │               repo: values.value["repo"] ?? "",
+  
+
+src/cli.ts:187:37 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    185 │         ? await orchestrator.createParent({
+    186 │             supervisorId: values.value["supervisor"] ?? "",
+  > 187 │             projectId: values.value["project"] ?? "",
+        │                                     ^^^^^^^^^
+    188 │             repo: values.value["repo"] ?? "",
+    189 │             base: values.value["base"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    185 185 │           ? await orchestrator.createParent({
+    186 186 │               supervisorId: values.value["supervisor"] ?? "",
+    187     │ - ············projectId:·values.value["project"]·??·"",
+        187 │ + ············projectId:·values.value.project·??·"",
+    188 188 │               repo: values.value["repo"] ?? "",
+    189 189 │               base: values.value["base"] ?? "",
+  
+
+src/cli.ts:188:32 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    186 │             supervisorId: values.value["supervisor"] ?? "",
+    187 │             projectId: values.value["project"] ?? "",
+  > 188 │             repo: values.value["repo"] ?? "",
+        │                                ^^^^^^
+    189 │             base: values.value["base"] ?? "",
+    190 │           })
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    186 186 │               supervisorId: values.value["supervisor"] ?? "",
+    187 187 │               projectId: values.value["project"] ?? "",
+    188     │ - ············repo:·values.value["repo"]·??·"",
+        188 │ + ············repo:·values.value.repo·??·"",
+    189 189 │               base: values.value["base"] ?? "",
+    190 190 │             })
+  
+
+src/cli.ts:189:32 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    187 │             projectId: values.value["project"] ?? "",
+    188 │             repo: values.value["repo"] ?? "",
+  > 189 │             base: values.value["base"] ?? "",
+        │                                ^^^^^^
+    190 │           })
+    191 │         : values;
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    187 187 │               projectId: values.value["project"] ?? "",
+    188 188 │               repo: values.value["repo"] ?? "",
+    189     │ - ············base:·values.value["base"]·??·"",
+        189 │ + ············base:·values.value.base·??·"",
+    190 190 │             })
+    191 191 │           : values;
+  
+
+src/cli.ts:196:36 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    194 │       result = values.ok
+    195 │         ? await orchestrator.createChild({
+  > 196 │             parentId: values.value["parent"] ?? "",
+        │                                    ^^^^^^^^
+    197 │             issueId: values.value["issue"] ?? "",
+    198 │           })
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    194 194 │         result = values.ok
+    195 195 │           ? await orchestrator.createChild({
+    196     │ - ············parentId:·values.value["parent"]·??·"",
+        196 │ + ············parentId:·values.value.parent·??·"",
+    197 197 │               issueId: values.value["issue"] ?? "",
+    198 198 │             })
+  
+
+src/cli.ts:197:35 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    195 │         ? await orchestrator.createChild({
+    196 │             parentId: values.value["parent"] ?? "",
+  > 197 │             issueId: values.value["issue"] ?? "",
+        │                                   ^^^^^^^
+    198 │           })
+    199 │         : values;
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    195 195 │           ? await orchestrator.createChild({
+    196 196 │               parentId: values.value["parent"] ?? "",
+    197     │ - ············issueId:·values.value["issue"]·??·"",
+        197 │ + ············issueId:·values.value.issue·??·"",
+    198 198 │             })
+    199 199 │           : values;
+  
+
+src/cli.ts:203:74 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    201 │       const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
+    202 │       const kind = values.ok
+  > 203 │         ? z.enum(["instruction", "coordination"]).safeParse(values.value["kind"])
+        │                                                                          ^^^^^^
+    204 │         : undefined;
+    205 │       const body = values.ok
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    201 201 │         const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
+    202 202 │         const kind = values.ok
+    203     │ - ········?·z.enum(["instruction",·"coordination"]).safeParse(values.value["kind"])
+        203 │ + ········?·z.enum(["instruction",·"coordination"]).safeParse(values.value.kind)
+    204 204 │           : undefined;
+    205 205 │         const body = values.ok
+  
+
+src/cli.ts:211:36 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    209 │         values.ok && kind?.success && body.ok
+    210 │           ? await orchestrator.send({
+  > 211 │               fromId: values.value["from"] ?? "",
+        │                                    ^^^^^^
+    212 │               toId: values.value["to"] ?? "",
+    213 │               messageId: values.value["id"] ?? "",
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    209 209 │           values.ok && kind?.success && body.ok
+    210 210 │             ? await orchestrator.send({
+    211     │ - ··············fromId:·values.value["from"]·??·"",
+        211 │ + ··············fromId:·values.value.from·??·"",
+    212 212 │                 toId: values.value["to"] ?? "",
+    213 213 │                 messageId: values.value["id"] ?? "",
+  
+
+src/cli.ts:212:34 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    210 │           ? await orchestrator.send({
+    211 │               fromId: values.value["from"] ?? "",
+  > 212 │               toId: values.value["to"] ?? "",
+        │                                  ^^^^
+    213 │               messageId: values.value["id"] ?? "",
+    214 │               kind: kind.data,
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    210 210 │             ? await orchestrator.send({
+    211 211 │                 fromId: values.value["from"] ?? "",
+    212     │ - ··············toId:·values.value["to"]·??·"",
+        212 │ + ··············toId:·values.value.to·??·"",
+    213 213 │                 messageId: values.value["id"] ?? "",
+    214 214 │                 kind: kind.data,
+  
+
+src/cli.ts:213:39 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    211 │               fromId: values.value["from"] ?? "",
+    212 │               toId: values.value["to"] ?? "",
+  > 213 │               messageId: values.value["id"] ?? "",
+        │                                       ^^^^
+    214 │               kind: kind.data,
+    215 │               text: body.value,
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    211 211 │                 fromId: values.value["from"] ?? "",
+    212 212 │                 toId: values.value["to"] ?? "",
+    213     │ - ··············messageId:·values.value["id"]·??·"",
+        213 │ + ··············messageId:·values.value.id·??·"",
+    214 214 │                 kind: kind.data,
+    215 215 │                 text: body.value,
+  
+
+src/cli.ts:225:77 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    223 │       const values = requireOptions(options, ["from", "id", "outcome", "text-file"]);
+    224 │       const outcome = values.ok
+  > 225 │         ? z.enum(["completed", "blocked", "failed"]).safeParse(values.value["outcome"])
+        │                                                                             ^^^^^^^^^
+    226 │         : undefined;
+    227 │       const body = values.ok
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    223 223 │         const values = requireOptions(options, ["from", "id", "outcome", "text-file"]);
+    224 224 │         const outcome = values.ok
+    225     │ - ········?·z.enum(["completed",·"blocked",·"failed"]).safeParse(values.value["outcome"])
+        225 │ + ········?·z.enum(["completed",·"blocked",·"failed"]).safeParse(values.value.outcome)
+    226 226 │           : undefined;
+    227 227 │         const body = values.ok
+  
+
+src/cli.ts:233:36 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    231 │         values.ok && outcome?.success && body.ok
+    232 │           ? await orchestrator.report({
+  > 233 │               fromId: values.value["from"] ?? "",
+        │                                    ^^^^^^
+    234 │               messageId: values.value["id"] ?? "",
+    235 │               outcome: outcome.data,
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    231 231 │           values.ok && outcome?.success && body.ok
+    232 232 │             ? await orchestrator.report({
+    233     │ - ··············fromId:·values.value["from"]·??·"",
+        233 │ + ··············fromId:·values.value.from·??·"",
+    234 234 │                 messageId: values.value["id"] ?? "",
+    235 235 │                 outcome: outcome.data,
+  
+
+src/cli.ts:234:39 lint/complexity/useLiteralKeys  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i The computed expression can be simplified without the use of a string literal.
+  
+    232 │           ? await orchestrator.report({
+    233 │               fromId: values.value["from"] ?? "",
+  > 234 │               messageId: values.value["id"] ?? "",
+        │                                       ^^^^
+    235 │               outcome: outcome.data,
+    236 │               evidence: evidence(options),
+  
+  i Unsafe fix: Use a literal key instead.
+  
+    232 232 │             ? await orchestrator.report({
+    233 233 │                 fromId: values.value["from"] ?? "",
+    234     │ - ··············messageId:·values.value["id"]·??·"",
+        234 │ + ··············messageId:·values.value.id·??·"",
+    235 235 │                 outcome: outcome.data,
+    236 236 │                 evidence: evidence(options),
+  
+
+The number of diagnostics exceeds the limit allowed. Use --max-diagnostics to increase it.
+Diagnostics not shown: 5.
+Checked 36 files in 12ms. No fixes applied.
+Found 25 infos.
+exit=0

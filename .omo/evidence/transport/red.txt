@@ -1,0 +1,72 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/events.test.ts:
+146 |     const handler = this.handlers.get(name);
+147 |     if (handler === undefined) throw new Error(`Missing RPC handler ${name}`);
+148 |     return handler;
+149 |   }
+150 |   start(): (ctx: SessionContextPort) => Promise<void> {
+151 |     if (this.sessionStart === undefined) throw new Error("Missing session_start handler");
+                                                         ^
+error: Missing session_start handler
+      at start (/home/jun/code/omo-initiative/tests/events.test.ts:151:52)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:198:21)
+      at fixture (/home/jun/code/omo-initiative/tests/events.test.ts:89:11)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:195:11)
+(fail) native delivery extension > activates thread_send, persists acceptance, and replays without a native resend [40.58ms]
+146 |     const handler = this.handlers.get(name);
+147 |     if (handler === undefined) throw new Error(`Missing RPC handler ${name}`);
+148 |     return handler;
+149 |   }
+150 |   start(): (ctx: SessionContextPort) => Promise<void> {
+151 |     if (this.sessionStart === undefined) throw new Error("Missing session_start handler");
+                                                         ^
+error: Missing session_start handler
+      at start (/home/jun/code/omo-initiative/tests/events.test.ts:151:52)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:213:21)
+      at fixture (/home/jun/code/omo-initiative/tests/events.test.ts:89:11)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:210:11)
+(fail) native delivery extension > derives sender context and rejects forged or forbidden routes before native send [32.42ms]
+146 |     const handler = this.handlers.get(name);
+147 |     if (handler === undefined) throw new Error(`Missing RPC handler ${name}`);
+148 |     return handler;
+149 |   }
+150 |   start(): (ctx: SessionContextPort) => Promise<void> {
+151 |     if (this.sessionStart === undefined) throw new Error("Missing session_start handler");
+                                                         ^
+error: Missing session_start handler
+      at start (/home/jun/code/omo-initiative/tests/events.test.ts:151:52)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:225:21)
+      at fixture (/home/jun/code/omo-initiative/tests/events.test.ts:89:11)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:222:11)
+(fail) native delivery extension > persists malformed, wrong-target, and idempotency-uncertain native outcomes as uncertain [25.57ms]
+150 |   start(): (ctx: SessionContextPort) => Promise<void> {
+151 |     if (this.sessionStart === undefined) throw new Error("Missing session_start handler");
+152 |     return this.sessionStart;
+153 |   }
+154 |   guard() {
+155 |     if (this.toolCall === undefined) throw new Error("Missing tool_call handler");
+                                                     ^
+error: Missing tool_call handler
+      at guard (/home/jun/code/omo-initiative/tests/events.test.ts:155:48)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:247:26)
+      at fixture (/home/jun/code/omo-initiative/tests/events.test.ts:89:11)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:243:11)
+(fail) native delivery extension > guards bound direct native calls but leaves unknown sessions unaffected [21.79ms]
+146 |     const handler = this.handlers.get(name);
+147 |     if (handler === undefined) throw new Error(`Missing RPC handler ${name}`);
+148 |     return handler;
+149 |   }
+150 |   start(): (ctx: SessionContextPort) => Promise<void> {
+151 |     if (this.sessionStart === undefined) throw new Error("Missing session_start handler");
+                                                         ^
+error: Missing session_start handler
+      at start (/home/jun/code/omo-initiative/tests/events.test.ts:151:52)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:261:21)
+      at fixture (/home/jun/code/omo-initiative/tests/events.test.ts:89:11)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:258:11)
+(fail) native delivery extension > reports TUI session path through the stored Herdr socket and pane and discovers four skills [22.56ms]
+
+ 0 pass
+ 5 fail
+Ran 5 tests across 1 file. [170.00ms]

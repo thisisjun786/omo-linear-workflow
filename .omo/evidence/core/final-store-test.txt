@@ -1,0 +1,15 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/store.test.ts:
+(pass) SQLite registry > uses a real transaction for unique live ownership and survives reopen [121.12ms]
+(pass) SQLite registry > validates scope membership, owner edges, and readiness identity [58.76ms]
+(pass) SQLite registry > enforces immediate-owner routes, designation contact permission, and paused state [100.82ms]
+(pass) SQLite registry > claims immutable payloads and preserves uncertain sends without retry [85.02ms]
+(pass) SQLite registry > worker executes one validated JSON operation and releases the database [80.90ms]
+
+ 5 pass
+ 0 fail
+ 29 expect() calls
+Ran 5 tests across 1 file. [474.00ms]
+
+EXIT=0

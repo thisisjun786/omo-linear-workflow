@@ -1,0 +1,64 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/herdr.test.ts:
+36 |     this.name = "HerdrError";
+37 |     this.code = code;
+38 |   }
+39 | }
+40 | export function createHerdrClient(_socketPath: string): HerdrClient {
+41 |   throw new Error("Herdr client not implemented");
+                 ^
+error: Herdr client not implemented
+      at createHerdrClient (/home/jun/code/omo-initiative/src/herdr/client.ts:41:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/herdr.test.ts:63:20)
+(fail) HerdrClient > uses source-backed create params/replies and correlates fragmented/coalesced JSONL [3.88ms]
+36 |     this.name = "HerdrError";
+37 |     this.code = code;
+38 |   }
+39 | }
+40 | export function createHerdrClient(_socketPath: string): HerdrClient {
+41 |   throw new Error("Herdr client not implemented");
+                 ^
+error: Herdr client not implemented
+      at createHerdrClient (/home/jun/code/omo-initiative/src/herdr/client.ts:41:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/herdr.test.ts:79:20)
+(fail) HerdrClient > quotes hostile argv/env once and uses explicit pane.send_input [1.45ms]
+36 |     this.name = "HerdrError";
+37 |     this.code = code;
+38 |   }
+39 | }
+40 | export function createHerdrClient(_socketPath: string): HerdrClient {
+41 |   throw new Error("Herdr client not implemented");
+                 ^
+error: Herdr client not implemented
+      at createHerdrClient (/home/jun/code/omo-initiative/src/herdr/client.ts:41:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/herdr.test.ts:107:20)
+(fail) HerdrClient > awaits a separate subscription ACK and emits parsed event envelopes [1.50ms]
+36 |     this.name = "HerdrError";
+37 |     this.code = code;
+38 |   }
+39 | }
+40 | export function createHerdrClient(_socketPath: string): HerdrClient {
+41 |   throw new Error("Herdr client not implemented");
+                 ^
+error: Herdr client not implemented
+      at createHerdrClient (/home/jun/code/omo-initiative/src/herdr/client.ts:41:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/herdr.test.ts:129:20)
+(fail) HerdrClient > maps snapshots, reports identity, and sends bounded cleanup requests [1.63ms]
+36 |     this.name = "HerdrError";
+37 |     this.code = code;
+38 |   }
+39 | }
+40 | export function createHerdrClient(_socketPath: string): HerdrClient {
+41 |   throw new Error("Herdr client not implemented");
+                 ^
+error: Herdr client not implemented
+      at createHerdrClient (/home/jun/code/omo-initiative/src/herdr/client.ts:41:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/herdr.test.ts:146:20)
+(fail) HerdrClient > preserves upstream errors and rejects disconnects [1.49ms]
+
+ 0 pass
+ 5 fail
+Ran 5 tests across 1 file. [21.00ms]
+
+EXIT_CODE=1

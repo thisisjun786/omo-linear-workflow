@@ -1,0 +1,15 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/herdr.test.ts:
+(pass) HerdrClient > uses source-backed create params/replies and correlates fragmented/coalesced JSONL [9.11ms]
+(pass) HerdrClient > quotes hostile argv/env once and uses explicit pane.send_input [11.36ms]
+(pass) HerdrClient > awaits a separate subscription ACK and emits parsed event envelopes [2.78ms]
+(pass) HerdrClient > maps snapshots, reports identity, and sends bounded cleanup requests [3.76ms]
+(pass) HerdrClient > preserves upstream errors and rejects disconnects [952.07ms]
+
+ 5 pass
+ 0 fail
+ 15 expect() calls
+Ran 5 tests across 1 file. [1007.00ms]
+
+EXIT_CODE=0

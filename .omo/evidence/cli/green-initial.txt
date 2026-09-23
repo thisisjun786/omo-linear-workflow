@@ -1,0 +1,11 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/integration/orchestrator.test.ts:
+(pass) host profile > writes a contained mode-0600 native host profile [1.80ms]
+(pass) Herdr readiness event > accepts normalized panes and the actual Herdr event source shape [1.20ms]
+
+ 2 pass
+ 0 fail
+ 4 expect() calls
+Ran 2 tests across 1 file. [24.00ms]
+exit=0

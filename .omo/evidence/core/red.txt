@@ -1,0 +1,56 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/store.test.ts:
+1 | import type { Registry } from "./contracts.ts";
+2 | 
+3 | export function openRegistry(_path: string): Registry {
+4 |   throw new Error("registry not implemented");
+                ^
+error: registry not implemented
+      at openRegistry (/home/jun/code/omo-initiative/src/core/store.ts:4:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:86:20)
+      at temporaryDatabase (/home/jun/code/omo-initiative/tests/store.test.ts:62:15)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:85:11)
+(fail) SQLite registry > uses a real transaction for unique live ownership and survives reopen [1.04ms]
+1 | import type { Registry } from "./contracts.ts";
+2 | 
+3 | export function openRegistry(_path: string): Registry {
+4 |   throw new Error("registry not implemented");
+                ^
+error: registry not implemented
+      at openRegistry (/home/jun/code/omo-initiative/src/core/store.ts:4:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:114:24)
+      at temporaryDatabase (/home/jun/code/omo-initiative/tests/store.test.ts:62:15)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:113:11)
+(fail) SQLite registry > validates scope membership, owner edges, and readiness identity [0.22ms]
+1 | import type { Registry } from "./contracts.ts";
+2 | 
+3 | export function openRegistry(_path: string): Registry {
+4 |   throw new Error("registry not implemented");
+                ^
+error: registry not implemented
+      at openRegistry (/home/jun/code/omo-initiative/src/core/store.ts:4:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:136:24)
+      at temporaryDatabase (/home/jun/code/omo-initiative/tests/store.test.ts:62:15)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:135:11)
+(fail) SQLite registry > enforces immediate-owner routes, designation contact permission, and paused state [0.17ms]
+1 | import type { Registry } from "./contracts.ts";
+2 | 
+3 | export function openRegistry(_path: string): Registry {
+4 |   throw new Error("registry not implemented");
+                ^
+error: registry not implemented
+      at openRegistry (/home/jun/code/omo-initiative/src/core/store.ts:4:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:154:24)
+      at temporaryDatabase (/home/jun/code/omo-initiative/tests/store.test.ts:62:15)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/store.test.ts:153:11)
+(fail) SQLite registry > claims immutable payloads and preserves uncertain sends without retry [0.15ms]
+
+tests/core/schema.test.ts:
+(pass) frozen core schemas and role policy > modelForRole returns exactly the three proven tuples [0.05ms]
+(pass) frozen core schemas and role policy > strict schemas reject unknown boundary fields [2.28ms]
+
+ 2 pass
+ 4 fail
+ 5 expect() calls
+Ran 6 tests across 2 files. [28.00ms]

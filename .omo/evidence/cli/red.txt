@@ -1,0 +1,30 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/integration/orchestrator.test.ts:
+1 | export async function createHostProfile(_root: string): Promise<string> {
+2 |   throw new Error("not implemented");
+                ^
+error: not implemented
+      at createHostProfile (/home/jun/code/omo-initiative/src/host-profile.ts:2:13)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/integration/orchestrator.test.ts:15:24)
+(fail) host profile > writes a contained mode-0600 native host profile [1.15ms]
+50 |             },
+51 |           },
+52 |         },
+53 |         "pane-1",
+54 |       ),
+55 |     ).toBe("/s/session.jsonl");
+           ^
+error: expect(received).toBe(expected)
+
+Expected: "/s/session.jsonl"
+Received: null
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/integration/orchestrator.test.ts:55:7)
+(fail) Herdr readiness event > accepts normalized panes and the actual Herdr event source shape [0.08ms]
+
+ 0 pass
+ 2 fail
+ 1 expect() calls
+Ran 2 tests across 1 file. [8.00ms]
+exit=1

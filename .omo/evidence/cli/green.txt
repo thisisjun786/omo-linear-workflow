@@ -1,0 +1,26 @@
+$ bun test tests/integration
+bun test v1.4.0 (34cbb9a40)
+
+tests/integration/orchestrator.test.ts:
+(pass) host profile > writes a contained mode-0600 native host profile [1.85ms]
+(pass) Herdr readiness event > accepts normalized panes and the actual Herdr event source shape [0.95ms]
+(pass) orchestrator startup > subscribes before create, launches without a brief, verifies identity, then prompts [117.52ms]
+
+ 3 pass
+ 0 fail
+ 10 expect() calls
+Ran 3 tests across 1 file. [581.00ms]
+exit=0
+$ bun run typecheck
+$ tsc --noEmit
+exit=0
+$ bun run build
+$ bun scripts/build.ts
+Built dist/cli.js, dist/core/worker.js, dist/extension/index.js
+exit=0
+$ bun dist/cli.js --root /home/jun/code/omo-initiative status --json
+{"ok":true,"value":[]}
+exit=0
+$ bun dist/cli.js --root /home/jun/code/omo-initiative doctor --json
+{"ok":true,"value":{"sideEffects":false,"paths":{"root":"/home/jun/code/omo-initiative","herdrSocket":"/home/jun/.config/herdr/herdr.sock","omoSocket":"/home/jun/code/omo-initiative/.omo/state/omo.sock","registry":"/home/jun/code/omo-initiative/.omo/state/registry.sqlite"},"checks":{"bun":"/home/jun/.bun/bin/bun","omo":"/home/jun/node/bin/omo","herdr":"/home/jun/.local/bin/herdr","git":"/usr/bin/git","extension":"/home/jun/code/omo-initiative/dist/extension/index.js"}}}
+exit=0

@@ -1,0 +1,43 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/skills.test.ts:
+(pass) oi skills > four skills exist with unique valid frontmatter names [1.16ms]
+(pass) oi skills > shared references and MIT notice are present [0.01ms]
+(pass) oi skills > every local relative link resolves to an existing file [0.15ms]
+
+tests/herdr.test.ts:
+(pass) HerdrClient > uses source-backed create params/replies and correlates fragmented/coalesced JSONL [8.24ms]
+(pass) HerdrClient > quotes hostile argv/env once and uses explicit pane.send_input [11.26ms]
+(pass) HerdrClient > awaits a separate subscription ACK and emits parsed event envelopes [2.74ms]
+(pass) HerdrClient > maps snapshots, reports identity, and sends bounded cleanup requests [4.08ms]
+(pass) HerdrClient > preserves upstream errors and rejects disconnects [949.15ms]
+
+tests/store.test.ts:
+(pass) SQLite registry > uses a real transaction for unique live ownership and survives reopen [122.58ms]
+(pass) SQLite registry > validates scope membership, owner edges, and readiness identity [59.02ms]
+(pass) SQLite registry > enforces immediate-owner routes, designation contact permission, and paused state [109.14ms]
+(pass) SQLite registry > claims immutable payloads and preserves uncertain sends without retry [87.03ms]
+(pass) SQLite registry > worker executes one validated JSON operation and releases the database [85.01ms]
+
+tests/linear.test.ts:
+(pass) readScopeSnapshot > accepts the committed fixture with stable ids [0.46ms]
+(pass) readScopeSnapshot > rejects a missing file [0.10ms]
+(pass) readScopeSnapshot > rejects malformed json [0.57ms]
+(pass) readScopeSnapshot > rejects schema violations [0.78ms]
+(pass) readScopeSnapshot > rejects whitespace-only revision as malformed [0.45ms]
+(pass) readScopeSnapshot > rejects duplicate project ids [0.23ms]
+(pass) readScopeSnapshot > rejects duplicate issue ids within a project [0.19ms]
+(pass) readScopeSnapshot > rejects duplicate issue ids across projects [0.33ms]
+(pass) buildRoleBrief > supervisor brief embeds machine bindings and scope refs [0.21ms]
+(pass) buildRoleBrief > parent brief embeds project scope ref [0.04ms]
+(pass) buildRoleBrief > child brief embeds project and issue scope refs [0.04ms]
+(pass) buildRoleBrief > fixture brief instructs qa standby without autonomous loops [0.03ms]
+
+tests/core/schema.test.ts:
+(pass) frozen core schemas and role policy > modelForRole returns exactly the three proven tuples [0.01ms]
+(pass) frozen core schemas and role policy > strict schemas reject unknown boundary fields [1.15ms]
+
+ 27 pass
+ 0 fail
+ 101 expect() calls
+Ran 27 tests across 5 files. [1476.00ms]

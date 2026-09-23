@@ -1,0 +1,14 @@
+$ bun test tests/integration
+bun test v1.4.0 (34cbb9a40)
+
+tests/integration/orchestrator.test.ts:
+(pass) host profile > writes a contained mode-0600 native host profile [1.75ms]
+(pass) Herdr readiness event > accepts normalized panes and the actual Herdr event source shape [0.85ms]
+(pass) orchestrator startup > subscribes before create, launches without a brief, verifies identity, then prompts [117.51ms]
+
+ 3 pass
+ 0 fail
+ 10 expect() calls
+Ran 3 tests across 1 file. [563.00ms]
+exit=0
+cleanup: temporary profile and registry roots removed by tests; no host, Herdr, model, or Linear process was started

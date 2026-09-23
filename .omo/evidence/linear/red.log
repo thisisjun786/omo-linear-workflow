@@ -1,0 +1,173 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/linear.test.ts:
+17 |   cleanups.push(async () => rm(directory, { recursive: true, force: true }));
+18 |   return path;
+19 | }
+20 | 
+21 | function value<T>(result: Result<T>): T {
+22 |   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+                                 ^
+error: not_implemented: readScopeSnapshot is a stub
+      at value (/home/jun/code/omo-initiative/tests/linear.test.ts:22:29)
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:71:22)
+(fail) readScopeSnapshot > accepts the committed fixture with stable ids [0.33ms]
+79 | 
+80 |   test("rejects a missing file", async () => {
+81 |     const result = await readScopeSnapshot("/nonexistent/scope.json");
+82 |     expect(result.ok).toBe(false);
+83 |     expect(result.ok || result.error.code).not.toBe("ok");
+84 |     if (!result.ok) expect(result.error.code).toBe("read_error");
+                                                   ^
+error: expect(received).toBe(expected)
+
+Expected: "read_error"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:84:47)
+(fail) readScopeSnapshot > rejects a missing file [0.13ms]
+86 | 
+87 |   test("rejects malformed json", async () => {
+88 |     const path = await tempFile("bad.json", "{ not json");
+89 |     const result = await readScopeSnapshot(path);
+90 |     expect(result.ok).toBe(false);
+91 |     if (!result.ok) expect(result.error.code).toBe("parse_error");
+                                                   ^
+error: expect(received).toBe(expected)
+
+Expected: "parse_error"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:91:47)
+(fail) readScopeSnapshot > rejects malformed json [0.90ms]
+93 | 
+94 |   test("rejects schema violations", async () => {
+95 |     const path = await tempFile("no-version.json", JSON.stringify({ source: "fixture" }));
+96 |     const result = await readScopeSnapshot(path);
+97 |     expect(result.ok).toBe(false);
+98 |     if (!result.ok) expect(result.error.code).toBe("schema_violation");
+                                                   ^
+error: expect(received).toBe(expected)
+
+Expected: "schema_violation"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:98:47)
+(fail) readScopeSnapshot > rejects schema violations [0.24ms]
+102 |     const bad = fixtureSnapshot();
+103 |     bad.initiative = { ...bad.initiative, revision: "" };
+104 |     const path = await tempFile("empty-revision.json", JSON.stringify(bad));
+105 |     const result = await readScopeSnapshot(path);
+106 |     expect(result.ok).toBe(false);
+107 |     if (!result.ok) expect(result.error.code).toBe("malformed_revision");
+                                                    ^
+error: expect(received).toBe(expected)
+
+Expected: "malformed_revision"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:107:47)
+(fail) readScopeSnapshot > rejects empty or missing revision [0.21ms]
+114 |       { project: { id: "project-omo-1", url: "linear://project/PROJ-1-dup", revision: "rev-1" }, issues: [] },
+115 |     ];
+116 |     const path = await tempFile("dup-projects.json", JSON.stringify(bad));
+117 |     const result = await readScopeSnapshot(path);
+118 |     expect(result.ok).toBe(false);
+119 |     if (!result.ok) expect(result.error.code).toBe("duplicate_membership");
+                                                    ^
+error: expect(received).toBe(expected)
+
+Expected: "duplicate_membership"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:119:47)
+(fail) readScopeSnapshot > rejects duplicate project ids [0.15ms]
+129 |       ],
+130 |     };
+131 |     const path = await tempFile("dup-issues.json", JSON.stringify(bad));
+132 |     const result = await readScopeSnapshot(path);
+133 |     expect(result.ok).toBe(false);
+134 |     if (!result.ok) expect(result.error.code).toBe("duplicate_membership");
+                                                    ^
+error: expect(received).toBe(expected)
+
+Expected: "duplicate_membership"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:134:47)
+(fail) readScopeSnapshot > rejects duplicate issue ids within a project [0.17ms]
+144 |       },
+145 |     ];
+146 |     const path = await tempFile("cross-dup-issues.json", JSON.stringify(bad));
+147 |     const result = await readScopeSnapshot(path);
+148 |     expect(result.ok).toBe(false);
+149 |     if (!result.ok) expect(result.error.code).toBe("duplicate_membership");
+                                                    ^
+error: expect(received).toBe(expected)
+
+Expected: "duplicate_membership"
+Received: "not_implemented"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:149:47)
+(fail) readScopeSnapshot > rejects duplicate issue ids across projects [0.15ms]
+154 |   const snapshot = fixtureSnapshot();
+155 | 
+156 |   test("supervisor brief embeds machine bindings and scope refs", () => {
+157 |     const binding = makeBinding("supervisor", { id: "binding-supervisor", durableSessionId: "session-supervisor", designationId: "designation-1" });
+158 |     const brief = buildRoleBrief(binding, snapshot);
+159 |     expect(brief).toContain("binding_id: binding-supervisor");
+                        ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "binding_id: binding-supervisor"
+Received: "stub brief"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:159:19)
+(fail) buildRoleBrief > supervisor brief embeds machine bindings and scope refs [0.11ms]
+166 |   });
+167 | 
+168 |   test("parent brief embeds project scope ref", () => {
+169 |     const binding = makeBinding("parent");
+170 |     const brief = buildRoleBrief(binding, snapshot);
+171 |     expect(brief).toContain("role: parent");
+                        ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "role: parent"
+Received: "stub brief"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:171:19)
+(fail) buildRoleBrief > parent brief embeds project scope ref [0.03ms]
+174 |   });
+175 | 
+176 |   test("child brief embeds project and issue scope refs", () => {
+177 |     const binding = makeBinding("child");
+178 |     const brief = buildRoleBrief(binding, snapshot);
+179 |     expect(brief).toContain("role: child");
+                        ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "role: child"
+Received: "stub brief"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:179:19)
+(fail) buildRoleBrief > child brief embeds project and issue scope refs [0.03ms]
+182 |   });
+183 | 
+184 |   test("fixture brief instructs qa standby without autonomous loops", () => {
+185 |     const binding = makeBinding("supervisor");
+186 |     const brief = buildRoleBrief(binding, snapshot);
+187 |     expect(brief).toContain("source: fixture");
+                        ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "source: fixture"
+Received: "stub brief"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/linear.test.ts:187:19)
+(fail) buildRoleBrief > fixture brief instructs qa standby without autonomous loops [0.03ms]
+
+ 0 pass
+ 12 fail
+ 19 expect() calls
+Ran 12 tests across 1 file. [11.00ms]

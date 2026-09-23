@@ -1,0 +1,20 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/linear.test.ts:
+(pass) readScopeSnapshot > accepts the committed fixture with stable ids [1.66ms]
+(pass) readScopeSnapshot > rejects a missing file [0.11ms]
+(pass) readScopeSnapshot > rejects malformed json [0.76ms]
+(pass) readScopeSnapshot > rejects schema violations [0.45ms]
+(pass) readScopeSnapshot > rejects whitespace-only revision as malformed [0.22ms]
+(pass) readScopeSnapshot > rejects duplicate project ids [0.25ms]
+(pass) readScopeSnapshot > rejects duplicate issue ids within a project [0.50ms]
+(pass) readScopeSnapshot > rejects duplicate issue ids across projects [0.21ms]
+(pass) buildRoleBrief > supervisor brief embeds machine bindings and scope refs [0.20ms]
+(pass) buildRoleBrief > parent brief embeds project scope ref [0.06ms]
+(pass) buildRoleBrief > child brief embeds project and issue scope refs [0.03ms]
+(pass) buildRoleBrief > fixture brief instructs qa standby without autonomous loops [0.02ms]
+
+ 12 pass
+ 0 fail
+ 38 expect() calls
+Ran 12 tests across 1 file. [33.00ms]

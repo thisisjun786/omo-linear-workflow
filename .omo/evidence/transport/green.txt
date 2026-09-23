@@ -1,0 +1,42 @@
+$ bun test tests/events.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tests/events.test.ts:
+(pass) native delivery extension > activates thread_send, persists acceptance, and replays without a native resend [276.80ms]
+(pass) native delivery extension > derives sender context and rejects forged or forbidden routes before native send [215.86ms]
+(pass) native delivery extension > persists malformed, wrong-target, and idempotency-uncertain native outcomes as uncertain [585.88ms]
+(pass) native delivery extension > guards bound direct native calls but leaves unknown sessions unaffected [298.34ms]
+(pass) native delivery extension > reports TUI session path through the stored Herdr socket and pane and discovers four skills [181.18ms]
+
+ 5 pass
+ 0 fail
+ 18 expect() calls
+Ran 5 tests across 1 file. [1.58s]
+exit=0
+$ bun test tests/transport
+bun test v1.4.0 (34cbb9a40)
+
+tests/transport/client.test.ts:
+(pass) native session client > attaches only an exact existing durable id, path, and cwd [0.15ms]
+(pass) native session client > validates extension replies and close only disconnects the client [1.88ms]
+
+ 2 pass
+ 0 fail
+ 10 expect() calls
+Ran 2 tests across 1 file. [417.00ms]
+exit=0
+$ bun run typecheck
+$ tsc --noEmit
+src/herdr/index.ts(8,8): error TS2306: File '/home/jun/code/omo-initiative/src/herdr/client.ts' is not a module.
+exit=2
+$ bunx biome check src/transport src/extension tests/events.test.ts tests/transport
+Checked 7 files in 6ms. No fixes applied.
+exit=0
+$ bun build src/extension/index.ts --target=node --packages=external
+Bundled 5 modules in 3ms
+
+  extension.js  13.89 KB  (entry point)
+
+NODE_EXTENSION_NO_BUN_SQLITE
+CLEANUP_OK
+exit=0

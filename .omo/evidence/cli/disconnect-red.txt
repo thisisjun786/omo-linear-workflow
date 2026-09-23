@@ -1,0 +1,37 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/integration/orchestrator.test.ts:
+(pass) host profile > writes a contained mode-0600 native host profile [1.41ms]
+(pass) Herdr readiness event > accepts normalized panes and the actual Herdr event source shape [0.95ms]
+(pass) orchestrator startup > subscribes before create, launches without a brief, verifies identity, then prompts [119.42ms]
+264 |       designationId: "designation-disconnect",
+265 |       execute: true,
+266 |       fixture: true,
+267 |     });
+268 | 
+269 |     expect(created).toEqual({
+                          ^
+error: expect(received).toEqual(expected)
+
+  {
+    "error": {
+      "code": "runtime_unavailable",
+-     "details": "Herdr subscription connection_closed: fixture disconnected",
+-     "message": "Role creation became uncertain; reconcile before retrying",
++     "details": "must not attach after subscription disconnect",
++     "message": "Could not verify native runtime identity",
+    },
+    "ok": false,
+  }
+
+- Expected  - 2
++ Received  + 2
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/integration/orchestrator.test.ts:269:21)
+(fail) orchestrator startup > rejects an acknowledged Herdr subscription disconnect without treating a snapshot as ready [90.30ms]
+
+ 3 pass
+ 1 fail
+ 12 expect() calls
+Ran 4 tests across 1 file. [707.00ms]
+exit=1

@@ -1,0 +1,11 @@
+$ tsc --noEmit
+node_modules/.pnpm/@code-yeongyu+senpi@2026.9.22/node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/mcp/auth/oauth-provider.d.ts(20,22): error TS2420: Class 'McpOAuthProvider' incorrectly implements interface 'OAuthClientProvider'.
+  Types of property 'clientMetadataUrl' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+node_modules/.pnpm/@code-yeongyu+senpi@2026.9.22/node_modules/@code-yeongyu/senpi/node_modules/@google/genai/dist/genai.d.ts(4771,37): error TS2552: Cannot find name 'RequestInfo'. Did you mean 'RequestInit'?
+node_modules/.pnpm/@code-yeongyu+senpi@2026.9.22/node_modules/@code-yeongyu/senpi/node_modules/@google/genai/dist/genai.d.ts(4780,32): error TS2552: Cannot find name 'RequestInfo'. Did you mean 'RequestInit'?
+node_modules/.pnpm/@code-yeongyu+senpi@2026.9.22/node_modules/@code-yeongyu/senpi/node_modules/@google/genai/dist/genai.d.ts(13301,15): error TS2304: Cannot find name 'HeadersInit'.
+node_modules/.pnpm/@code-yeongyu+senpi@2026.9.22/node_modules/@code-yeongyu/senpi/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/transport.d.ts(7,51): error TS2304: Cannot find name 'HeadersInit'.
+node_modules/.pnpm/@code-yeongyu+senpi@2026.9.22/node_modules/@code-yeongyu/senpi/node_modules/gaxios/build/esm/src/gaxios.d.ts(52,5): error TS2416: Property 'fetch' in type 'Gaxios' is not assignable to the same property in base type 'FetchCompliance'.
+  Property 'preconnect' is missing in type '<T = unknown>(...args: [input: string | URL | Request, init?: RequestInit | undefined] | [opts?: GaxiosOptions | undefined]) => GaxiosPromise<T>' but required in type 'typeof fetch'.

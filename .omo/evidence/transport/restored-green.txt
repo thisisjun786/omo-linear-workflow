@@ -1,0 +1,40 @@
+$ bun test tests/events.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tests/events.test.ts:
+(pass) native delivery extension > activates thread_send, persists acceptance, and replays without a native resend [161.63ms]
+(pass) native delivery extension > derives sender context and rejects forged or forbidden routes before native send [92.45ms]
+(pass) native delivery extension > persists malformed, wrong-target, and idempotency-uncertain native outcomes as uncertain [365.56ms]
+(pass) native delivery extension > guards bound direct native calls but leaves unknown sessions unaffected [188.51ms]
+(pass) native delivery extension > reports TUI session path through the stored Herdr socket and pane and discovers four skills [69.07ms]
+
+ 5 pass
+ 0 fail
+ 22 expect() calls
+Ran 5 tests across 1 file. [904.00ms]
+exit=0
+$ bun test tests/transport
+bun test v1.4.0 (34cbb9a40)
+
+tests/transport/client.test.ts:
+(pass) native session client > attaches only an exact existing durable id, path, and cwd [0.15ms]
+(pass) native session client > validates extension replies and close only disconnects the client [1.75ms]
+
+ 2 pass
+ 0 fail
+ 11 expect() calls
+Ran 2 tests across 1 file. [436.00ms]
+exit=0
+$ bunx biome check src/transport src/extension tests/events.test.ts tests/transport
+Checked 7 files in 7ms. No fixes applied.
+exit=0
+$ bun run typecheck
+$ tsc --noEmit
+exit=0
+$ bun build src/extension/index.ts --target=node --packages=external
+Bundled 6 modules in 4ms
+
+  extension.js  27.16 KB  (entry point)
+
+NODE_EXTENSION_NO_BUN_SQLITE
+CLEANUP_OK

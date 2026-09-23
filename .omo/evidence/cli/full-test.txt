@@ -1,0 +1,64 @@
+$ bun test
+bun test v1.4.0 (34cbb9a40)
+
+tests/skills.test.ts:
+(pass) oi skills > four skills exist with unique valid frontmatter names [1.10ms]
+(pass) oi skills > shared references and MIT notice are present [0.01ms]
+(pass) oi skills > every local relative link resolves to an existing file [0.15ms]
+
+tests/events.test.ts:
+(pass) native delivery extension > activates thread_send, persists acceptance, and replays without a native resend [236.81ms]
+(pass) native delivery extension > derives sender context and rejects forged or forbidden routes before native send [157.87ms]
+(pass) native delivery extension > persists malformed, wrong-target, and idempotency-uncertain native outcomes as uncertain [517.75ms]
+(pass) native delivery extension > guards bound direct native calls but leaves unknown sessions unaffected [258.67ms]
+(pass) native delivery extension > reports TUI session path through the stored Herdr socket and pane and discovers four skills [129.76ms]
+
+tests/herdr.test.ts:
+(pass) HerdrClient > reports a disconnected subscription after its acknowledgement [1.94ms]
+(pass) HerdrClient > preserves a Korean path when socket chunks split inside a UTF-8 character [0.64ms]
+(pass) HerdrClient > uses source-backed create params/replies and correlates fragmented/coalesced JSONL [4.30ms]
+(pass) HerdrClient > quotes hostile argv/env once and uses explicit pane.send_input [10.38ms]
+(pass) HerdrClient > awaits a separate subscription ACK and emits parsed event envelopes [2.16ms]
+(pass) HerdrClient > maps snapshots, reports identity, and sends bounded cleanup requests [3.30ms]
+(pass) HerdrClient > preserves upstream errors and rejects disconnects [675.40ms]
+
+tests/store.test.ts:
+(pass) SQLite registry > uses a real transaction for unique live ownership and survives reopen [188.54ms]
+(pass) SQLite registry > validates scope membership, owner edges, and readiness identity [66.48ms]
+(pass) SQLite registry > enforces immediate-owner routes, designation contact permission, and paused state [109.55ms]
+(pass) SQLite registry > claims immutable payloads and preserves uncertain sends without retry [87.99ms]
+(pass) SQLite registry > worker executes one validated JSON operation through stdin and releases the database [85.31ms]
+(pass) SQLite registry > worker executes one validated JSON operation through argv and releases the database [86.85ms]
+
+tests/linear.test.ts:
+(pass) readScopeSnapshot > accepts the committed fixture with stable ids [0.24ms]
+(pass) readScopeSnapshot > rejects a missing file [0.29ms]
+(pass) readScopeSnapshot > rejects malformed json [0.42ms]
+(pass) readScopeSnapshot > rejects schema violations [0.67ms]
+(pass) readScopeSnapshot > rejects whitespace-only revision as malformed [0.39ms]
+(pass) readScopeSnapshot > rejects duplicate project ids [0.16ms]
+(pass) readScopeSnapshot > rejects duplicate issue ids within a project [0.36ms]
+(pass) readScopeSnapshot > rejects duplicate issue ids across projects [0.13ms]
+(pass) buildRoleBrief > supervisor brief embeds machine bindings and scope refs [0.11ms]
+(pass) buildRoleBrief > parent brief embeds project scope ref [0.03ms]
+(pass) buildRoleBrief > child brief embeds project and issue scope refs [0.02ms]
+(pass) buildRoleBrief > fixture brief instructs qa standby without autonomous loops [0.02ms]
+
+tests/integration/orchestrator.test.ts:
+(pass) host profile > writes a contained mode-0600 native host profile [0.75ms]
+(pass) Herdr readiness event > accepts normalized panes and the actual Herdr event source shape [3.19ms]
+(pass) orchestrator startup > subscribes before create, launches without a brief, verifies identity, then prompts [115.80ms]
+
+tests/core/schema.test.ts:
+(pass) frozen core schemas and role policy > modelForRole returns exactly the three proven tuples [0.01ms]
+(pass) frozen core schemas and role policy > strict schemas reject unknown boundary fields [0.33ms]
+
+tests/transport/client.test.ts:
+(pass) native session client > attaches only an exact existing durable id, path, and cwd [0.12ms]
+(pass) native session client > validates extension replies and close only disconnects the client [0.29ms]
+
+ 40 pass
+ 0 fail
+ 151 expect() calls
+Ran 40 tests across 8 files. [3.18s]
+exit=0

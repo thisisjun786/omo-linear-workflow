@@ -1,0 +1,28 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/events.test.ts:
+280 |       await harness.start()(context(supervisor));
+281 |       const send = harness.rpc("omo.initiative.send");
+282 |       const message = envelope(supervisor, parent, digest, "message-1");
+283 |       expect(resultState(await send(message))).toBe("accepted");
+284 |       const firstExec = harness.execCalls[0];
+285 |       expect(firstExec?.command).toBe("bun");
+                                       ^
+error: expect(received).toBe(expected)
+
+Expected: "bun"
+Received: "sh"
+
+      at <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:285:34)
+      at async fixture (/home/jun/code/omo-initiative/tests/events.test.ts:109:11)
+      at async <anonymous> (/home/jun/code/omo-initiative/tests/events.test.ts:277:11)
+(fail) native delivery extension > activates thread_send, persists acceptance, and replays without a native resend [124.62ms]
+(pass) native delivery extension > derives sender context and rejects forged or forbidden routes before native send [108.36ms]
+(pass) native delivery extension > persists malformed, wrong-target, and idempotency-uncertain native outcomes as uncertain [395.04ms]
+(pass) native delivery extension > guards bound direct native calls but leaves unknown sessions unaffected [188.84ms]
+(pass) native delivery extension > reports TUI session path through the stored Herdr socket and pane and discovers four skills [85.09ms]
+
+ 4 pass
+ 1 fail
+ 15 expect() calls
+Ran 5 tests across 1 file. [929.00ms]

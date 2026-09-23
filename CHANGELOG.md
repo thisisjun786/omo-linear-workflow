@@ -13,19 +13,18 @@ published.
 
 ## [Unreleased]
 
+## [0.1.0]
+
+Released: 2026-09-23
+
+Initial source release of OMO Linear Workflow (OLW).
+
 ### Added
 
 - A non-overwriting Linux x64 installer for a source checkout and its `olw` launcher.
 - CI for metadata, type checking, lint, tests, the managed Herdr build and installation smoke tests.
 - Version/tag validation and source-only GitHub releases triggered by maintainer tags.
 - Version, upgrade, rollback and contribution policies, issue forms and a PR template.
-
-## [0.1.0]
-
-Planned initial release of the source distribution. Nothing has been tagged or
-published yet; this section describes what the repository does today.
-
-### Added
 
 - Bun CLI (`bun run cli`) that imports a revision-pinned Linear initiative scope
   snapshot into local SQLite and creates supervisor, parent and child role

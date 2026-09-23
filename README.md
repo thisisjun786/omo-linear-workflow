@@ -56,8 +56,10 @@ source-only releases, upgrades and rollback. [CHANGELOG.md](CHANGELOG.md) holds
 release notes. `bun run release:check` validates the package version and notes.
 CI runs without provider credentials and includes the required native Herdr
 build and an isolated installation smoke test. A maintainer-pushed version tag
-runs those checks before publishing a GitHub release. No initial tag has been
-published yet; the clone above installs `main`.
+runs those checks before publishing a GitHub release. The clone above installs
+`main`; add `--branch v0.1.0` to install the first release instead. See
+[GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)
+for published versions and source archives.
 
 ## Proxy model extension
 

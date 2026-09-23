@@ -12,8 +12,9 @@ source tree plus a GitHub release entry that points at it.
 ## Version numbers
 
 `package.json` `version` is the single canonical version. Nothing else in the
-repository should claim a different one. At the time of writing it is `0.1.0`
-and no tag or GitHub release exists yet.
+repository should claim a different one. The first release is `0.1.0`; consult
+[GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)
+for published versions.
 
 Versions follow SemVer `MAJOR.MINOR.PATCH`, optionally followed by `-rc.N`
 where `N` is a positive integer. Git tags are the version with a `v` prefix:
@@ -100,8 +101,8 @@ The installer checks for Bun 1.4.0 or newer, pnpm 10.33.3, Node 24.20 and
 uncached build also needs Rust 1.96.1 with `rustfmt` from Rustup and Zig
 0.16.0 for the managed Herdr. Linux x64 is the only supported target.
 
-The example tag above becomes available only after the first release is
-published. Until then, omit `--branch v0.1.0` to install a reviewed `main` commit.
+The example selects the first release. Choose another published tag to install
+that version, or omit `--branch v0.1.0` to install a reviewed `main` commit.
 
 If you download a source archive, unpack it to a stable path and run the same
 command inside it. Proxy access files are outside the checkout by default, but

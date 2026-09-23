@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "source": "fixture",
+  "initiative": {
+    "id": "initiative-omo-1",
+    "url": "linear://initiative/OMO-1",
+    "revision": "rev-2026-09-22-001"
+  },
+  "projects": [
+    {
+      "project": {
+        "id": "project-omo-1",
+        "url": "linear://project/PROJ-1",
+        "revision": "rev-2026-09-22-001"
+      },
+      "issues": [
+        {
+          "id": "issue-omo-1",
+          "url": "linear://issue/ISS-1",
+          "revision": "rev-2026-09-22-001"
+        },
+        {
+          "id": "issue-omo-2",
+          "url": "linear://issue/ISS-2",
+          "revision": "rev-2026-09-22-001"
+        }
+      ]
+    }
+  ],
+  "decisionRefs": []
+}

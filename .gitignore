@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.omo/evidence/*
+!.omo/evidence/.gitkeep
+.omo/discovery/
+.omo/state/
+.omo/worktrees/
+omo-host.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

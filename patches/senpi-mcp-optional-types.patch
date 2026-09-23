@@ -1,0 +1,24 @@
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.d.ts b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.d.ts
+--- a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.d.ts
++++ b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.d.ts
+@@ -22,7 +22,7 @@
+     /**
+      * External URL the server should use to fetch client metadata document
+      */
+-    clientMetadataUrl?: string;
++    clientMetadataUrl?: string | undefined;
+     /**
+      * Metadata about this OAuth client.
+      */
+diff --git a/node_modules/gaxios/build/esm/src/gaxios.d.ts b/node_modules/gaxios/build/esm/src/gaxios.d.ts
+--- a/node_modules/gaxios/build/esm/src/gaxios.d.ts
++++ b/node_modules/gaxios/build/esm/src/gaxios.d.ts
+@@ -10,7 +10,7 @@
+  * compatible with the `fetch` API.
+  */
+ interface FetchCompliance {
+-    fetch: typeof fetch;
++    fetch: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
+ }
+ export declare class Gaxios implements FetchCompliance {
+     #private;

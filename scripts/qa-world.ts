@@ -106,50 +106,60 @@ export async function prepareQaWorld() {
     ],
     repository,
   );
-  const herdr = Bun.spawn([environment.QA_HERDR_BINARY, "--session", sessionName, "server"], {
-    cwd: repository,
-    env: environment,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const ready = Promise.withResolvers<string>();
-  const timer = setTimeout(
-    () => ready.reject(new QaError("Herdr server readiness timeout")),
-    30000,
-  );
-  const output = new Response(herdr.stdout).text();
-  let log = "";
-  const stderrTask = (async () => {
-    let buffer = "";
-    for await (const bytes of herdr.stderr) {
-      const part = new TextDecoder().decode(bytes);
-      log += part;
-      buffer += part;
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        const match = /^api socket: (.+)$/.exec(line);
-        if (match?.[1]) ready.resolve(match[1]);
-        newline = buffer.indexOf("\n");
+  async function startServer() {
+    const herdr = Bun.spawn([environment.QA_HERDR_BINARY, "--session", sessionName, "server"], {
+      cwd: repository,
+      env: environment,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const ready = Promise.withResolvers<string>();
+    const timer = setTimeout(
+      () => ready.reject(new QaError("Herdr server readiness timeout")),
+      30000,
+    );
+    const output = new Response(herdr.stdout).text();
+    let log = "";
+    const stderrTask = (async () => {
+      let buffer = "";
+      for await (const bytes of herdr.stderr) {
+        const part = new TextDecoder().decode(bytes);
+        log += part;
+        buffer += part;
+        let newline = buffer.indexOf("\n");
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          const match = /^api socket: (.+)$/.exec(line);
+          if (match?.[1]) ready.resolve(match[1]);
+          newline = buffer.indexOf("\n");
+        }
       }
+      ready.reject(new QaError(`Herdr exited before readiness: ${log}`));
+    })();
+    let herdrSocket: string;
+    try {
+      herdrSocket = await ready.promise;
+    } catch (error) {
+      herdr.kill("SIGTERM");
+      await herdr.exited;
+      await stderrTask;
+      await output;
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    ready.reject(new QaError(`Herdr exited before readiness: ${log}`));
-  })();
-  let herdrSocket: string;
+    return { herdr, herdrSocket, output, stderrTask };
+  }
+  let server: Awaited<ReturnType<typeof startServer>>;
   try {
-    herdrSocket = await ready.promise;
+    server = await startServer();
   } catch (error) {
-    herdr.kill("SIGTERM");
-    await herdr.exited;
-    await stderrTask;
-    await output;
     await rm(scratch, { recursive: true, force: true });
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
+  const herdrSocket = server.herdrSocket;
   const worktrees: string[] = [];
   const workspaces: string[] = [];
   return {
@@ -176,6 +186,17 @@ export async function prepareQaWorld() {
         controlRoot,
         { ...environment, HERDR_SOCKET_PATH: herdrSocket },
       );
+    },
+    async restartHerdr(): Promise<void> {
+      await checkedQaCommand(
+        ["herdr", "--session", sessionName, "session", "stop", sessionName, "--json"],
+        repository,
+        environment,
+      );
+      await Promise.all([server.herdr.exited, server.stderrTask, server.output]);
+      server = await startServer();
+      if (server.herdrSocket !== herdrSocket)
+        throw new QaError("Restart changed owned Herdr socket identity");
     },
     async close(): Promise<void> {
       const failures: string[] = [];
@@ -221,74 +242,67 @@ export async function prepareQaWorld() {
           throw error;
         },
       );
-      if (hostExists) {
-        const client = new RpcClient({ socketPath });
-        try {
+      const client = hostExists ? new RpcClient({ socketPath }) : undefined;
+      const cleanupAttachments: string[] = [];
+      try {
+        if (client) {
           await client.start();
           for (const session of await client.listSessions()) {
-            if (session.durableSessionId && ownedSessions.has(session.durableSessionId)) {
-              if (session.sessionPath) {
-                const opened = await client.openSession({
-                  sessionPath: session.sessionPath,
-                  cwd: session.cwd,
-                  retain_on_disconnect: false,
-                });
-                await client.closeSession(opened.sessionId);
-              }
-            }
-          }
-        } finally {
-          await client.stop();
-        }
-      }
-      const observer = createHerdrClient(herdrSocket);
-      const activeWorkspaces = new Set<string>();
-      try {
-        for (const workspace of (await observer.snapshot()).workspaces)
-          activeWorkspaces.add(workspace.workspaceId);
-      } finally {
-        observer.close();
-      }
-      for (const workspace of worktrees.toReversed()) {
-        if (activeWorkspaces.has(workspace))
-          await run([
-            "worktree",
-            "remove",
-            "--workspace",
-            workspace,
-            "--trust-repository",
-            "--force",
-          ]);
-      }
-      for (const workspace of workspaces.toReversed()) {
-        if (activeWorkspaces.has(workspace)) await run(["workspace", "close", workspace]);
-      }
-      await run(["session", "stop", sessionName, "--json"]);
-      await herdr.exited;
-      await stderrTask;
-      await output;
-      if (hostExists) {
-        const remaining = new RpcClient({ socketPath });
-        try {
-          await remaining.start();
-          for (const session of await remaining.listSessions()) {
-            if (
+            const owned =
+              (session.durableSessionId !== undefined &&
+                ownedSessions.has(session.durableSessionId)) ||
               session.cwd === controlRoot ||
-              session.cwd.startsWith(`${controlRoot}/.omo/worktrees/`)
-            ) {
-              if (session.sessionPath) {
-                const opened = await remaining.openSession({
-                  sessionPath: session.sessionPath,
-                  cwd: session.cwd,
-                  retain_on_disconnect: false,
-                });
-                await remaining.closeSession(opened.sessionId);
-              }
-            }
+              session.cwd.startsWith(`${controlRoot}/.omo/worktrees/`);
+            if (session.status !== "open" || !owned || !session.sessionPath) continue;
+            // Hold our attachment while Herdr closes the frontend; never reopen a deleted cwd.
+            const opened = await client.openSession({
+              sessionPath: session.sessionPath,
+              cwd: session.cwd,
+              retain_on_disconnect: false,
+            });
+            cleanupAttachments.push(opened.sessionId);
+          }
+        }
+        const observer = createHerdrClient(herdrSocket);
+        const activeWorkspaces = new Set<string>();
+        const groupHeads = new Set<string>();
+        try {
+          for (const workspace of (await observer.snapshot()).workspaces) {
+            activeWorkspaces.add(workspace.workspaceId);
+            if (workspace.groupHeadWorkspaceId === workspace.workspaceId)
+              groupHeads.add(workspace.workspaceId);
           }
         } finally {
-          await remaining.stop();
+          observer.close();
         }
+        const removalOrder = worktrees
+          .toReversed()
+          .sort((left, right) => Number(groupHeads.has(left)) - Number(groupHeads.has(right)));
+        for (const workspace of removalOrder) {
+          if (activeWorkspaces.has(workspace))
+            await run([
+              "worktree",
+              "remove",
+              "--workspace",
+              workspace,
+              "--trust-repository",
+              "--force",
+            ]);
+        }
+        for (const workspace of workspaces.toReversed()) {
+          if (activeWorkspaces.has(workspace)) await run(["workspace", "close", workspace]);
+        }
+        await run(["session", "stop", sessionName, "--json"]);
+        await server.herdr.exited;
+        await server.stderrTask;
+        await server.output;
+        if (client) {
+          for (const sessionId of cleanupAttachments) await client.closeSession(sessionId);
+        }
+      } finally {
+        await client?.stop();
+      }
+      if (hostExists) {
         const stopped = await runQaCommand(
           [join(controlRoot, "node_modules/.bin/omo"), "host", "stop", "--socket", socketPath],
           controlRoot,

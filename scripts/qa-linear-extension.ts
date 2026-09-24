@@ -7,6 +7,12 @@ const requestSchema = z.object({
 });
 
 export default function qaLinearExtension(pi: ExtensionAPI): void {
+  const invocations: { name: string; active: string[] }[] = [];
+  pi.on("tool_call", (event) => {
+    if (event.toolName.startsWith("mcp_linear_"))
+      invocations.push({ name: event.toolName, active: pi.getActiveTools() });
+  });
+  pi.rpc.handle("oi.qa.linear.invocations", () => invocations);
   pi.rpc.handle("oi.qa.linear.tools", () =>
     pi
       .getAllTools()

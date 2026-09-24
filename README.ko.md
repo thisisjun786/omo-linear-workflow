@@ -2,7 +2,7 @@
 
 [English](README.md) | 한국어
 
-Linear에서 승인된 initiative 범위를 Herdr worktree와 OMO native thread에 연결하는 Bun CLI입니다. Linear가 범위와 결정을 소유하고, 로컬 SQLite는 승인된 snapshot, 실행 권한, runtime identity와 delivery receipt를 보관합니다.
+Linear에서 승인된 프로젝트 또는 initiative 범위를 Herdr worktree와 OMO native thread에 연결하는 Bun CLI입니다. Linear가 범위와 결정을 소유하고, 로컬 SQLite는 승인된 snapshot, 실행 권한, runtime identity와 delivery receipt를 보관합니다.
 
 ## 준비
 
@@ -143,17 +143,38 @@ bun run cli -- scope import --file tests/fixtures/scope.json --fixture --json
 
 ```sh
 bun run cli -- --root "$PWD" scope import --file approved-scope.json
-bun run cli -- --root "$PWD" supervisor create --initiative ID --scope-digest SHA --designation ID --execute
-bun run cli -- --root "$PWD" parent create --supervisor BINDING --project ID --repo /abs/repo --base main
+bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID --repo /abs/repo --base main
 bun run cli -- --root "$PWD" child create --parent BINDING --issue ID
 bun run cli -- --root "$PWD" send --from BINDING --to BINDING --id MSG --kind instruction --text-file brief.txt
 bun run cli -- --root "$PWD" report --from BINDING --id MSG --outcome completed --evidence /abs/path --text-file result.txt
-bun run cli -- --root "$PWD" status --initiative ID --json
+bun run cli -- --root "$PWD" reports --project ID --json
+bun run cli -- --root "$PWD" notices --project ID --json
+bun run cli -- --root "$PWD" status --project ID --json
 bun run cli -- --root "$PWD" pause --binding BINDING
 bun run cli -- --root "$PWD" resume --binding BINDING
-bun run cli -- --root "$PWD" reconcile --initiative ID
+bun run cli -- --root "$PWD" reconcile --project ID
 bun run cli -- --root "$PWD" close --binding BINDING
 ```
+
+프로젝트 부모가 실행의 기본 단위입니다. 감독이나 initiative 없이 시작할 수 있으며,
+initiative가 없는 snapshot은 `"initiative": null`을 사용합니다. 독립 부모 생성에는 명시적
+scope digest, designation, `--execute`가 필요합니다. fixture 승인이면 `--fixture`도 붙입니다.
+감독은 사용자가 필요할 때 직접 만드는 선택적 관리 세션입니다.
+
+```sh
+bun run cli -- supervisor create --initiative ID --scope-digest MANAGER_SHA --designation MANAGER_ID --execute
+bun run cli -- parent link --parent PARENT --supervisor MANAGER
+bun run cli -- parent unlink --parent PARENT
+# 아직 부모가 없는 프로젝트를 기존 감독 승인으로 만드는 대안:
+bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo --base main
+```
+
+`--supervisor`와 독립 승인 옵션을 섞지 않습니다. 초기 지시가 수락된 부모는 다른 designation의
+감독에도 명시적으로 연결할 수 있지만, 감독의 승인 snapshot에 해당 프로젝트가 포함되고 양쪽의
+실행·연락 권한이 있어야 합니다. 연결은 부모의 승인 범위·이슈 목록·worktree·일시정지 상태·ID를
+변경하지 않습니다. 숨겨진 역할 생성이나 작업 재전송도 없습니다. `status`, `reports`, `notices`, `reconcile`은
+`--project` 또는 `--initiative`로 필터링합니다. 나중에 연결한 감독이 아니라 각 역할의 원래 승인
+범위를 기준으로 하므로 initiative 없는 프로젝트에는 `--project`를 사용합니다. `reports`와 `notices`는 필터 없이도 읽을 수 있습니다.
 
 `--root`는 이 도구의 control root이며 위 예제의 `$PWD`는 이 저장소입니다. 실제 작업 대상 저장소는 parent create의 `--repo`로 별도 지정합니다.
 
@@ -163,7 +184,7 @@ bun run cli -- --root "$PWD" close --binding BINDING
 
 | 역할 | 모델 / reasoning | 작업 공간 |
 | --- | --- | --- |
-| Supervisor | `cliproxyapi/gpt-6-astra` / `high` | control root Herdr workspace |
+| Supervisor (선택 사항) | `cliproxyapi/gpt-6-astra` / `high` | control root Herdr workspace |
 | Parent | `cliproxyapi/claude-opus-5-5` / `xhigh` | project integration branch worktree |
 | Child | `cliproxyapi/claude-opus-5-5` / `xhigh` | parent branch 기반 issue worktree |
 
@@ -184,11 +205,29 @@ bun run cli -- --root "$PWD" close --binding BINDING
 
 Herdr가 workspace와 부모·자식 worktree를 만듭니다. 부모 브랜치는 `omo/<designation>/projects/<project>-<binding>`, 자식 브랜치는 `omo/<designation>/issues/<issue>-<binding>`이며, 자식의 base는 부모 브랜치의 확인된 commit입니다. 새 binding suffix 덕분에 이전 작업 브랜치를 보존한 채 역할을 교체할 수 있습니다.
 
+새 부모는 Herdr의 명시적인 최상위 그룹 대표가 되고 자식은 실제 부모 workspace ID로 소속을 정합니다. 같은 Git 저장소의 프로젝트도 서로 섞이지 않습니다. 감독 연결·일시정지·재개는 그룹을 이동하지 않습니다. 기존 legacy 부모의 배치와 무관한 workspace·포커스는 보존합니다. 새 부모 그룹에는 관리형 grouped-worktree RPC를 지원하는 서버가 필요하며, 구형 서버에서 다른 배치로 조용히 대체하지 않습니다.
+
 컨트롤러가 파일 이벤트를 먼저 구독한 뒤 OMO를 실행합니다. TUI의 `session_start`가 `.omo/state/ready/`에 원자적으로 준비 기록을 남기면, 공개 OMO RPC로 정확한 세션에 연결해 모델과 reasoning을 설정·검증한 후 첫 지시를 보냅니다. Herdr의 OMO 탐지나 미지원 session-path 보고에 의존하지 않습니다.
 
 초기 지시는 보내기 전에 영속 claim을 남깁니다. 실제 수락이 확인되기 전에는 `initializing`이며, 수락 후에만 `ready`가 됩니다. ACK가 유실되면 이미 저장된 정확한 user message 또는 delivery receipt로 확인하고, 증거가 없으면 재전송하지 않습니다.
 
-이후 세션 간 연락은 네이티브 `thread_send`의 `delivery: auto`를 사용합니다. 대기 중인 부모는 자식 보고로 재개되며, 별도 에이전트 polling loop나 자체 메시지 broker는 없습니다. 동일 message ID와 동일 payload는 저장된 receipt를 반환하고 다시 전송하지 않습니다.
+이후 세션 간 연락은 네이티브 `thread_send`의 `delivery: auto`를 사용합니다. 대기 중인 부모는 자식 보고로 재개되며, 별도 에이전트 polling loop나 자체 메시지 broker는 없습니다. 수락된 메시지는 저장된 receipt를 반환하고, sending/uncertain은 다시 보내지 않습니다. 대상 호출 전 거절을 증명하는 `turn_conflict_before_delivery`만 예외입니다. 같은 논리 ID와 같은 payload로 명령을 다시 실행하면 현재 권한을 재검사하고 후속 native key 하나를 claim합니다. `delivery.attempts`에 이전 key와 receipt를 보존하며, 이전 시도의 늦은 응답이 새 시도를 덮어쓰지 못합니다. 과거의 `turn_conflict`만으로는 이런 재시도를 허용하지 않습니다.
+
+연결된 감독이 없거나 준비되지 않았거나 종료된 경우 부모 보고는 로컬 사용자 inbox에 기록됩니다.
+`report --to-user`는 감독이 연결되거나 일시정지되어 있어도 사용자 기록 경로를 명시적으로 선택합니다.
+`reports --project ID --json`으로 읽고, 정확한 질문은 `blocked`, 실패와 증거는 `failed`로 남깁니다.
+사용자는 부모의 정확한 세션에 직접 답합니다. `state: "posted"`, `toBindingId: null`, `receipt: null`은
+**로컬 기록일 뿐 네이티브 수락·사용자 읽음·Linear 완료가 아닙니다**. 가짜 사용자 Binding은 만들지 않으며,
+기록·조회가 세션을 깨우지도 않습니다.
+
+감독 일시정지는 감독 대상 네이티브 연락만 막고 부모·자식 작업이나 명시적 사용자 기록은 막지 않습니다.
+부모 일시정지는 그 부모의 새 연락·기록을 막습니다. 저장 상태는 ready인데 감독 런타임이 사라졌다면
+기존 전송 결과를 확인하고 별도 ID의 `--to-user` 알림에 실패·질문을 남깁니다. 기존 전송을 조용히
+이전하지 않습니다. link/unlink/close 후에도 같은 보고 ID는 원래 수신자·receipt를 유지하며, payload나
+명시적 수신자 변경은 충돌입니다. sending/uncertain은 미확정으로 남습니다. 네이티브 거절·미확정의
+비정상 종료 코드는 유지되며 로컬 기록 성공의 exit 0은 네이티브 수락을 뜻하지 않습니다.
+
+네이티브 assistant의 명시적인 오류는 완료 보고와 별개인 `operational_notice`로 기록합니다. `notices --project ID --json`은 실행 중인 호스트 없이도 모든 운영 오류 전송 결과를 읽습니다. 정상 소유자에게는 claimed native 알림을 한 번 보내고, 연락할 수 없거나 일시정지된 경우에는 세션을 깨우지 않고 로컬에 남깁니다. 원래 binding과 오류 세션 항목을 보존하며, `ready`는 계속 신원·초기화 상태만 뜻합니다. 정상 idle·취소·reload 자체로 실패를 추측하지 않습니다. native 패치의 소유 범위와 검증 한계는 [런타임 수정 안내](docs/runtime-patches.md)를 참고합니다.
 
 네이티브 thread 도구가 대상 작업 저장소에 `.omo/thread-tools/`를 만들 수 있습니다. 작업 저장소의 ignore 규칙에 이 runtime 경로를 포함하면 생성 파일이 commit이나 worktree 정리를 방해하지 않습니다.
 
@@ -222,7 +261,13 @@ bun run qa:linear
 
 `status`는 저장된 상태를 보여줍니다. `reconcile`은 모든 활성 역할의 Herdr 자원과 실제 native identity를 한 번 확인합니다. 사라진 역할은 `uncertain`으로 바꾸고 자동으로 재생성하지 않습니다. 이미 요청했던 종료는 이어서 처리할 수 있습니다.
 
-`close`는 자식부터 실행합니다. 해당 workspace와 정확한 native 세션을 닫은 뒤 소유권을 해제하며, **worktree 파일·브랜치·세션 기록은 보존합니다**. 다른 클라이언트가 native 세션에 붙어 있거나 자원 신원이 달라졌으면 소유권을 유지한 채 오류를 반환합니다. 관찰 클라이언트를 분리한 뒤 다시 실행하면 됩니다.
+부모의 `close`는 이슈 자식부터 닫아야 합니다. 선택적 감독은 부모와 독립적으로 닫을 수 있고,
+부모 연결 기록과 부모·자식 작업은 유지합니다. 감독이 없어도 `parent unlink`를 실행할 수 있습니다.
+종료는 해당 workspace와 정확한 native 세션을 닫은 뒤 소유권을 해제하며, **worktree 파일·브랜치·세션 기록은 보존합니다**. 다른 클라이언트가 native 세션에 붙어 있거나 자원 신원이 달라졌으면 소유권을 유지한 채 오류를 반환합니다. 관찰 클라이언트를 분리한 뒤 다시 실행하면 됩니다.
+
+기존 registry 행·designation·초기 지시·delivery receipt는 SQL migration이나 재작성 없이 유지됩니다.
+부모와 자식은 계속 linked Git worktree이며 clone/push 방식으로 바뀌지 않습니다. link/unlink,
+resume, 재접속은 부모를 다시 만들거나 이전 작업을 재전송하지 않습니다. 범위 확대에는 새 승인이 필요합니다.
 
 workspace 생성 응답 자체가 유실됐다면 Herdr를 직접 확인해야 합니다. 생성된 workspace가 없음을 확인한 경우에만 `close --binding ID --confirm-absent`로 미확정 예약을 해제합니다. 종료한 역할은 다시 열지 않고, 같은 승인에 새 binding을 만듭니다.
 
@@ -230,7 +275,7 @@ workspace 생성 응답 자체가 유실됐다면 Herdr를 직접 확인해야 �
 
 하나의 Herdr server와 하나의 native OMO host를 사용합니다. 자동 merge, release, Linear mutation은 제공하지 않습니다. native acceptance, 작업 완료 보고, Linear acceptance는 서로 다른 상태입니다. `pause`와 `resume`은 연락 허용 상태만 바꾸며 세션을 재생성하지 않습니다. 종료나 불확실한 작업 결과가 Linear 완료를 뜻하지는 않습니다.
 
-실제 Herdr/모델/보고 QA는 통과했습니다. Live Linear OAuth와 실제 Linear 쓰기는 실행하지 않았습니다. 기본 Herdr의 OMO 탐지 지원 여부는 이 CLI의 실행·통신과 별개입니다.
+실제 Herdr/모델/보고 QA는 통과했습니다. 새 관리형 감독·부모에서도 기존 OAuth 연결을 사용해 실제 Linear MCP 검색, 첫 호출 활성화, 인증된 프로젝트·문서·이슈 읽기와 reload를 검증했습니다. 실제 Linear 쓰기는 임시 쓰기·재조회 대상에 대한 명시적 허용을 기다리고 있어 아직 미검증입니다. 기본 Herdr의 OMO 탐지 지원 여부는 이 CLI의 실행·통신과 별개입니다.
 
 ## 관리형 Herdr
 

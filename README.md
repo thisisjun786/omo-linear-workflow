@@ -2,7 +2,7 @@
 
 English | [한국어](README.ko.md)
 
-A Bun CLI that connects an approved Linear initiative scope to Herdr worktrees and OMO native threads. Linear owns scope and decisions. Local SQLite keeps the approved snapshot, execution authorization, runtime identity and delivery receipts.
+A Bun CLI that connects approved Linear project or initiative scope to Herdr worktrees and OMO native threads. Linear owns scope and decisions. Local SQLite keeps the approved snapshot, execution authorization, runtime identity and delivery receipts.
 
 ## Setup
 
@@ -159,17 +159,38 @@ For `--scope-digest`, use `value.digest` from the import response. It isn't a ha
 
 ```sh
 bun run cli -- --root "$PWD" scope import --file approved-scope.json
-bun run cli -- --root "$PWD" supervisor create --initiative ID --scope-digest SHA --designation ID --execute
-bun run cli -- --root "$PWD" parent create --supervisor BINDING --project ID --repo /abs/repo --base main
+bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID --repo /abs/repo --base main
 bun run cli -- --root "$PWD" child create --parent BINDING --issue ID
 bun run cli -- --root "$PWD" send --from BINDING --to BINDING --id MSG --kind instruction --text-file brief.txt
 bun run cli -- --root "$PWD" report --from BINDING --id MSG --outcome completed --evidence /abs/path --text-file result.txt
-bun run cli -- --root "$PWD" status --initiative ID --json
+bun run cli -- --root "$PWD" reports --project ID --json
+bun run cli -- --root "$PWD" notices --project ID --json
+bun run cli -- --root "$PWD" status --project ID --json
 bun run cli -- --root "$PWD" pause --binding BINDING
 bun run cli -- --root "$PWD" resume --binding BINDING
-bun run cli -- --root "$PWD" reconcile --initiative ID
+bun run cli -- --root "$PWD" reconcile --project ID
 bun run cli -- --root "$PWD" close --binding BINDING
 ```
+
+A project parent is the execution unit. It can start without any supervisor or initiative;
+use `"initiative": null` in a project-only snapshot. Standalone creation requires an explicit
+scope digest, designation and `--execute` (`--fixture` for fixture approval). A supervisor is
+an optional, explicitly created management session:
+
+```sh
+bun run cli -- supervisor create --initiative ID --scope-digest MANAGER_SHA --designation MANAGER_ID --execute
+bun run cli -- parent link --parent PARENT --supervisor MANAGER
+bun run cli -- parent unlink --parent PARENT
+# Alternative creation mode for a project that has no live parent:
+bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo --base main
+```
+
+Do not mix `--supervisor` with standalone approval flags. Linking an initialized parent may
+cross designations if the manager's approved snapshot includes the project and both approvals
+permit execution/contact. It changes only the optional management link, never the parent's
+approval, issue set, worktree, pause state or identity. No hidden role or automatic replay is
+created. `status`, `reports`, `notices`, and `reconcile` accept `--project` or `--initiative`; filters use
+approved scope provenance, not later manager membership. `reports` and `notices` also allow no filter.
 
 `--root` is this tool's control root, and `$PWD` in the examples above is this repository. The actual target repository is given separately through `--repo` on `parent create`.
 
@@ -179,7 +200,7 @@ The default Herdr socket comes from the current pane's `HERDR_SOCKET_PATH`. Pass
 
 | Role | Model / reasoning | Workspace |
 | --- | --- | --- |
-| Supervisor | `cliproxyapi/gpt-6-astra` / `high` | control root Herdr workspace |
+| Supervisor (optional) | `cliproxyapi/gpt-6-astra` / `high` | control root Herdr workspace |
 | Parent | `cliproxyapi/claude-opus-5-5` / `xhigh` | project integration branch worktree |
 | Child | `cliproxyapi/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
 
@@ -201,11 +222,32 @@ aren't reinitialized automatically.
 
 Herdr creates the workspace and the parent and child worktrees. The parent branch is `omo/<designation>/projects/<project>-<binding>`, the child branch is `omo/<designation>/issues/<issue>-<binding>`, and the child's base is a verified commit on the parent branch. The new binding suffix lets you replace a role while keeping the earlier working branch.
 
+Each new parent is an explicit top-level Herdr group head; its children join by the actual parent workspace ID. Two projects in one Git repository stay separate. Manager links and pause/resume do not move groups. Existing legacy parents keep their existing layout, and unrelated workspaces/focus are not changed. An older server must support the managed grouped-worktree RPC before creating new parent groups; no fallback silently changes the layout.
+
 The controller subscribes to file events first, then launches OMO. When the TUI's `session_start` atomically writes a readiness record under `.omo/state/ready/`, the controller connects to that exact session through the public OMO RPC, sets and verifies the model and reasoning, and then sends the first instruction. It doesn't rely on Herdr's OMO detection or on unsupported session-path reports.
 
 The initial instruction leaves a persistent claim before it's sent. The role stays `initializing` until actual acceptance is confirmed, and becomes `ready` only after that. If the ACK is lost, acceptance is confirmed from the exact user message or delivery receipt already stored. Without evidence, nothing is resent.
 
-Later communication between sessions uses the native `thread_send` with `delivery: auto`. A waiting parent resumes on a child's report. There's no separate agent polling loop and no custom message broker. The same message ID with the same payload returns the stored receipt instead of sending again.
+Later communication between sessions uses the native `thread_send` with `delivery: auto`. A waiting parent resumes on a child's report. There's no separate agent polling loop and no custom message broker. Accepted messages replay their stored receipt; sending/uncertain messages are not resent. Only `turn_conflict_before_delivery` proves that the target was not invoked: repeating the identical command with the same logical ID rechecks authorization and claims one successor native key. `delivery.attempts` retains earlier keys and receipts, and late results cannot overwrite a newer attempt. Legacy `turn_conflict` is not that proof.
+
+Parent reports with no linked manager, or an absent/not-ready/closed manager, are recorded
+in a local user-addressed inbox. `report --to-user` explicitly selects that inbox even when
+a manager is ready or paused. Read it with `reports --project ID --json`; use `blocked` for
+an exact user question and `failed` for a failure with evidence. Answer by prompting the
+parent's exact durable session. `state: "posted"`, `toBindingId: null`, `receipt: null` means
+recorded locally, **not native acceptance, user acknowledgment, or Linear completion**.
+Posting and reading reports wake nobody. There is no synthetic user Binding.
+
+A paused manager blocks new native contact to itself, not parent-child work or explicit user
+posts; a paused parent blocks its own new contact/posts. If the manager's runtime disappears
+while stored state still says ready, inspect the native attempt and use `--to-user` for a
+distinct notice about that failure/question. Never silently migrate that attempt. Repeating a
+report ID reads its original recipient and receipt after link/unlink/close; changed payload or
+an explicit recipient change conflicts, and sending/uncertain records remain unresolved.
+Existing native rejection/uncertainty exit codes stay nonzero; a successful local post exits 0
+without claiming native acceptance.
+
+Explicit native assistant errors create separate `operational_notice` records, not completion reports. `notices --project ID --json` reads all recorded operational outcomes without a live host. Healthy owners receive one claimed native notice; absent/paused routes remain visible locally without waking anyone. The notice preserves the original binding and error entry, while `ready` remains an identity/initialization status. Normal idle, cancellation and reload alone are not errors. See [maintained runtime repairs](docs/runtime-patches.md) for native patch ownership and verification boundaries.
 
 The native thread tools may create `.omo/thread-tools/` in the target working repository. Add this runtime path to the working repository's ignore rules so generated files don't interfere with commits or worktree cleanup.
 
@@ -240,7 +282,14 @@ claim or access live Linear.
 
 `status` shows stored state. `reconcile` checks every active role's Herdr resources and actual native identity once. Roles that have disappeared are marked `uncertain` and aren't recreated automatically. A shutdown that was already requested can be continued.
 
-`close` starts from the children. It closes the workspace and the exact native session, then releases ownership, **preserving worktree files, branches and session records**. If another client is attached to the native session or the resource identity has changed, it keeps ownership and returns an error. Detach the observing client and run it again.
+`close` on a parent requires closing its issue children first. An optional manager can close
+independently, leaving parent links visible and parent/child work untouched. `parent unlink`
+works even when the manager is gone. Closure closes the workspace and the exact native session, then releases ownership, **preserving worktree files, branches and session records**. If another client is attached to the native session or the resource identity has changed, it keeps ownership and returns an error. Detach the observing client and run it again.
+
+Existing registry rows, designations, initial briefs and delivery receipts need no SQL
+migration or rewriting. Parents and children remain linked Git worktrees; no clone/push
+semantics are introduced. Link/unlink, resume and reconnect do not recreate a parent or
+replay earlier work. Scope expansion still requires fresh approval.
 
 If the workspace creation response itself was lost, check Herdr directly. Only after confirming that no workspace was created, release the unconfirmed reservation with `close --binding ID --confirm-absent`. Closed roles aren't reopened. Create a new binding under the same approval instead.
 
@@ -248,7 +297,7 @@ If the workspace creation response itself was lost, check Herdr directly. Only a
 
 One Herdr server and one native OMO host are used. Automatic merge, release and Linear mutation aren't provided. Native acceptance, work completion reports and Linear acceptance are different states. `pause` and `resume` only change whether contact is allowed. They don't recreate sessions. Shutdown or an uncertain work outcome doesn't mean Linear completion.
 
-QA with real Herdr, real models and real reports has passed. Live Linear OAuth and real Linear writes haven't been run. Whether the default Herdr supports OMO detection is separate from this CLI's execution and communication.
+QA with real Herdr, real models and real reports has passed. New managed supervisor and parent sessions also verified actual Linear MCP discovery, first-use activation, authenticated project/document/issue reads, and reload using the existing OAuth connection. Live Linear writes remain unverified pending explicit permission for a temporary write/readback target. Whether the default Herdr supports OMO detection is separate from this CLI's execution and communication.
 
 ## Managed Herdr
 

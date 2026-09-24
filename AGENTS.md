@@ -5,7 +5,16 @@ and the user's existing workspaces are read-only unless explicitly assigned.
 
 ## Contracts
 
-- One supervisor per initiative, one parent per project, one child per issue.
+- One parent per project and one child per issue. A user-created supervisor is
+  optional (at most one per initiative); a project may have no initiative.
+- Standalone parents require an explicit scope digest, designation and execute
+  permission. Linking/unlinking a supervisor never transfers or widens that approval.
+  A cross-designation link requires the project in the supervisor's approved snapshot.
+- Manager loss/closure does not pause parents or children. Parent reports can be
+  posted to the local user inbox (`reports --project ID`); `posted` is not native
+  acceptance or user acknowledgment. Never migrate an existing logical ID or resend
+  accepted/uncertain delivery. Only a proven pre-delivery rejection permits a same-ID,
+  same-payload successor with preserved attempt history.
 - Herdr creates every role workspace. Parents and children use distinct Herdr
   worktrees; a child's base is its parent's project integration branch.
 - Runtime bindings use stable IDs, not display labels or the focused pane.

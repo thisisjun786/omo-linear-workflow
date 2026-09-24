@@ -50,6 +50,7 @@ export interface Workspace {
   readonly rootPaneId: string;
   readonly cwd: string;
   readonly label?: string;
+  readonly groupHeadWorkspaceId?: string;
 }
 export interface Pane {
   readonly paneId: string;
@@ -64,9 +65,15 @@ export interface Snapshot {
   readonly workspaces: readonly Workspace[];
   readonly panes: readonly Pane[];
 }
+export type WorktreeGrouping = { readonly head: true } | { readonly parentWorkspaceId: string };
+
 export interface HerdrClient {
   createWorkspace(cwd: string, label: string): Promise<Workspace>;
-  createWorktree(checkout: Checkout, label: string): Promise<Workspace>;
+  createWorktree(
+    checkout: Checkout,
+    label: string,
+    grouping?: WorktreeGrouping,
+  ): Promise<Workspace>;
   run(
     paneId: string,
     argv: readonly string[],
@@ -118,10 +125,16 @@ class SocketHerdrClient implements HerdrClient {
     };
   }
 
-  public async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
+  public async createWorktree(
+    checkout: Checkout,
+    label: string,
+    grouping?: WorktreeGrouping,
+  ): Promise<Workspace> {
     const result = workspaceResultSchema.parse(
-      await this.#request("worktree.create", {
-        cwd: absolutePathSchema.parse(checkout.originalRepoRoot),
+      await this.#request(grouping === undefined ? "worktree.create" : "worktree.create_grouped", {
+        ...(grouping !== undefined && "parentWorkspaceId" in grouping
+          ? { group_head_workspace_id: nonEmptyStringSchema.parse(grouping.parentWorkspaceId) }
+          : { cwd: absolutePathSchema.parse(checkout.originalRepoRoot) }),
         branch: nonEmptyStringSchema.parse(checkout.branch),
         base: nonEmptyStringSchema.parse(checkout.baseBranch),
         path: absolutePathSchema.parse(checkout.path),
@@ -207,11 +220,13 @@ class SocketHerdrClient implements HerdrClient {
           `snapshot omitted root pane cwd for workspace ${source.workspace_id}`,
         );
       }
+      const groupHeadWorkspaceId = source.worktree?.repo_key.match(/^herdr-group:(.+)$/)?.[1];
       return {
         workspaceId: source.workspace_id,
         rootPaneId: root.pane_id,
         cwd: rootPane.cwd,
         ...(source.label === undefined ? {} : { label: source.label }),
+        ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),
       };
     });
     return {

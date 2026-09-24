@@ -33,6 +33,7 @@ export const snapshotResultSchema = z.object({
         workspace_id: identifierSchema,
         active_tab_id: identifierSchema,
         label: z.string().optional(),
+        worktree: z.object({ repo_key: identifierSchema }).nullish(),
       }),
     ),
     panes: z.array(

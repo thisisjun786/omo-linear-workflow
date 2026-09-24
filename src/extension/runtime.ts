@@ -1,7 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import type { DeliveryRecord, Envelope, Result, RuntimeIdentity } from "../core/contracts";
+import type {
+  ClaimResult,
+  DeliveryRecord,
+  Envelope,
+  Result,
+  RuntimeIdentity,
+} from "../core/contracts";
 import {
   bindingSchema,
   claimResultSchema,
@@ -12,20 +19,29 @@ import {
   workerRequestSchema,
 } from "../core/schema";
 import { publishReadiness } from "../readiness";
+import { publishOperationalNotice, runtimeFailureClaim } from "./operational";
 
 export interface SessionContextPort {
   readonly cwd: string;
   readonly mode: "tui" | "rpc" | "app-server" | "json" | "print";
   readonly model: { readonly provider: string; readonly id: string } | undefined;
   readonly thinkingLevel: string | undefined;
+  disableModelFallbackForSession(): void;
   readonly sessionManager: {
     getSessionId(): string;
     getSessionFile(): string | undefined;
+    getBranch(): readonly {
+      readonly type: string;
+      readonly id: string;
+      readonly message?: unknown;
+    }[];
   };
 }
 
 export interface RuntimePort {
   onSessionStart(handler: (ctx: SessionContextPort) => Promise<void>): void;
+  onTurnEnd(handler: (message: unknown, ctx: SessionContextPort) => Promise<void>): void;
+  notifyOperational(message: string, ctx: SessionContextPort): void;
   onResourcesDiscover(handler: () => { readonly skillPaths: string[] }): void;
   onToolCall(
     handler: (
@@ -82,6 +98,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   const sessionStarted = Promise.withResolvers<void>();
   const dispatch = new AsyncLocalStorage<{
     readonly senderSessionId: string;
+    readonly messageId: string;
     readonly input: z.infer<typeof nativeSendInputSchema>;
     used: boolean;
   }>();
@@ -140,8 +157,16 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   const lookup = (sessionId: string) =>
     worker("lookup-session", { durableSessionId: sessionId }, resultSchema(bindingSchema));
 
-  async function uncertain(messageId: string, reason: string): Promise<Result<DeliveryRecord>> {
-    return worker("uncertain", { messageId, reason }, resultSchema(deliveryRecordSchema));
+  async function uncertain(
+    messageId: string,
+    reason: string,
+    nativeKey: string,
+  ): Promise<Result<DeliveryRecord>> {
+    return worker(
+      "uncertain",
+      { messageId, reason, nativeKey },
+      resultSchema(deliveryRecordSchema),
+    );
   }
 
   port.onResourcesDiscover(() => ({
@@ -149,6 +174,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   }));
 
   port.onSessionStart(async (ctx) => {
+    if (config.hostRuntime) {
+      const binding = await lookup(ctx.sessionManager.getSessionId());
+      if (binding.ok) ctx.disableModelFallbackForSession();
+    }
     currentContext = ctx;
     sessionStarted.resolve();
     if (config.hostRuntime || ctx.mode !== "tui") return;
@@ -207,44 +236,93 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       );
     }
 
+    return deliver(claim.value, ctx);
+  });
+
+  async function deliver(
+    claim: ClaimResult,
+    ctx: SessionContextPort,
+  ): Promise<Result<DeliveryRecord>> {
+    if (claim.target === null) return { ok: true, value: claim.record };
+    const envelope = claim.record.envelope;
+    const nativeKey = claim.nativeKey ?? envelope.id;
     const active = new Set(port.getActiveTools());
     active.add("thread_send");
     port.setActiveTools([...active]);
     let details: unknown;
     try {
       const input = nativeSendInputSchema.parse({
-        thread: claim.value.target.durableSessionId,
-        message: JSON.stringify(envelope.data),
+        thread: claim.target.durableSessionId,
+        message: JSON.stringify(envelope),
         delivery: "auto",
         all_scope: true,
-        idempotency_key: envelope.data.id,
+        idempotency_key: nativeKey,
       });
       const executed = await dispatch.run(
-        { senderSessionId: ctx.sessionManager.getSessionId(), input, used: false },
+        {
+          senderSessionId: ctx.sessionManager.getSessionId(),
+          messageId: envelope.id,
+          input,
+          used: false,
+        },
         () => port.executeTool("thread_send", input),
       );
       details = executed.details;
     } catch (cause) {
-      return uncertain(envelope.data.id, `Native send did not return: ${messageOf(cause)}`);
+      return uncertain(envelope.id, `Native send did not return: ${messageOf(cause)}`, nativeKey);
     }
     const detailsResult = z.strictObject({ result: z.unknown() }).safeParse(details);
     if (!detailsResult.success)
-      return uncertain(envelope.data.id, "Native result details were malformed");
+      return uncertain(envelope.id, "Native result details were malformed", nativeKey);
     const receipt = nativeReceiptSchema.safeParse(detailsResult.data.result);
-    if (!receipt.success) return uncertain(envelope.data.id, "Native receipt was malformed");
-    if (receipt.data.kind === "error" && receipt.data.error.code === "idempotency_uncertain") {
-      return uncertain(envelope.data.id, "Native idempotency outcome is uncertain");
-    }
+    if (!receipt.success) return uncertain(envelope.id, "Native receipt was malformed", nativeKey);
     const finished = await worker(
       "finish",
-      { messageId: envelope.data.id, receipt: receipt.data },
+      { messageId: envelope.id, receipt: receipt.data, nativeKey },
       resultSchema(deliveryRecordSchema),
     );
     if (finished.ok) return finished;
     if (finished.error.code === "receipt_target_mismatch") {
-      return uncertain(envelope.data.id, "Native receipt targeted a different session");
+      return uncertain(envelope.id, "Native receipt targeted a different session", nativeKey);
     }
     return finished;
+  }
+
+  port.onTurnEnd(async (message, ctx) => {
+    // A forwarding failure is already this claim's uncertain outcome, not another incident.
+    if (dispatch.getStore()?.senderSessionId === ctx.sessionManager.getSessionId()) return;
+    if (!existsSync(dbPath)) return;
+    try {
+      const observation = runtimeFailureClaim(message, ctx);
+      if (observation === undefined) return;
+      const claim = await worker(
+        "claim",
+        {
+          senderSessionId: ctx.sessionManager.getSessionId(),
+          envelope: observation,
+        },
+        resultSchema(claimResultSchema),
+      );
+      if (!claim.ok) {
+        if (claim.error.code === "not_found") return; // A native session need not be an OLW role.
+        throw new Error(`${claim.error.code}: ${claim.error.message}`);
+      }
+      await publishOperationalNotice(config.root, claim.value.record);
+      if (claim.value.disposition !== "new") return;
+      const delivered = await deliver(claim.value, ctx);
+      if (!delivered.ok) throw new Error(`${delivered.error.code}: ${delivered.error.message}`);
+      const path = await publishOperationalNotice(config.root, delivered.value);
+      port.notifyOperational(
+        `OLW operational error ${delivered.value.envelope.id}: ${delivered.value.state}. Evidence: ${path}. This is telemetry, not a completion report or user acknowledgment.`,
+        ctx,
+      );
+    } catch (cause) {
+      // Surface notification/storage failures without throwing into the native agent loop.
+      port.notifyOperational(
+        `OLW operational notification failed for ${ctx.sessionManager.getSessionId()}: ${messageOf(cause)}. Inspect ${dbPath}; do not retry with a fresh ID.`,
+        ctx,
+      );
+    }
   });
 
   port.onToolCall(async (toolName, input, ctx) => {
@@ -278,7 +356,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     const envelope = envelopeSchema.safeParse(decoded);
     if (
       !envelope.success ||
-      envelope.data.id !== nativeInput.data.idempotency_key ||
+      envelope.data.id !== permit.messageId ||
       envelope.data.fromBindingId !== sender.value.id
     ) {
       return { block: true, reason: "Direct thread_send identity is invalid" };

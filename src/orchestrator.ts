@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
@@ -12,16 +12,19 @@ import type {
   Envelope,
   Registry,
   Result,
+  ScopeFilter,
   ScopeSnapshot,
 } from "./core/contracts";
 import {
+  canRetryDelivery,
   initializationMessageId,
   matchesRuntime,
   modelForBinding,
   modelForRole,
 } from "./core/policy";
+import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
-import { createHerdrClient, type HerdrClient } from "./herdr";
+import { createHerdrClient, type HerdrClient, type WorktreeGrouping } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import {
   createHostProfile,
@@ -61,12 +64,22 @@ export interface CreateSupervisorInput {
   readonly execute: boolean;
   readonly fixture: boolean;
 }
-export interface CreateParentInput {
-  readonly supervisorId: string;
-  readonly projectId: string;
-  readonly repo: string;
-  readonly base: string;
-}
+const parentLocation = {
+  projectId: z.string().min(1),
+  repo: z.string().min(1),
+  base: z.string().min(1),
+};
+const createParentInputSchema = z.union([
+  z.strictObject({ ...parentLocation, supervisorId: z.string().min(1) }),
+  z.strictObject({
+    ...parentLocation,
+    scopeDigest: z.string().min(1),
+    designationId: z.string().min(1),
+    execute: z.boolean(),
+    fixture: z.boolean(),
+  }),
+]);
+export type CreateParentInput = z.infer<typeof createParentInputSchema>;
 export interface CreateChildInput {
   readonly parentId: string;
   readonly issueId: string;
@@ -79,6 +92,7 @@ export interface SendInput {
   readonly text: string;
 }
 export interface ReportInput {
+  readonly toUser?: boolean;
   readonly fromId: string;
   readonly messageId: string;
   readonly outcome: "completed" | "blocked" | "failed";
@@ -97,7 +111,7 @@ export interface CreationResult {
   } | null;
 }
 export interface OrchestratorDependencies {
-  readonly openRegistry: (path: string) => Registry;
+  readonly openRegistry: (path: string, options?: { readonly readonly?: boolean }) => Registry;
   readonly createHerdrClient: (socket: string) => HerdrClient;
   readonly attachBinding: (binding: Binding) => Promise<NativeSession>;
   readonly terminateBinding: (binding: Binding) => Promise<void>;
@@ -338,11 +352,11 @@ export class Orchestrator {
     return this.#withRegistry((registry) => registry.importScope(snapshot.value));
   }
 
-  public async createSupervisor(input: CreateSupervisorInput): Promise<Result<CreationResult>> {
+  #approval(
+    input: Omit<CreateSupervisorInput, "initiativeId">,
+  ): Result<{ readonly designation: Designation; readonly snapshot: ScopeSnapshot }> {
     const scope = this.#withRegistry((registry) => registry.scope(input.scopeDigest));
     if (!scope.ok) return scope;
-    if (scope.value.initiative.id !== input.initiativeId)
-      return failure("scope_violation", "Initiative does not match scope");
     if (input.fixture !== (scope.value.source === "fixture"))
       return failure("source_mismatch", "--fixture must exactly match scope source");
     const previous = this.#withRegistry((registry) => registry.designation(input.designationId));
@@ -365,39 +379,66 @@ export class Orchestrator {
           create: true,
           contact: true,
         };
+    return ok({ designation, snapshot: scope.value });
+  }
+
+  public async createSupervisor(input: CreateSupervisorInput): Promise<Result<CreationResult>> {
+    const context = this.#approval(input);
+    if (!context.ok) return context;
+    if (context.value.snapshot.initiative?.id !== input.initiativeId)
+      return failure("scope_violation", "Supervisor requires a designated initiative");
     return this.#create(
       { role: "supervisor", initiativeId: input.initiativeId },
-      designation,
-      scope.value,
+      context.value.designation,
+      context.value.snapshot,
       this.#root,
       null,
     );
   }
 
-  public async createParent(input: CreateParentInput): Promise<Result<CreationResult>> {
-    const owner = this.#binding(input.supervisorId);
-    if (!owner.ok) return owner;
-    if (owner.value.assignment.role !== "supervisor")
-      return failure("owner_mismatch", "Parent owner must be a supervisor");
-    if (owner.value.launchState !== "ready" || owner.value.contactState !== "active")
-      return failure("owner_unavailable", "Supervisor is not available for role creation");
-    const context = await this.#context(owner.value);
+  public async createParent(inputValue: CreateParentInput): Promise<Result<CreationResult>> {
+    const parsed = createParentInputSchema.safeParse(inputValue);
+    if (!parsed.success)
+      return failure(
+        "invalid_arguments",
+        "Choose supervisor approval or explicit standalone approval",
+        parsed.error.issues,
+      );
+    const input = parsed.data;
+    let ownerId: string | null = null;
+    let context: Result<{ readonly designation: Designation; readonly snapshot: ScopeSnapshot }>;
+    if ("supervisorId" in input) {
+      const owner = this.#binding(input.supervisorId);
+      if (!owner.ok) return owner;
+      if (owner.value.assignment.role !== "supervisor")
+        return failure("owner_mismatch", "Parent manager must be a supervisor");
+      if (owner.value.launchState !== "ready" || owner.value.contactState !== "active")
+        return failure("owner_unavailable", "Supervisor is not available for role creation");
+      ownerId = owner.value.id;
+      context = await this.#context(owner.value);
+    } else {
+      if (!input.execute)
+        return failure("execute_denied", "Standalone parent creation requires --execute");
+      context = this.#approval(input);
+    }
     if (!context.ok) return context;
+    if (!context.value.snapshot.projects.some((entry) => entry.project.id === input.projectId))
+      return failure("scope_violation", "Project is outside the approved snapshot");
     const originalRepoRoot = resolve(input.repo);
     const baseCommit = await this.#deps.gitTip(originalRepoRoot, input.base);
     const bindingId = this.#deps.uuid();
     const checkout: Checkout = {
       originalRepoRoot,
       path: join(this.#root, ".omo/worktrees", bindingId),
-      branch: `omo/${owner.value.designationId}/projects/${input.projectId}-${bindingId}`,
+      branch: `omo/${context.value.designation.id}/projects/${input.projectId}-${bindingId}`,
       baseBranch: input.base,
       baseCommit,
     };
     const assignment: Assignment = {
       role: "parent",
-      initiativeId: owner.value.assignment.initiativeId,
+      initiativeId: context.value.snapshot.initiative?.id ?? null,
       projectId: input.projectId,
-      ownerBindingId: owner.value.id,
+      ownerBindingId: ownerId,
     };
     return this.#create(
       assignment,
@@ -405,7 +446,7 @@ export class Orchestrator {
       context.value.snapshot,
       checkout.path,
       checkout,
-      bindingId,
+      { bindingId },
     );
   }
 
@@ -418,6 +459,28 @@ export class Orchestrator {
       return failure("owner_unavailable", "Parent is not available for role creation");
     const context = await this.#context(owner.value);
     if (!context.ok) return context;
+    let grouping: WorktreeGrouping | undefined;
+    const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
+    try {
+      const parentWorkspace = (await herdr.snapshot()).workspaces.find(
+        (workspace) => workspace.workspaceId === owner.value.workspaceId,
+      );
+      if (parentWorkspace === undefined || parentWorkspace.cwd !== owner.value.cwd)
+        return failure("owner_unavailable", "Parent workspace identity does not match its binding");
+      if (parentWorkspace.groupHeadWorkspaceId !== undefined) {
+        if (parentWorkspace.groupHeadWorkspaceId !== parentWorkspace.workspaceId)
+          return failure("owner_unavailable", "Parent workspace is not its group's head");
+        grouping = { parentWorkspaceId: parentWorkspace.workspaceId };
+      }
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Parent workspace could not be observed",
+        messageOf(cause),
+      );
+    } finally {
+      herdr.close();
+    }
     const baseCommit = await this.#deps.gitTip(
       owner.value.checkout.originalRepoRoot,
       owner.value.checkout.branch,
@@ -443,7 +506,7 @@ export class Orchestrator {
       context.value.snapshot,
       checkout.path,
       checkout,
-      bindingId,
+      { bindingId, grouping },
     );
   }
 
@@ -473,25 +536,108 @@ export class Orchestrator {
       return failure("route_denied", "Supervisor has no owner to report to");
     const context = await this.#context(sender.value);
     if (!context.ok) return context;
-    return this.#deliver(sender.value, {
+    if (input.toUser && sender.value.assignment.role !== "parent")
+      return failure("route_denied", "Only parents report to the user inbox");
+    const existing = this.#withRegistry((registry) => registry.delivery(input.messageId));
+    if (!existing.ok && existing.error.code !== "not_found") return existing;
+    let targetId = sender.value.assignment.ownerBindingId;
+    // A replay is a read of the original attempt, never a new routing decision.
+    if (existing.ok) targetId = existing.value.envelope.toBindingId;
+    else if (sender.value.assignment.role === "parent" && targetId !== null && !input.toUser) {
+      const manager = this.#binding(targetId);
+      if (!manager.ok && manager.error.code !== "not_found") return manager;
+      if (!manager.ok || manager.value.launchState !== "ready") targetId = null;
+    }
+    if (input.toUser) targetId = null;
+    const envelope: Envelope = {
       version: 1,
       id: input.messageId,
       fromBindingId: sender.value.id,
-      toBindingId: sender.value.assignment.ownerBindingId,
+      toBindingId: targetId,
       designationId: sender.value.designationId,
       snapshotDigest: context.value.designation.snapshotDigest,
       kind: "report",
       text: input.text,
       outcome: input.outcome,
       evidence: [...input.evidence],
-    });
+    };
+    if (existing.ok) {
+      if (
+        JSON.stringify(existing.value.envelope) !== JSON.stringify(envelopeSchema.parse(envelope))
+      )
+        return failure("message_conflict", "Message ID is bound to a different immutable payload");
+      if (canRetryDelivery(existing.value)) return this.#deliver(sender.value, envelope);
+      return existing.value.state === "sending" || existing.value.state === "uncertain"
+        ? failure(
+            "delivery_in_progress",
+            "Original delivery requires inspection; no resend or recipient migration",
+            existing.value,
+          )
+        : existing;
+    }
+    if (targetId !== null) return this.#deliver(sender.value, envelope);
+    let session: NativeSession | undefined;
+    try {
+      session = await this.#deps.attachBinding(sender.value);
+      const identity = await session.describe();
+      if (!identity.ok) return identity;
+      if (!matchesRuntime(sender.value, identity.value))
+        return failure("identity_mismatch", "User report sender does not match the bound runtime");
+      return this.#withRegistry((registry) =>
+        registry.post(sender.value.durableSessionId, envelope),
+      );
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Could not verify user report sender",
+        messageOf(cause),
+      );
+    } finally {
+      await session?.close();
+    }
   }
 
-  public status(initiativeId?: string): Result<Binding[]> {
+  public reports(filter: ScopeFilter = {}): Result<DeliveryRecord[]> {
+    return this.#readDeliveryRecords("reports", filter);
+  }
+
+  public notices(filter: ScopeFilter = {}): Result<DeliveryRecord[]> {
+    return this.#readDeliveryRecords("notices", filter);
+  }
+
+  #readDeliveryRecords(view: "reports" | "notices", filter: ScopeFilter): Result<DeliveryRecord[]> {
+    if (!existsSync(this.#dbPath)) return ok([]);
+    const registry = this.#deps.openRegistry(this.#dbPath, { readonly: true });
+    try {
+      return view === "reports"
+        ? registry.postedReports(filter)
+        : registry.operationalNotices(filter);
+    } finally {
+      registry.close();
+    }
+  }
+
+  public linkParent(parentId: string, supervisorId: string): Result<Binding> {
+    return this.#withRegistry((registry) => registry.setOwner(parentId, supervisorId));
+  }
+
+  public unlinkParent(parentId: string): Result<Binding> {
+    return this.#withRegistry((registry) => registry.setOwner(parentId, null));
+  }
+
+  public status(filter: string | ScopeFilter = {}): Result<Binding[]> {
+    const scope = typeof filter === "string" ? { initiativeId: filter } : filter;
     return this.#withRegistry((registry) => {
       const listed = registry.list();
-      if (!listed.ok || initiativeId === undefined) return listed;
-      return ok(listed.value.filter((binding) => binding.assignment.initiativeId === initiativeId));
+      if (!listed.ok) return listed;
+      return ok(
+        listed.value.filter(
+          ({ assignment }) =>
+            (scope.initiativeId === undefined || assignment.initiativeId === scope.initiativeId) &&
+            (scope.projectId === undefined ||
+              (assignment.role !== "supervisor" && assignment.projectId === scope.projectId)),
+        ),
+      );
     });
   }
 
@@ -531,7 +677,8 @@ export class Orchestrator {
       if (workspace !== undefined) {
         if (
           workspace.cwd !== binding.cwd ||
-          workspace.label !== `omo-${binding.assignment.role}-${binding.id}`
+          (binding.workspaceId === null &&
+            workspace.label !== `omo-${binding.assignment.role}-${binding.id}`)
         ) {
           return failure(
             "identity_mismatch",
@@ -564,9 +711,9 @@ export class Orchestrator {
   }
 
   public async reconcile(
-    initiativeId: string,
+    filter: string | ScopeFilter,
   ): Promise<Result<{ readonly observed: number; readonly bindings: Binding[] }>> {
-    const listed = this.status(initiativeId);
+    const listed = this.status(filter);
     if (!listed.ok) return listed;
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {
@@ -594,7 +741,6 @@ export class Orchestrator {
         if (
           !workspace ||
           workspace.cwd !== binding.cwd ||
-          workspace.label !== `omo-${binding.assignment.role}-${binding.id}` ||
           !snapshot.panes.some(
             (pane) => pane.paneId === binding.paneId && pane.workspaceId === binding.workspaceId,
           )
@@ -662,7 +808,7 @@ export class Orchestrator {
           lost(binding, "runtime_unavailable", messageOf(cause));
         }
       }
-      const current = this.status(initiativeId);
+      const current = this.status(filter);
       if (!current.ok) return current;
       return issues.length === 0
         ? ok({ observed, bindings: current.value })
@@ -689,7 +835,7 @@ export class Orchestrator {
     snapshot: ScopeSnapshot,
     cwd: string,
     checkout: Checkout | null,
-    fixedBindingId?: string,
+    target?: { readonly bindingId: string; readonly grouping?: WorktreeGrouping | undefined },
   ): Promise<Result<CreationResult>> {
     let managedPath: string;
     try {
@@ -703,7 +849,7 @@ export class Orchestrator {
       );
     }
     const environment = launchEnvironment(this.#root, managedPath);
-    const bindingId = fixedBindingId ?? this.#deps.uuid();
+    const bindingId = target?.bindingId ?? this.#deps.uuid();
     const reserved = this.#withRegistry((registry) =>
       registry.reserve({
         bindingId,
@@ -757,7 +903,11 @@ export class Orchestrator {
       const workspace =
         checkout === null
           ? await herdr.createWorkspace(cwd, `omo-${assignment.role}-${bindingId}`)
-          : await herdr.createWorktree(checkout, `omo-${assignment.role}-${bindingId}`);
+          : await herdr.createWorktree(
+              checkout,
+              `omo-${assignment.role}-${bindingId}`,
+              assignment.role === "parent" ? { head: true } : target?.grouping,
+            );
       const provisioned = this.#withRegistry((registry) =>
         registry.provision(bindingId, workspace.workspaceId, workspace.rootPaneId),
       );
@@ -921,7 +1071,10 @@ export class Orchestrator {
     const messageId = initializationMessageId(binding.id);
     try {
       if (claim.value.disposition === "in_progress") {
-        if (binding.assignment.role === "supervisor") {
+        if (
+          binding.assignment.role === "supervisor" ||
+          binding.assignment.ownerBindingId === null
+        ) {
           const session = await this.#deps.attachBinding(binding);
           try {
             if (await session.hasUserMessage(text))
@@ -941,7 +1094,7 @@ export class Orchestrator {
         }
         return this.#finishInitialization(binding.id, "uncertain");
       }
-      if (binding.assignment.role === "supervisor") {
+      if (binding.assignment.role === "supervisor" || binding.assignment.ownerBindingId === null) {
         await this.#deps.prompt(binding, text);
         return this.#finishInitialization(binding.id, "accepted");
       }

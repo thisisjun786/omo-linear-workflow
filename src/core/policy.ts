@@ -1,6 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
-import type { Assignment, Binding, RuntimeIdentity } from "./contracts";
+import type { Assignment, Binding, DeliveryRecord, RuntimeIdentity } from "./contracts";
+
+export function canRetryDelivery(record: DeliveryRecord): boolean {
+  return (
+    record.envelope.kind !== "operational_notice" &&
+    record.state === "rejected" &&
+    record.receipt?.kind === "error" &&
+    record.receipt.error.code === "turn_conflict_before_delivery"
+  );
+}
 
 export function initializationMessageId(bindingId: string): string {
   return `initialization:${bindingId}`;

@@ -14,7 +14,7 @@ import type {
 } from "../../src/core/contracts";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../../src/herdr";
-import { createHostProfile } from "../../src/host-profile";
+import { createHostProfile, RUNTIME_CACHE_MARKER } from "../../src/host-profile";
 import {
   Orchestrator,
   type OrchestratorDependencies,
@@ -95,7 +95,7 @@ describe("host profile", () => {
         OMO_INITIATIVE_HOST: "1",
         OMO_INITIATIVE_ROOT: root,
         OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
-        OMO_INITIATIVE_CACHE_V1: "1",
+        [RUNTIME_CACHE_MARKER]: "1",
       },
     });
     await rm(root, { recursive: true, force: true });
@@ -492,9 +492,10 @@ describe("orchestrator startup", () => {
           });
           expect(rejected).toMatchObject({ ok: false });
         }
+        // Management closure no longer requires parents to close first.
         expect(await restarted.close("binding")).toMatchObject({
-          ok: false,
-          error: { code: "children_active" },
+          ok: true,
+          value: { launchState: "closed" },
         });
         const listed = restarted.status();
         if (!listed.ok) throw new Error(listed.error.message);
@@ -689,6 +690,7 @@ describe("orchestrator startup", () => {
       const imported = await orchestrator.importScope(scopeFile, true);
       if (!imported.ok) throw new Error(imported.error.message);
 
+      if (scope.initiative === null) throw new Error("Expected initiative fixture");
       const created = await orchestrator.createSupervisor({
         initiativeId: scope.initiative.id,
         scopeDigest: imported.value.digest,

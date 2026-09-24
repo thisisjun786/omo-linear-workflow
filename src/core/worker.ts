@@ -37,9 +37,17 @@ async function run(): Promise<void> {
     } else if (request.data.action === "claim") {
       result = registry.claim(request.data.input.senderSessionId, request.data.input.envelope);
     } else if (request.data.action === "finish") {
-      result = registry.finish(request.data.input.messageId, request.data.input.receipt);
+      result = registry.finish(
+        request.data.input.messageId,
+        request.data.input.receipt,
+        request.data.input.nativeKey,
+      );
     } else if (request.data.action === "uncertain") {
-      result = registry.uncertain(request.data.input.messageId, request.data.input.reason);
+      result = registry.uncertain(
+        request.data.input.messageId,
+        request.data.input.reason,
+        request.data.input.nativeKey,
+      );
     } else {
       result = invalid("invalid_request", "Worker action is invalid");
     }

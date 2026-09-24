@@ -6,6 +6,18 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
     onSessionStart(handler): void {
       pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
     },
+    onTurnEnd(handler): void {
+      pi.on("turn_end", (event, ctx) => {
+        // executeTool preflight waits for this event queue; never await delivery inside it.
+        void handler(event.message, contextPort(ctx)).catch((cause: unknown) => {
+          console.error("OLW operational notification task failed", cause);
+        });
+      });
+    },
+    notifyOperational(message): void {
+      // stderr is visible in host/RPC logs without injecting a user or assistant message.
+      console.error(message);
+    },
     onResourcesDiscover(handler): void {
       pi.on("resources_discover", () => handler());
     },
@@ -50,9 +62,11 @@ function contextPort(ctx: ExtensionContext): SessionContextPort {
     get thinkingLevel() {
       return ctx.thinkingLevel;
     },
+    disableModelFallbackForSession: () => ctx.sessionSettings.setModelFallbackForSession(false),
     sessionManager: {
       getSessionId: () => ctx.sessionManager.getSessionId(),
       getSessionFile: () => ctx.sessionManager.getSessionFile(),
+      getBranch: () => ctx.sessionManager.getBranch(),
     },
   };
 }

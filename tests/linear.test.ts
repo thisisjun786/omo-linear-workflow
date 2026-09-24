@@ -24,7 +24,9 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-function fixtureSnapshot(): ScopeSnapshot {
+function fixtureSnapshot(): ScopeSnapshot & {
+  readonly initiative: NonNullable<ScopeSnapshot["initiative"]>;
+} {
   return {
     version: 1,
     source: "fixture",
@@ -97,13 +99,19 @@ describe("readScopeSnapshot", () => {
     );
     expect(snapshot.version).toBe(1);
     expect(snapshot.source).toBe("fixture");
-    expect(snapshot.initiative.id).toBe("initiative-omo-1");
+    expect(snapshot.initiative?.id).toBe("initiative-omo-1");
     expect(snapshot.projects).toHaveLength(1);
     expect(snapshot.projects[0]?.project.id).toBe("project-omo-1");
     expect(snapshot.projects[0]?.issues.map((issue) => issue.id)).toEqual([
       "issue-omo-1",
       "issue-omo-2",
     ]);
+  });
+
+  test("imports a project-only snapshot with explicit null initiative", async () => {
+    const snapshot: ScopeSnapshot = { ...fixtureSnapshot(), initiative: null };
+    const file = await tempFile("project-only.json", JSON.stringify(snapshot));
+    expect(value(await readScopeSnapshot(file))).toEqual(snapshot);
   });
 
   test("rejects a missing file", async () => {
@@ -232,6 +240,36 @@ describe("buildRoleBrief", () => {
     expect(brief).toContain("role: parent");
     expect(brief).toContain("project_id: project-omo-1");
     expect(brief).toContain("initiative_id: initiative-omo-1");
+  });
+
+  test("standalone parent brief exposes its approved issues and user contact without an initiative", () => {
+    const binding = makeBinding("parent", {
+      assignment: {
+        role: "parent",
+        projectId: "project-omo-1",
+        initiativeId: null,
+        ownerBindingId: null,
+      },
+    });
+    const parsed: unknown = Bun.YAML.parse(
+      buildRoleBrief(binding, { ...snapshot, initiative: null }),
+    );
+    expect(parsed).toMatchObject({
+      scope_refs: {
+        initiative_id: null,
+        project_id: "project-omo-1",
+        issue_ids: ["issue-omo-1", "issue-omo-2"],
+      },
+      initial_manager_binding_id: null,
+      user_contact: "direct_prompt_in_this_session",
+      user_report_state: "posted_not_native_acceptance",
+      behavior: {
+        no_autonomous_goal_loop: true,
+        wait_for_explicit_instruction: true,
+        report_route: "current_manager_or_user_inbox",
+        management_link_changes_approval: false,
+      },
+    });
   });
 
   test("child brief embeds project and issue scope refs", () => {

@@ -87,6 +87,21 @@ test.each(["send", "report"] as const)(
   },
 );
 
+test("a proven pre-delivery rejection advertises only an immutable same-ID retry", async () => {
+  const safe: DeliveryRecord = {
+    ...rejected,
+    receipt: {
+      kind: "error",
+      error: { code: "turn_conflict_before_delivery", message: "fixture", next_action: "retry" },
+    },
+  };
+  const result = await invoke("send", { ok: true, value: safe });
+  expect(result.code).toBe(2);
+  expect(result.output).toMatchObject({
+    error: { details: { delivery: safe, recovery: "retry_same_id" } },
+  });
+});
+
 test("non-JSON rejected delivery also exits nonzero and retains the receipt", async () => {
   const result = await invoke("send", { ok: true, value: rejected }, false);
   expect(result.code).toBe(2);
@@ -147,6 +162,22 @@ test.each(["started", "steered", "queued"] as const)(
     expect(await invoke("send", { ...reply, ok: true })).toEqual({ code: 0, output: reply });
   },
 );
+
+test("a user-addressed report succeeds as posted, never as native acceptance", async () => {
+  const posted: DeliveryRecord = {
+    envelope: {
+      ...rejected.envelope,
+      fromBindingId: "parent",
+      toBindingId: null,
+      kind: "report",
+      outcome: "blocked",
+    },
+    state: "posted",
+    receipt: null,
+  };
+  const reply = { ok: true as const, value: posted };
+  expect(await invoke("report", reply)).toEqual({ code: 0, output: reply });
+});
 
 test("route and validation failures keep their original error contract", async () => {
   const reply = { ok: false, error: { code: "route_denied", message: "Route denied" } };

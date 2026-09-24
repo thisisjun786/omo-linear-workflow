@@ -2,7 +2,8 @@
 import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
-import type { Result } from "./core/contracts";
+import type { Result, ScopeFilter } from "./core/contracts";
+import { canRetryDelivery } from "./core/policy";
 import { deliveryRecordSchema } from "./core/schema";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator } from "./orchestrator";
@@ -30,7 +31,7 @@ const valueFlags = new Set([
   "evidence",
   "binding",
 ]);
-const booleanFlags = new Set(["json", "fixture", "execute", "help", "confirm-absent"]);
+const booleanFlags = new Set(["json", "fixture", "execute", "help", "confirm-absent", "to-user"]);
 
 function parseArguments(
   argv: readonly string[],
@@ -105,9 +106,11 @@ function exitCode(result: Result<unknown>): number {
 function deliveryOutcome(result: Result<unknown>): Result<unknown> {
   if (!result.ok && result.error.code !== "delivery_in_progress") return result;
   const parsed = deliveryRecordSchema.safeParse(result.ok ? result.value : result.error.details);
-  if (!parsed.success || parsed.data.state === "accepted") return result;
+  if (!parsed.success || parsed.data.state === "accepted" || parsed.data.state === "posted")
+    return result;
   const delivery = parsed.data;
   const rejected = delivery.state === "rejected";
+  const retryable = canRetryDelivery(delivery);
   return {
     ok: false,
     error: {
@@ -117,13 +120,14 @@ function deliveryOutcome(result: Result<unknown>): Result<unknown> {
         : "Native delivery is pending or uncertain; the instruction is not confirmed accepted.",
       details: {
         delivery,
-        recovery: "inspect_before_retry",
-        next_action:
-          "Run olw status to resolve the target binding to its durableSessionId, then inspect that native session's transcript, pending queue, and delivery receipts. " +
-          (rejected
-            ? "Repeating this command with the same --id only replays the stored rejection. "
-            : "Do not resend while acceptance is unresolved. ") +
-          "Do not use a new --id unless authoritative reconciliation proves non-acceptance. In the pinned native runtime, turn_conflict can also follow a lost acknowledgement, so its code alone is not that proof.",
+        recovery: retryable ? "retry_same_id" : "inspect_before_retry",
+        next_action: retryable
+          ? "Native delivery was rejected before invoking the target. Repeat the identical command with the same --id and payload to recheck current authorization and allocate one successor attempt. Earlier keys and receipts remain in delivery.attempts."
+          : "Run olw status to resolve the target binding to its durableSessionId, then inspect that native session's transcript, pending queue, and delivery receipts. " +
+            (rejected
+              ? "Repeating this command with the same --id only replays the stored rejection. "
+              : "Do not resend while acceptance is unresolved. ") +
+            "Do not use a new --id unless authoritative reconciliation proves non-acceptance. Legacy turn_conflict receipts can also follow a lost acknowledgement, so that code alone is not proof of non-delivery.",
       },
     },
   };
@@ -143,6 +147,16 @@ function requireOptions(options: Options, keys: readonly string[]): Result<Recor
     collected[key] = parsed.data;
   }
   return { ok: true, value: collected };
+}
+
+function scopeFilter(options: Options, required: boolean): Result<ScopeFilter> {
+  const initiativeId = stringOption(options, "initiative");
+  const projectId = stringOption(options, "project");
+  if (initiativeId !== undefined && projectId !== undefined)
+    return invalid("Choose --initiative or --project, not both");
+  if (projectId !== undefined) return { ok: true, value: { projectId } };
+  if (initiativeId !== undefined) return { ok: true, value: { initiativeId } };
+  return required ? invalid("--initiative or --project is required") : { ok: true, value: {} };
 }
 
 async function doctor(root: string, herdrSocket?: string): Promise<Result<unknown>> {
@@ -198,9 +212,13 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             "scope import",
             "supervisor create",
             "parent create",
+            "parent link",
+            "parent unlink",
             "child create",
             "send",
             "report",
+            "reports",
+            "notices",
             "status",
             "pause",
             "resume",
@@ -211,16 +229,23 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             "scope import": "--file PATH [--fixture]",
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
-            "parent create": "--supervisor BINDING --project ID --repo PATH --base REF",
+            "parent create":
+              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture]) --project ID --repo PATH --base REF",
+            "parent link": "--parent BINDING --supervisor BINDING",
+            "parent unlink": "--parent BINDING",
             "child create": "--parent BINDING --issue ID",
             send: "--from BINDING --to BINDING --id ID --kind instruction|coordination --text-file PATH",
             report:
-              "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF]",
-            status: "[--initiative ID]",
+              "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--to-user]",
+            reports:
+              "[--initiative ID | --project ID] (read-only user inbox; posted is not native acceptance)",
+            notices:
+              "[--initiative ID | --project ID] (read-only operational telemetry; not completion reports)",
+            status: "[--initiative ID | --project ID]",
             pause: "--binding ID",
             resume: "--binding ID",
             close: "--binding ID [--confirm-absent]",
-            reconcile: "--initiative ID",
+            reconcile: "--initiative ID | --project ID",
           },
         },
       },
@@ -252,14 +277,46 @@ export async function runCli(argv: readonly string[]): Promise<number> {
           })
         : values;
     } else if (command === "parent create") {
-      const values = requireOptions(options, ["supervisor", "project", "repo", "base"]);
+      const supervisorId = stringOption(options, "supervisor");
+      const standaloneFlags = ["scope-digest", "designation", "execute", "fixture"].some(
+        (key) => options[key] !== undefined,
+      );
+      const values = requireOptions(options, [
+        "project",
+        "repo",
+        "base",
+        ...(supervisorId === undefined ? ["scope-digest", "designation"] : []),
+      ]);
+      if (supervisorId !== undefined && standaloneFlags)
+        result = invalid("--supervisor cannot be combined with standalone approval flags");
+      else if (!values.ok) result = values;
+      else {
+        const location = {
+          projectId: values.value["project"] ?? "",
+          repo: values.value["repo"] ?? "",
+          base: values.value["base"] ?? "",
+        };
+        result = await orchestrator.createParent(
+          supervisorId !== undefined
+            ? { ...location, supervisorId }
+            : {
+                ...location,
+                scopeDigest: values.value["scope-digest"] ?? "",
+                designationId: values.value["designation"] ?? "",
+                execute: has(options, "execute"),
+                fixture: has(options, "fixture"),
+              },
+        );
+      }
+    } else if (command === "parent link" || command === "parent unlink") {
+      const values = requireOptions(
+        options,
+        command === "parent link" ? ["parent", "supervisor"] : ["parent"],
+      );
       result = values.ok
-        ? await orchestrator.createParent({
-            supervisorId: values.value["supervisor"] ?? "",
-            projectId: values.value["project"] ?? "",
-            repo: values.value["repo"] ?? "",
-            base: values.value["base"] ?? "",
-          })
+        ? command === "parent link"
+          ? orchestrator.linkParent(values.value["parent"] ?? "", values.value["supervisor"] ?? "")
+          : orchestrator.unlinkParent(values.value["parent"] ?? "")
         : values;
     } else if (command === "child create") {
       const values = requireOptions(options, ["parent", "issue"]);
@@ -305,6 +362,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
               fromId: values.value["from"] ?? "",
               messageId: values.value["id"] ?? "",
               outcome: outcome.data,
+              toUser: has(options, "to-user"),
               evidence: evidence(options),
               text: body.value,
             })
@@ -313,8 +371,15 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             : !body.ok
               ? body
               : invalid("--outcome must be completed, blocked, or failed");
-    } else if (command === "status") {
-      result = orchestrator.status(stringOption(options, "initiative"));
+    } else if (command === "status" || command === "reports" || command === "notices") {
+      const filter = scopeFilter(options, false);
+      result = filter.ok
+        ? command === "reports"
+          ? orchestrator.reports(filter.value)
+          : command === "notices"
+            ? orchestrator.notices(filter.value)
+            : orchestrator.status(filter.value)
+        : filter;
     } else if (command === "pause" || command === "resume" || command === "close") {
       const values = requireOptions(options, ["binding"]);
       result = values.ok
@@ -323,11 +388,11 @@ export async function runCli(argv: readonly string[]): Promise<number> {
           : orchestrator.setPaused(values.value["binding"] ?? "", command === "pause")
         : values;
     } else if (command === "reconcile") {
-      const values = requireOptions(options, ["initiative"]);
-      result = values.ok ? await orchestrator.reconcile(values.value["initiative"] ?? "") : values;
+      const filter = scopeFilter(options, true);
+      result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, scope import, supervisor/parent/child create, send, report, status, pause, resume, close, or reconcile",
+        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, send, report, reports, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {

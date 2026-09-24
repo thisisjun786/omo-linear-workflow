@@ -28,11 +28,18 @@ const hostStatusSchema = z.object({
 });
 export type HostStatus = z.infer<typeof hostStatusSchema>;
 
+function runtimeNamespace(entry: string): string {
+  return createHash("sha256").update(entry).digest("hex").slice(0, 16);
+}
+export const RUNTIME_CACHE_MARKER = `OMO_INITIATIVE_CACHE_V1_${runtimeNamespace(
+  import.meta.resolve("@code-yeongyu/senpi"),
+).toUpperCase()}`;
+
 export function runtimeCacheEnvironment(
   root: string,
   runtimeEntry = import.meta.resolve("@code-yeongyu/senpi"),
 ): Readonly<Record<string, string>> {
-  const namespace = createHash("sha256").update(runtimeEntry).digest("hex").slice(0, 16);
+  const namespace = runtimeNamespace(runtimeEntry);
   const cache = join(root, ".omo/cache", namespace);
   return {
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(cache, "cli"),
@@ -113,7 +120,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
       OMO_INITIATIVE_HOST: "1",
       OMO_INITIATIVE_ROOT: root,
       OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
-      OMO_INITIATIVE_CACHE_V1: "1",
+      [RUNTIME_CACHE_MARKER]: "1",
     },
   };
   await writeFile(temporary, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -124,8 +131,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
     const core = status.launchProfile?.core;
     const missingExtensions = required.filter((extension) => !core?.extensions.includes(extension));
     const missingCapabilities =
-      status.env_keys.includes("OMO_INITIATIVE_CACHE_V1") &&
-      status.env_keys.includes("XDG_CACHE_HOME")
+      status.env_keys.includes(RUNTIME_CACHE_MARKER) && status.env_keys.includes("XDG_CACHE_HOME")
         ? []
         : ["runtime_cache_isolation"];
     if (

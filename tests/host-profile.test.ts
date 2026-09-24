@@ -2,7 +2,11 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHostProfile, runtimeCacheEnvironment } from "../src/host-profile";
+import {
+  createHostProfile,
+  RUNTIME_CACHE_MARKER,
+  runtimeCacheEnvironment,
+} from "../src/host-profile";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -29,7 +33,7 @@ async function fixture() {
     generation: 4,
     launchProfile: { core: { session_runtime: "in-process", multi_session: true, extensions } },
     sessions: { total: 3, worker: 1 },
-    env_keys: ["OMO_INITIATIVE_CACHE_V1", "XDG_CACHE_HOME"],
+    env_keys: [RUNTIME_CACHE_MARKER, "XDG_CACHE_HOME"],
   };
   return { root, status };
 }
@@ -104,6 +108,16 @@ test("rejects a reused host without cache isolation and supplies scoped handoff 
       },
     },
   });
+});
+
+test("refuses the previous runtime even when extension paths still match", async () => {
+  const { root, status } = await fixture();
+  await expect(
+    createHostProfile(root, {
+      ...status,
+      env_keys: ["OMO_INITIATIVE_CACHE_V1", "XDG_CACHE_HOME"],
+    }),
+  ).rejects.toThrow();
 });
 
 test("separates cache namespaces by control root and installed runtime", () => {

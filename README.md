@@ -297,7 +297,7 @@ If the workspace creation response itself was lost, check Herdr directly. Only a
 
 One Herdr server and one native OMO host are used. Automatic merge, release and Linear mutation aren't provided. Native acceptance, work completion reports and Linear acceptance are different states. `pause` and `resume` only change whether contact is allowed. They don't recreate sessions. Shutdown or an uncertain work outcome doesn't mean Linear completion.
 
-QA with real Herdr, real models and real reports has passed. New managed supervisor and parent sessions also verified actual Linear MCP discovery, first-use activation, authenticated project/document/issue reads, and reload using the existing OAuth connection. Live Linear writes remain unverified pending explicit permission for a temporary write/readback target. Whether the default Herdr supports OMO detection is separate from this CLI's execution and communication.
+QA with real Herdr, real models and real reports has passed. New managed supervisor and parent sessions also verified actual Linear MCP discovery, first-use activation, authenticated project/document/issue reads, and reload using the existing OAuth connection. With explicit user approval, a managed parent also created one temporary Linear issue, updated and independently read it back, then canceled it and verified the final state. No existing business issue was changed. Whether the default Herdr supports OMO detection is separate from this CLI's execution and communication.
 
 ## Managed Herdr
 

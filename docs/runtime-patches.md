@@ -64,9 +64,12 @@ supervisor/parent acceptance evidence. A separate `qa-live-linear.ts` run create
 real OLW supervisor/parent fixtures and verified name/description/source search,
 first-use invocation through direct native tools and eval, sibling isolation,
 authenticated project/document/issue readback, and reload. It reused existing
-OAuth and performed no external write. Its target references and raw receipts
-are under `.omo/evidence/real-use-repairs/lina-143-live*`; write/readback acceptance
-still requires explicit permission. MCP catalog refresh may reset active tools,
+OAuth. After separate explicit user approval, a managed parent created one
+temporary issue, updated it, independently read it back, and canceled it. A
+Markdown normalization mismatch in the first QA attempt was recovered using the
+confirmed original UUID rather than creating another issue. Target references,
+raw receipts and both attempts are under
+`.omo/evidence/real-use-repairs/lina-143-live*`. MCP catalog refresh may reset active tools,
 so that QA observes activation at the native tool-call hook rather than assuming
 all previously invoked tools remain active indefinitely. Shared-host reload also
 exposes existing OMO memory recall/kibitzer stale-generation warnings; the logs
@@ -77,7 +80,21 @@ For a separately approved live read check, run
 `project: {id, identifier, url, revision}`, `document: {id, url, revision}` and
 `issue: {id, identifier}` from current authorized reads. IDs are UUIDs; identifiers
 are the returned display identifiers. Keep credentials out of this file. The
-script validates it before allocating a world and never performs a write.
+script validates it before allocating a world and is read-only by default.
+
+Only after explicit permission for one temporary issue's creation, update and
+cancellation, pass an approved write-plan JSON as the third CLI argument. It
+names the project/team, unique nonce, create arguments, updated description and
+canceled-state ID/name/type. The driver discovers and invokes save_issue only
+from the managed parent, journals requests and raw receipts, reads changes back,
+and cancels the confirmed owned issue. The exclusive nonce journal blocks a
+blind second create. An explicit resumeJournal may reference a confirmed create
+receipt to finish the same issue, never allocate another. Preserve uncertain
+receipts and inspect the existing result before choosing a recovery operation.
+Linear expands issue references in Markdown; creation readback compares the
+returned stored body, while update verification uses an exact machine payload
+without those references. Cleanup verifies UUID, project, team, title and nonce,
+not JSON parsing of a Markdown description.
 
 ## Host profiles and cache recovery (LINA-141, LINA-144)
 

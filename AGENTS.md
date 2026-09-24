@@ -54,5 +54,7 @@ Use `apply_patch` for authored files. Keep parallel producers' write scopes
 disjoint. Run diagnostics, `bun test`, `bun run typecheck`, and `bun run build`.
 
 Only the lead commits. Each verified increment is a separate Conventional Commit.
-Do not push or modify real Linear objects during QA. Use explicit temporary
-fixtures and close only QA-created workspaces/worktrees/processes.
+Do not push during QA. Use explicit temporary fixtures; a live Linear write check
+requires separate user approval for its target, operations and cleanup. Preserve
+its receipts, never repeat an uncertain create, and close only QA-created
+workspaces/worktrees/processes.

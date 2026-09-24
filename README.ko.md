@@ -275,7 +275,7 @@ workspace 생성 응답 자체가 유실됐다면 Herdr를 직접 확인해야 �
 
 하나의 Herdr server와 하나의 native OMO host를 사용합니다. 자동 merge, release, Linear mutation은 제공하지 않습니다. native acceptance, 작업 완료 보고, Linear acceptance는 서로 다른 상태입니다. `pause`와 `resume`은 연락 허용 상태만 바꾸며 세션을 재생성하지 않습니다. 종료나 불확실한 작업 결과가 Linear 완료를 뜻하지는 않습니다.
 
-실제 Herdr/모델/보고 QA는 통과했습니다. 새 관리형 감독·부모에서도 기존 OAuth 연결을 사용해 실제 Linear MCP 검색, 첫 호출 활성화, 인증된 프로젝트·문서·이슈 읽기와 reload를 검증했습니다. 실제 Linear 쓰기는 임시 쓰기·재조회 대상에 대한 명시적 허용을 기다리고 있어 아직 미검증입니다. 기본 Herdr의 OMO 탐지 지원 여부는 이 CLI의 실행·통신과 별개입니다.
+실제 Herdr/모델/보고 QA는 통과했습니다. 새 관리형 감독·부모에서도 기존 OAuth 연결을 사용해 실제 Linear MCP 검색, 첫 호출 활성화, 인증된 프로젝트·문서·이슈 읽기와 reload를 검증했습니다. 사용자의 명시적 허용 후 관리형 부모가 임시 Linear 이슈 한 개를 생성·수정하고 독립적으로 재조회한 뒤, 취소 처리와 최종 상태까지 검증했습니다. 기존 업무 이슈는 변경하지 않았습니다. 기본 Herdr의 OMO 탐지 지원 여부는 이 CLI의 실행·통신과 별개입니다.
 
 ## 관리형 Herdr
 

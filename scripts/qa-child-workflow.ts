@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
@@ -194,11 +195,10 @@ try {
     await childClient.requestExtension("omo.dag.list", {}),
   );
   if (beforeRuns.runs.length !== 0) throw new QaError("Fixture startup created a workflow");
-  const expected = [
-    ["cliproxyapi", "gpt-6-astra", "high"],
-    ["cliproxyapi", "claude-opus-5-5", "xhigh"],
-    ["cliproxyapi", "claude-opus-5-5", "xhigh"],
-  ];
+  const expected = (["supervisor", "parent", "child"] as const).map((role) => {
+    const { provider, modelId, thinking } = modelForRole(role);
+    return [provider, modelId, thinking];
+  });
   for (const [index, binding] of [supervisor, parent, child].entries()) {
     const client = [supervisorClient, parentClient, childClient][index];
     const tuple = expected[index];

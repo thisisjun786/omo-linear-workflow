@@ -12,6 +12,7 @@ import type {
   Result,
   ScopeSnapshot,
 } from "../src/core/contracts";
+import { modelForRole } from "../src/core/policy";
 import { runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 
@@ -101,9 +102,9 @@ function activate(registry: ReturnType<typeof openRegistry>, binding: Binding): 
   value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
   value(registry.observeSession(binding.id, `/sessions/${binding.id}.jsonl`));
   const roles = {
-    supervisor: { provider: "cliproxyapi", modelId: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
-    child: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
+    supervisor: modelForRole("supervisor"),
+    parent: modelForRole("parent"),
+    child: modelForRole("child"),
   };
   const configured = value(
     registry.activate(
@@ -170,9 +171,7 @@ describe("SQLite registry", () => {
             durableSessionId: binding.durableSessionId,
             sessionPath: "/sessions/initial.jsonl",
             cwd: binding.cwd,
-            provider: "cliproxyapi",
-            modelId: "gpt-6-astra",
-            thinking: "high",
+            ...modelForRole("supervisor"),
             extensionProtocol: 1,
           }),
         );

@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import type { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding, DeliveryRecord } from "../src/core/contracts";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema, deliveryRecordSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient, type Snapshot } from "../src/herdr";
@@ -157,9 +158,10 @@ async function main() {
       clients.push(client);
       await idle(client);
       const state = await client.getState();
-      assert.equal(state.model?.provider, "cliproxyapi");
-      assert.equal(state.model?.id, "claude-opus-5-5");
-      assert.equal(state.thinkingLevel, "xhigh");
+      const expected = modelForRole(binding.assignment.role);
+      assert.equal(state.model?.provider, expected.provider);
+      assert.equal(state.model?.id, expected.modelId);
+      assert.equal(state.thinkingLevel, expected.thinking);
       assert.ok(binding.sessionPath);
       assert.equal(
         await Bun.file(
@@ -501,9 +503,9 @@ async function main() {
             "--name",
             `omo-${binding.assignment.role}-${binding.id}`,
             "--model",
-            "cliproxyapi/claude-opus-5-5",
+            `${modelForRole(binding.assignment.role).provider}/${modelForRole(binding.assignment.role).modelId}`,
             "--thinking",
-            "xhigh",
+            modelForRole(binding.assignment.role).thinking,
             "--no-model-fallback",
             "--no-recommended-models",
           ],

@@ -12,6 +12,7 @@ import type {
   RuntimeIdentity,
   ScopeSnapshot,
 } from "../../src/core/contracts";
+import { modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../../src/herdr";
 import { createHostProfile, RUNTIME_CACHE_MARKER } from "../../src/host-profile";
@@ -222,8 +223,8 @@ class FakeHerdr implements HerdrClient {
       const restored = SessionManager.open(file, join(this.cwd, "sessions"), this.cwd);
       expect(restored.getSessionId()).toBe(requestedId);
       expect(restored.buildSessionContext().model).toEqual({
-        provider: "cliproxyapi",
-        modelId: "gpt-6-astra",
+        provider: modelForRole("supervisor").provider,
+        modelId: modelForRole("supervisor").modelId,
       });
       expect(restored.buildSessionContext().thinkingLevel).toBe("high");
     }

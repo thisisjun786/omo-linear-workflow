@@ -10,9 +10,9 @@ here is itself an enforcement, and Linear permissions aren't enforced by these s
 
 | Role | Bound to | Model / reasoning | Workspace | Instructs | Reports to |
 |---|---|---|---|---|---|
-| Supervisor (optional management session) | one initiative ID | `cliproxyapi/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
-| Parent | one project ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | linked supervisor or local user inbox |
-| Child | one issue ID | `cliproxyapi/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
+| Supervisor (optional management session) | one initiative ID | `opencodex/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
+| Parent | one project ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | linked supervisor or local user inbox |
+| Child | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
 
 A project parent is the execution unit; it needs neither an initiative nor a supervisor.
 No hidden supervisor is created. Parents and children remain linked Git worktrees, not

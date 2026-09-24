@@ -103,9 +103,8 @@ right before each request, then the call goes out over a real Responses, Message
 or Chat Completions transport.
 
 `providers.cliproxyapi.modelOverrides` in `models.json` still applies to user
-settings such as context size. The managed OMO launcher checks the upstream model
-chains for categories and agents before start and syncs them to proxy paths. The
-explicit per-role model assignments for OLW are kept separately. This feature
+settings such as context size. Category and agent routing now targets opencodex
+(see below). The explicit per-role model assignments for OLW are kept separately. This feature
 doesn't enable other providers or restore direct authentication. A cost of `0`
 for a model with no registered price means no information, not free.
 
@@ -125,9 +124,11 @@ steps follow the [manual-first model policy](docs/proxy-model-policy.md).
 
 Before a regular `omo` or `omon` start and before OLW prepares its shared host,
 the installed global OMO's version and the actual policy bundle hash are checked.
-When they change, the category and agent model order and thinking levels are
-mapped onto the current proxy list. Routing the user changed by hand afterwards
-is protected. If a chain can't be mapped or the bundle format is new, the previous
+When they change, or when the models opencodex publishes to OMO change, the
+category and agent model order and thinking levels are mapped onto that opencodex
+list (`providers.opencodex` in `models.json`, kept current by
+`ocx integration client enable --client omo`). Routing the user changed by hand
+afterwards is protected. If a chain can't be mapped or the bundle format is new, the previous
 settings are kept and an error is reported. The current session isn't restarted,
 and OLW's Parent and Child model assignments aren't changed.
 
@@ -200,9 +201,9 @@ The default Herdr socket comes from the current pane's `HERDR_SOCKET_PATH`. Pass
 
 | Role | Model / reasoning | Workspace |
 | --- | --- | --- |
-| Supervisor (optional) | `cliproxyapi/gpt-6-astra` / `high` | control root Herdr workspace |
-| Parent | `cliproxyapi/claude-opus-5-5` / `xhigh` | project integration branch worktree |
-| Child | `cliproxyapi/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
+| Supervisor (optional) | `opencodex/gpt-6-astra` / `high` | control root Herdr workspace |
+| Parent | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | project integration branch worktree |
+| Child | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
 
 These assignments apply to new bindings. Existing bindings keep the model,
 provider and thinking level recorded at their initial session as the verification

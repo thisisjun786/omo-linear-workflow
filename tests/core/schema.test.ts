@@ -17,20 +17,20 @@ afterEach(async () => {
 });
 
 describe("frozen core schemas and role policy", () => {
-  test("modelForRole returns exactly the three proven tuples", () => {
+  test("modelForRole returns exactly the three opencodex tuples", () => {
     expect(modelForRole("supervisor")).toEqual({
-      provider: "cliproxyapi",
+      provider: "opencodex",
       modelId: "gpt-6-astra",
       thinking: "high",
     });
     expect(modelForRole("parent")).toEqual({
-      provider: "cliproxyapi",
-      modelId: "claude-opus-5-5",
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
       thinking: "xhigh",
     });
     expect(modelForRole("child")).toEqual({
-      provider: "cliproxyapi",
-      modelId: "claude-opus-5-5",
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
       thinking: "xhigh",
     });
   });

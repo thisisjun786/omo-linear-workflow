@@ -23,8 +23,8 @@ export interface RoleModel {
 
 export function modelForRole(role: Assignment["role"]): RoleModel {
   if (role === "supervisor")
-    return { provider: "cliproxyapi", modelId: "gpt-6-astra", thinking: "high" };
-  return { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" };
+    return { provider: "opencodex", modelId: "gpt-6-astra", thinking: "high" };
+  return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
 }
 
 const seedEntrySchema = z.discriminatedUnion("type", [

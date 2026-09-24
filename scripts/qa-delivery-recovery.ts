@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema, deliveryRecordSchema, nativeReceiptSchema } from "../src/core/schema";
 import { attach, idle } from "./qa-hierarchy";
 import { checkedQaCommand, prepareQaWorld } from "./qa-world";
@@ -395,9 +396,10 @@ async function main() {
     const after = await parentClient.getState();
     assert.equal(after.sessionId, before.sessionId);
     assert.equal(after.sessionFile, before.sessionFile);
-    assert.equal(after.model?.provider, "cliproxyapi");
-    assert.equal(after.model?.id, "claude-opus-5-5");
-    assert.equal(after.thinkingLevel, "xhigh");
+    const expected = modelForRole("parent");
+    assert.equal(after.model?.provider, expected.provider);
+    assert.equal(after.model?.id, expected.modelId);
+    assert.equal(after.thinkingLevel, expected.thinking);
     log.identity = { supervisor, parent, before, after };
     log.result = "pass";
   } catch (error) {

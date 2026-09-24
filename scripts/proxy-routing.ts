@@ -11,7 +11,7 @@ async function main(): Promise<number> {
   const command = args[0] ?? "status";
   if (!["status", "check", "sync", "scope"].includes(command))
     throw new RoutingError(
-      "Usage: proxy:routing status|check|sync [--adopt] [--force] [--upstream PATH] | scope [referenced|all]",
+      "Usage: proxy:routing status|check|sync [--adopt] [--force] [--upstream PATH] [--catalog PATH] | scope [referenced|all]",
     );
   const value = (name: string, fallback: string): string => {
     const index = args.indexOf(name);
@@ -74,11 +74,7 @@ async function main(): Promise<number> {
     upstream: args.includes("--upstream") ? value("--upstream", "") : globalOmo(),
     configPath: value("--config", join(home, ".omo/omo.jsonc")),
     stateDir,
-    clientCredentials: value("--client", join(home, ".config/cliproxyapi/omo-client.json")),
-    managementCredentials: value(
-      "--management",
-      join(home, ".config/cliproxyapi/management-access.json"),
-    ),
+    catalogPath: value("--catalog", join(home, ".omo/agent/models.json")),
     adopt: args.includes("--adopt"),
     check: command === "check",
     force: args.includes("--force"),

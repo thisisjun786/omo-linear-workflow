@@ -93,9 +93,8 @@ OMO의 `settings.json`에 있는 `extensions` 배열에 같은 경로를 등록�
 Messages 또는 Chat Completions 전송으로 연결합니다.
 
 `models.json`의 `providers.cliproxyapi.modelOverrides`는 컨텍스트 등 사용자 설정에
-계속 적용됩니다. 카테고리·에이전트의 업스트림 모델 체인은 관리형 OMO 런처가
-시작 전에 확인하고 프록시 경로로 동기화합니다. OLW 역할별 명시적 모델 지정은
-별도로 유지합니다. 이 기능이 다른 제공자를 활성화하거나 직접 인증을 복원하지는 않습니다.
+계속 적용됩니다. 카테고리·에이전트 라우팅은 이제 opencodex를 대상으로 합니다(아래 참고).
+OLW 역할별 명시적 모델 지정은 별도로 유지합니다. 이 기능이 다른 제공자를 활성화하거나 직접 인증을 복원하지는 않습니다.
 등록 가격이 없는 모델의 비용 `0`은 무료가 아니라 정보 없음입니다.
 
 ### 모델 등록과 비활성화 정책
@@ -111,8 +110,10 @@ MiMo처럼 직접 등록한 OpenAI 호환 제공자는 OAuth 정책 대상이 �
 ### 업스트림 라우팅 자동 추적
 
 일반 `omo`·`omon` 시작과 OLW 공유 호스트 준비 전에 설치된 전역 OMO의 버전과
-실제 정책 번들 해시를 확인합니다. 변경되면 카테고리·에이전트 모델 순서와 사고 수준을
-현재 프록시 목록에 맞춰 반영합니다. 이후 사용자가 직접 바꾼 라우팅은 보호하고,
+실제 정책 번들 해시를 확인합니다. 이 값이나 opencodex가 OMO에 공개하는 모델 목록
+(`models.json`의 `providers.opencodex`, `ocx integration client enable --client omo`가
+갱신)이 바뀌면 카테고리·에이전트 모델 순서와 사고 수준을 그 opencodex 목록에 맞춰
+반영합니다. 이후 사용자가 직접 바꾼 라우팅은 보호하고,
 매핑할 수 없는 체인이나 새로운 번들 형식이면 이전 설정을 유지한 채 오류를 알립니다.
 현재 세션을 재시작하거나 OLW의 Parent·Child 모델 지정을 바꾸지는 않습니다.
 
@@ -184,9 +185,9 @@ bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo 
 
 | 역할 | 모델 / reasoning | 작업 공간 |
 | --- | --- | --- |
-| Supervisor (선택 사항) | `cliproxyapi/gpt-6-astra` / `high` | control root Herdr workspace |
-| Parent | `cliproxyapi/claude-opus-5-5` / `xhigh` | project integration branch worktree |
-| Child | `cliproxyapi/claude-opus-5-5` / `xhigh` | parent branch 기반 issue worktree |
+| Supervisor (선택 사항) | `opencodex/gpt-6-astra` / `high` | control root Herdr workspace |
+| Parent | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | project integration branch worktree |
+| Child | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | parent branch 기반 issue worktree |
 
 이 배정은 새 binding에 적용됩니다. 기존 binding은 초기 세션 기록의 모델·제공자·
 사고 수준을 검증 기준으로 유지하며, reconcile이 실행 중 세션을 새 정책으로

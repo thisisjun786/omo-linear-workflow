@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema } from "../src/core/schema";
 import { createHerdrClient } from "../src/herdr";
 import { readHostStatus, runtimeCacheEnvironment } from "../src/host-profile";
@@ -251,9 +252,10 @@ async function main() {
     const supervisorRpc = await attach(supervisor);
     try {
       const state = await supervisorRpc.getState();
-      assert.equal(state.model?.provider, "cliproxyapi");
-      assert.equal(state.model.id, models[0]);
-      assert.equal(state.thinkingLevel, "high");
+      const expected = modelForRole("supervisor");
+      assert.equal(state.model?.provider, expected.provider);
+      assert.equal(state.model?.id, expected.modelId);
+      assert.equal(state.thinkingLevel, expected.thinking);
       await idle(supervisorRpc);
       const initialMessages = await supervisorRpc.getMessages();
       const countBrief = (messages: typeof initialMessages) =>
@@ -313,7 +315,11 @@ async function main() {
     } finally {
       await parentRpc.stop();
     }
-    log.qaParent = { id: parent.id, sessionPath: parent.sessionPath, model: models[1] };
+    log.qaParent = {
+      id: parent.id,
+      sessionPath: parent.sessionPath,
+      model: modelForRole("parent").modelId,
+    };
     // Explicitly close the extra owned native session; qa.close only owns registry bindings.
     await native.closeSession(fixtureSession.id);
     fixtureSession = undefined;
@@ -453,9 +459,10 @@ async function toolTurn(client: RpcClient, cwd: string) {
   assert.ok(toolNames.includes("read"), "Native read tool was not called");
   assert.ok(toolNames.includes("bash"), "Native bash tool was not called through eval");
   const state = await client.getState();
-  assert.equal(state.model?.provider, "cliproxyapi");
-  assert.equal(state.model?.id, models[1]);
-  assert.equal(state.thinkingLevel, "xhigh");
+  const expected = modelForRole("parent");
+  assert.equal(state.model?.provider, expected.provider);
+  assert.equal(state.model?.id, expected.modelId);
+  assert.equal(state.thinkingLevel, expected.thinking);
   return { toolNames, errorMessages };
 }
 

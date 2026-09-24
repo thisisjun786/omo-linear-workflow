@@ -1,75 +1,68 @@
-# OMO upstream routing through CLIProxyAPI
+# OMO upstream routing through opencodex
 
 OLW can follow the **installed global OMO's category and named-agent policy**
-while keeping every generated route on `cliproxyapi`.
+while keeping every generated route on `opencodex`.
 
-Prerequisites are the existing proxy-only setup described in
-[the proxy extension guide](../README.md#프록시-모델-확장): native connections are
-already disabled, and the client and management credential files are present
-under `~/.config/cliproxyapi/`. This feature does not perform that migration.
-It manages the existing `~/.omo/omo.jsonc`; first-time adoption should be reviewed
-because it replaces stock-name routing fields, including any older manual pins
-there. Main-model and OLW-role pins remain outside its scope.
-Generated routes are proxy-only; preserved manual overrides are not rewritten
-or rejected by this synchronizer. Native-provider disablement remains a separate
-prerequisite, not a side effect of reading native model metadata.
+The prerequisite is opencodex's OMO client integration
+(`ocx integration client enable --client omo`). It keeps the `opencodex` provider
+block in `~/.omo/agent/models.json` in step with the models enabled in opencodex.
+The synchronizer only reads the model IDs published there. It does not contact
+opencodex, CLIProxyAPI or any native provider, and it never enables or
+authenticates a provider. Model availability belongs to opencodex: enable or
+disable a model there, not in OLW.
+
+The synchronizer manages the existing `~/.omo/omo.jsonc`. First-time adoption
+replaces stock-name routing fields, including any older manual pins there, so
+review its diff first. The main model, model profiles, compaction, retry chains,
+vision models and OLW role pins are outside its scope. Generated routes use
+`opencodex` only; preserved manual overrides are not rewritten or rejected.
 
 ## Automatic behavior
 
 The managed `omo` launcher checks routing before starting upstream OMO.
 `omon` uses that launcher too. OLW checks it before ensuring its shared host.
-An unchanged version, bundle digest and user configuration require no proxy
-connection and do not rewrite configuration.
+If the OMO version, bundle digest, user configuration and published opencodex
+model list are unchanged, nothing is rewritten. Enabling or disabling a model in
+opencodex changes that list, so the next start re-plans untouched routes without
+`--force`. If the catalog is briefly unreadable, an otherwise unchanged start keeps
+the last applied routing.
 Without adoption state, a normal checked launch fails and requests explicit
 `sync --adopt`; it never silently adopts older manual pins.
 
 On change, the synchronizer reads the actual installed `omo-task.js` with a
 TypeScript syntax tree. It does not execute the bundle or infer policy from
-release notes. It extracts ordered model choices and reasoning levels, keeps
-available exact model IDs or explicitly verified same-model IDs, and maps them
-to the proxy provider. An advertised exact ID takes precedence over a mapping.
-Repeated provider lanes for the same model and reasoning level collapse.
-Unserved candidates are recorded under `skipped`; another model family is
-never invented as a replacement.
+release notes. It extracts ordered model choices and reasoning levels, then maps
+each choice to an opencodex model ID:
+
+- Each upstream choice names the OMO providers that serve it. The choice maps to
+  the opencodex service for one of them. ChatGPT/OpenAI models are published
+  without a prefix (`gpt-6-sol`); other services use `anthropic/`, `kimi/`,
+  `mimo/` (Xiaomi), `xai/`, `google/` and `opencode-go/`.
+- OMO itself requests `kimi-k3` from Kimi Code as `k3`, and the route does the
+  same. A trailing `[1m]` in an opencodex ID marks its 1M-context variant and is
+  kept.
+- `…-fast` is Senpi's priority-tier selector. opencodex publishes the same tier as
+  `<model>--fast`. Without that row, the choice is skipped rather than served at
+  the standard tier.
+- DeepSeek's rolling `deepseek-flash` ID currently identifies V4.1 Flash according
+  to [the official model table](https://api-docs.deepseek.com/quick_start/pricing),
+  so `deepseek-v4.1-flash` is used. Recheck this if the rolling ID changes.
+- If none of the named services publishes the model, the exact same ID from
+  another opencodex host is used, with hosts tried in alphabetical order (for
+  example `ollama-cloud/deepseek-v4.1-flash`). Another version, a Flash or lite
+  sibling, or another model family is never substituted.
+
+Unserved choices are recorded under `skipped`. Repeated provider lanes for the
+same model and reasoning level collapse. Reasoning levels are copied unchanged.
+opencodex publishes no reasoning controls for some hosted models, such as those on
+Ollama Cloud, so a configured level is not guaranteed there.
 
 Native review/QA agents that inherit categories retain that upstream behavior:
 their old migration-generated model overrides are removed, rather than freezing
 the inherited category list into another model table.
 
-`gpt-…-fast` is a client-side priority selector. The proxy extension exposes it
-for Responses GPT models and sends the advertised base model ID together with
-`service_tier: "priority"`. This is not a claim that the proxy advertises an
-independent fast model, nor a latency or billing guarantee.
-
-Kimi's `kimi-for-coding-highspeed` product ID maps to the proxy's advertised
-`kimi-k2.7-code-highspeed`. [Kimi's model documentation](https://www.kimi.com/code/docs/en/kimi-code/models.html)
-identifies the product ID as K2.7 Code HighSpeed. This mapping does not replace it
-with K3, nor rewrite the upstream reasoning level. On the current deployment, an
-actual request with `reasoning_effort: "none"` succeeded but returned reasoning
-tokens. A configured `off` therefore must not be described as guaranteed
-non-thinking execution through this service.
-
-DeepSeek's rolling `deepseek-flash` ID currently identifies V4.1 Flash according
-to [the official model table](https://api-docs.deepseek.com/quick_start/pricing).
-The verified mapping uses an advertised `deepseek-v4.1-flash` when the exact
-rolling ID is absent, preserving each route's reasoning level. Recheck that
-identity if the upstream rolling alias changes; older V4 Flash is not substituted.
-
-For configured OpenAI-compatible providers such as MiMo Token Plan, the proxy
-may publish context/input fields but omit the output-token limit. The standalone
-synchronizer now loads the policy authority's public SDK model catalog lazily
-when compatible providers are configured. Like the running extension, it matches
-both the configured upstream model ID and base URL to obtain missing metadata.
-It neither guesses limits nor enables/authenticates native providers. Missing
-metadata still causes omission with a diagnostic. Run `sync --force` after adding
-a provider to reconsider the available upstream routes.
-
-For the exact Ollama Cloud endpoint `https://ollama.com/v1`, which does not
-advertise output-token limits, the extension uses a 16,384-token client output
-budget, matching Senpi's Ollama default. This is not a server-maximum claim.
-Context, modalities and thinking levels remain the proxy's manual model metadata;
-`none` in its thinking levels maps explicit off to `reasoning_effort: "none"`.
-Requests still go through CLIProxyAPI; OMO never loads the Ollama API key.
+A receipt from the earlier CLIProxyAPI synchronizer is re-planned at the next
+start. Its untouched routes move to `opencodex` and are not treated as manual edits.
 
 ## Ownership and version policy
 
@@ -78,10 +71,10 @@ Requests still go through CLIProxyAPI; OMO never loads the Ollama API key.
 - The OLW-pinned OMO package is not upgraded or allowed to write a competing
   global policy. Its task routes use the same user configuration as before.
 - OLW role pins in `src/core/policy.ts`, existing binding identities, the main
-  model, model profiles, compaction, retry settings, and `models.json` overrides
-  are outside this synchronizer's ownership.
-- Initial `sync --adopt` adopts stock category/agent routing fields from the
-  earlier proxy migration. It backs up the configuration first.
+  model, model profiles, compaction, retry settings, and `models.json` are outside
+  this synchronizer's ownership.
+- Initial `sync --adopt` adopts stock category/agent routing fields. It backs up
+  the configuration first.
 - Thereafter, a routing field changed by the user is marked `overrides` and left
   alone. Other route properties, such as prompts, tools and disable flags, keep
   their values. Unrelated top-level JSONC text is preserved; the two routing
@@ -96,18 +89,15 @@ Run these from the OLW repository:
 
 ```sh
 bun run proxy:routing status          # Last applied policy, overrides and omissions
-bun run proxy:routing check --force   # Read-only diff against fresh proxy metadata
-bun run proxy:routing sync --force    # Recheck after accounts/models change
+bun run proxy:routing check --force   # Read-only diff against the current opencodex catalog
+bun run proxy:routing sync --force    # Re-plan now instead of at the next start
 ```
 
 ## Optional local model-picker scope (disabled)
 
-The user now manages availability with CLIProxyAPI **OAuth Model Disablement**.
-The active OMO scope is `all`; manual registration and UI choices take priority.
-See [manual-first model policy](proxy-model-policy.md) for the authoritative
-configuration, provider limitations and recovery. Do not automatically enable
-`referenced` scope or regenerate proxy exclusions from routing preferences.
-The commands below remain an optional local feature, not the current policy.
+The active OMO scope is `all`. Availability is managed in opencodex, and the
+commands below remain an optional local feature, not the current policy.
+Do not automatically enable `referenced` scope.
 
 ```sh
 bun run proxy:routing scope referenced  # Narrow managed omo/omon model pickers
@@ -119,15 +109,20 @@ This does not delete accounts, provider models, or routes. The launcher passes
 OMO's native `--models` option using current global categories, agents, profiles,
 main model, retry chains, compaction, vision, explicit favorites and OLW role
 defaults. Thinking-level history is not a live reference. There are no age-based
-guesses and no exception for newly added MiMo models.
+guesses and no exception for newly added models.
 
 The list is recalculated after routing preflight on each managed launch, so newly
 referenced upstream choices appear automatically, not every newly available
-proxy model. A failed reference read blocks the checked launch rather than
+model. A failed reference read blocks the checked launch rather than
 silently expanding its scope. An explicit user `--models` takes
 precedence; an explicitly selected `--model` remains accessible. Original
 `settings.json` and its `enabledModels` value are not rewritten. Existing
 sessions and clients that bypass the managed launcher are not changed.
+
+In OMO's own `enabledModels`, write the opencodex pattern as `opencodex/**`.
+A single `*` stops at `/`, so `opencodex/*` drops namespaced IDs such as
+`opencodex/anthropic/claude-opus-5-5` from the scope, and a saved default among
+them is then ignored at startup.
 
 The preference is `~/.omo/proxy-routing/model-scope.json`; every mode change saves
 the previous preference under `~/.omo/proxy-routing/backups/model-scope-*.json`.
@@ -135,22 +130,12 @@ Those files contain a `mode` value that can be reapplied with the scope command.
 Restoration to `all`
 works even if routing configuration is temporarily unreadable. Inside `/model`,
 Tab switches between `narrowed` and `all` without changing this saved preference.
-The raw proxy catalog and `--list-models` still expose all callable models; this
-feature limits the default picker/cycling scope, not API availability.
-
-The unused metadata-warning models `grok-composer-2.5-fast`,
-`claude-3-5-haiku-20241022` and `gemini-3.1-flash-image` are separately excluded in
-the proxy's OAuth model-exclusion settings for xai, claude and antigravity.
-No warnings are globally suppressed. Restoring picker scope does not remove
-those explicit exclusions; review their metadata before re-enabling them.
-In the private management UI, edit OAuth excluded models for the named provider
-and remove only the exact model ID, preserving any other exclusions. This is the
-`oauth-excluded-models` map in `~/.config/cliproxyapi/config.yaml`; the management
-API applies it to the running service without restarting active sessions.
+`--list-models` still shows every callable model; this feature limits the default
+picker/cycling scope, not API availability.
 
 ## First-time activation
 
-First-time activation:
+First enable opencodex's OMO integration, then run:
 
 ```sh
 bun run build
@@ -181,11 +166,9 @@ in `proxy:routing status`'s `upstream` field.
 
 The synchronizer runs on Bun and uses Linux `flock` to serialize concurrent
 starts. `check` and `sync` accept explicit `--upstream`, `--config`,
-`--state-dir`, `--client` and `--management` paths for isolated verification.
-`status` accepts `--state-dir`. Proxy-only account/model changes do not invalidate
-the unchanged-startup shortcut: run `sync --force` to reconsider routing after
-those changes. The provider's normal catalog refresh still runs independently.
-There is no background polling service and no running-session restart.
+`--state-dir` and `--catalog` paths for isolated verification.
+`status` accepts `--state-dir`. opencodex refreshes the catalog itself; there is
+no background polling service and no running-session restart.
 `--version`, `--help` and maintenance commands remain usable without a routing
 check. Active sessions may retain their already-loaded policy until restarted.
 
@@ -197,10 +180,11 @@ Configuration and receipt replacement are atomic per file; the journal repairs
 an interrupted publication before the next sync. A detected concurrent manual
 edit is not overwritten.
 
-An unknown upstream layout, an unusable complete model chain, or a proxy error
-during an update leaves the last valid configuration intact and fails the
-preflight with an actionable error. It does not enable native providers or
-substitute an arbitrary model. Fix the reported problem and run `sync --force`.
+An unknown upstream layout, an unusable complete model chain, or a missing or
+disabled opencodex catalog during an update leaves the last valid configuration
+intact and fails the preflight with an actionable error. It does not enable native
+providers or substitute an arbitrary model. Fix the reported problem and run
+`sync --force`.
 If even one managed route has no surviving model candidate, the entire update
 is rejected rather than publishing a partial configuration.
 If a pending journal reports a conflicting edit, inspect it and the backup before
@@ -222,10 +206,11 @@ terminated. There is currently no single global tracking-disable switch.
 
 ## Verification
 
-`bun test tests/proxy` covers extraction, order/reasoning, protected edits,
-unavailable routes, actual HTTP payloads, refresh guards, concurrent CLI starts
-and interrupted publication. `bun scripts/qa-routing.ts` uses live accounts to
-launch a quick-category child and a named explore child through the managed
-launcher. Each must read an unseen random file value and deliver a real runtime
+`bun test tests/proxy` covers extraction, order/reasoning, opencodex service
+mapping, protected edits, unavailable routes, catalog changes, migration of
+CLIProxyAPI receipts, concurrent CLI starts and interrupted publication.
+`bun scripts/qa-routing.ts` uses live accounts to launch a quick-category child
+and a named explore child through the managed launcher. Both must resolve to
+`opencodex`, read an unseen random file value and deliver a real runtime
 completion; the parent merely repeating a requested string is not sufficient.
 The live probe cleans up its owned temporary directory after both children finish.

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding } from "../src/core/contracts";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema, resultSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { createHerdrClient } from "../src/herdr";
 import { QaError } from "./qa-rpc";
@@ -124,16 +125,11 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
       const client = await attach(binding);
       clients.push(client);
       const state = await client.getState();
-      const expected = {
-        supervisor: ["cliproxyapi", "gpt-6-astra", "high"],
-        parent: ["cliproxyapi", "claude-opus-5-5", "xhigh"],
-        child: ["cliproxyapi", "claude-opus-5-5", "xhigh"],
-      } as const;
-      const tuple = expected[binding.assignment.role];
+      const expected = modelForRole(binding.assignment.role);
       if (
-        state.model?.provider !== tuple[0] ||
-        state.model.id !== tuple[1] ||
-        state.thinkingLevel !== tuple[2]
+        state.model?.provider !== expected.provider ||
+        state.model.id !== expected.modelId ||
+        state.thinkingLevel !== expected.thinking
       ) {
         throw new QaError(`Wrong actual model tuple for ${binding.assignment.role}`);
       }
@@ -148,9 +144,9 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
         described.value.durableSessionId !== binding.durableSessionId ||
         described.value.sessionPath !== binding.sessionPath ||
         described.value.cwd !== binding.cwd ||
-        described.value.provider !== tuple[0] ||
-        described.value.modelId !== tuple[1] ||
-        described.value.thinking !== tuple[2]
+        described.value.provider !== expected.provider ||
+        described.value.modelId !== expected.modelId ||
+        described.value.thinking !== expected.thinking
       ) {
         throw new QaError(`Wrong runtime identity after ${binding.assignment.role} reload`);
       }
@@ -161,7 +157,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
           role: binding.assignment.role,
           workspace: binding.workspaceId,
           cwd: binding.cwd,
-          model: tuple.join("/"),
+          model: [expected.provider, expected.modelId, expected.thinking].join("/"),
         }),
       );
     }

@@ -73,6 +73,40 @@ test("selection scope follows changed references rather than a fixed model allow
   expect(result).toEqual(["cliproxyapi/new-model"]);
 });
 
+test("selection scope keeps opencodex routes and qualifies a bare selection with the main provider", async () => {
+  // Given everything routed through opencodex, including namespaced model IDs.
+  const home = await mkdtemp(join(tmpdir(), "olw-model-scope-ocx-"));
+  try {
+    await mkdir(join(home, ".omo/agent"), { recursive: true });
+    await mkdir(join(home, ".omo/proxy-routing"), { recursive: true });
+    await writeFile(
+      join(home, ".omo/agent/settings.json"),
+      JSON.stringify({
+        defaultProvider: "opencodex",
+        defaultModel: "anthropic/claude-opus-5-5",
+        compaction: { model: "opencodex/gpt-5.6-luna" },
+      }),
+    );
+    await writeFile(
+      join(home, ".omo/omo.jsonc"),
+      '{"categories":{"quick":{"models":[{"model":"opencodex/gpt-6-luna--fast"}]}}}',
+    );
+    await writeFile(join(home, ".omo/proxy-routing/model-scope.json"), '{"mode":"referenced"}');
+    // When the launcher narrows the picker for a bare --model selection.
+    const args = await modelScopeArguments(home, ["--model", "gpt-6-sol"]);
+    // Then opencodex references stay and the selection uses the main provider.
+    expect(args[1]?.split(",")).toEqual([
+      "opencodex/anthropic/claude-opus-5-5",
+      "opencodex/gpt-5.6-luna",
+      "opencodex/gpt-6-astra",
+      "opencodex/gpt-6-luna--fast",
+      "opencodex/gpt-6-sol",
+    ]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test.each(["referenced", "all"] as const)(
   "scope CLI selects %s without editing ordinary settings or needing a proxy",
   async (mode) => {

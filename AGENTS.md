@@ -38,7 +38,8 @@ and the user's existing workspaces are read-only unless explicitly assigned.
   authoritative. Do not automatically regenerate exclusions or prune manually
   registered OpenAI-compatible models from current OMO routing preferences.
 - Keep OMO picker scope at `all` unless the user explicitly requests a local
-  restriction again. OLW routing reads proxy availability; it does not own it.
+  restriction again. OLW routing reads the opencodex OMO catalog
+  (`providers.opencodex` in `models.json`); it does not own availability.
 - Back up policy before an authorized change, preserve unrelated user entries,
   and verify the live catalog without restarting existing sessions.
 

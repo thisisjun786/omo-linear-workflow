@@ -11,6 +11,7 @@ import type {
   Result,
   ScopeSnapshot,
 } from "../src/core/contracts";
+import { modelForRole } from "../src/core/policy";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import {
@@ -91,9 +92,9 @@ async function fixture(run: (fixture: Fixture) => Promise<void>): Promise<void> 
     Binding["assignment"]["role"],
     { readonly provider: string; readonly modelId: string; readonly thinking: string }
   > = {
-    supervisor: { provider: "cliproxyapi", modelId: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
-    child: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
+    supervisor: modelForRole("supervisor"),
+    parent: modelForRole("parent"),
+    child: modelForRole("child"),
   };
   const activate = (binding: Binding) => {
     value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
@@ -253,20 +254,12 @@ class Harness implements RuntimePort {
 }
 
 function context(binding: Binding, mode: SessionContextPort["mode"] = "rpc"): SessionContextPort {
-  const role = binding.assignment.role;
-  const models: Record<
-    Binding["assignment"]["role"],
-    { readonly provider: string; readonly id: string; readonly thinking: string }
-  > = {
-    supervisor: { provider: "cliproxyapi", id: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "cliproxyapi", id: "claude-opus-5-5", thinking: "xhigh" },
-    child: { provider: "cliproxyapi", id: "claude-opus-5-5", thinking: "xhigh" },
-  };
+  const { provider, modelId, thinking } = modelForRole(binding.assignment.role);
   return {
     cwd: binding.cwd,
     mode,
-    model: models[role],
-    thinkingLevel: models[role].thinking,
+    model: { provider, id: modelId },
+    thinkingLevel: thinking,
     disableModelFallbackForSession: () => undefined,
     sessionManager: {
       getSessionId: () => binding.durableSessionId,
@@ -355,9 +348,7 @@ describe("native delivery extension", () => {
           durableSessionId: parent.durableSessionId,
           sessionPath: parent.sessionPath,
           cwd: parent.cwd,
-          provider: "cliproxyapi",
-          modelId: "claude-opus-5-5",
-          thinking: "xhigh",
+          ...modelForRole("parent"),
           extensionProtocol: 1,
         },
       });

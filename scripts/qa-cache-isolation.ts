@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema } from "../src/core/schema";
 import { attach, idle } from "./qa-hierarchy";
 import { checkedQaCommand, prepareQaWorld } from "./qa-world";
@@ -141,11 +142,8 @@ export async function exercise(cache: string | undefined) {
       const tools = assistants.flatMap((message) =>
         message.content.filter((part) => part.type === "toolCall").map((call) => call.name),
       );
-      assert.equal(state.model?.provider, "cliproxyapi");
-      assert.equal(
-        state.model.id,
-        binding.assignment.role === "supervisor" ? "gpt-6-astra" : "claude-opus-5-5",
-      );
+      assert.equal(state.model?.provider, modelForRole(binding.assignment.role).provider);
+      assert.equal(state.model.id, modelForRole(binding.assignment.role).modelId);
       result.sessions.push({
         role: binding.assignment.role,
         id: state.sessionId,

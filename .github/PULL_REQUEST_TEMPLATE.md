@@ -21,7 +21,7 @@
 - [ ] Focused on one change; unrelated refactors left out
 - [ ] Behavioral changes have a test that fails without the fix (machine behavior, not prose)
 - [ ] No sleeps or timing-based waits in tests
-- [ ] Manual proxy registrations and enable/disable choices are preserved
+- [ ] The user's opencodex model enable/disable choices are preserved
 - [ ] `CHANGELOG.md` `## [Unreleased]` updated if user-facing
 - [ ] `README.md` and `README.ko.md` both updated if the README is affected
 - [ ] No credentials, SQLite files or `.omo/` runtime artifacts included

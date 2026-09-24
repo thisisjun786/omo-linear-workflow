@@ -22,10 +22,20 @@ published.
 
 ### Changed
 
+- Models route through opencodex. The routing synchronizer reads the
+  opencodex-owned catalog in `models.json`, and OLW role pins use `opencodex`.
 - Child fixture standby permits internal workers only after explicit instruction;
   creating additional OLW roles and accessing live Linear remain forbidden.
 - Only children may hold an issue-packet goal. Supervisor/parent waiting and model
   assignments remain unchanged; existing bindings are not reinitialized.
+
+### Removed
+
+- The CLIProxyAPI model extension (`dist/proxy/index.js`), its `/proxy-refresh`
+  command, access files and manual-first CLIProxyAPI policy document. Role
+  launches and the shared host profile no longer load it. Remove that path from
+  OMO's `settings.json` `extensions`. A routing receipt without a provider is
+  still re-planned at the next start.
 
 ## [0.1.0]
 

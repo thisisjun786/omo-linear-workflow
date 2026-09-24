@@ -100,7 +100,7 @@ not JSON parsing of a Markdown description.
 
 These repairs belong to OLW's host preparation, not a global package patch.
 Before allocating a role, the CLI validates the actual shared host profile. A
-missing proxy extension or incompatible runtime cache profile produces
+missing required extension or incompatible runtime cache profile produces
 `host_profile_mismatch` with an explicit official-handoff recovery action; OLW
 does not silently replace the host or reserve a role that cannot start.
 

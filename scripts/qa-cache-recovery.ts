@@ -144,7 +144,7 @@ async function main() {
     const warm = await exercise(shared);
     log.warm = warm;
     assert.equal(warm.sessions.flatMap((session) => session.errors).length, 0);
-    assert.equal(await Bun.file(join(warm.root, "dist/proxy/index.js")).exists(), false);
+    assert.equal(await Bun.file(join(warm.root, "dist/extension/index.js")).exists(), false);
     console.log("QA_PHASE warm root removed; shared cache retained as negative control");
     world = await prepareQaWorld();
     const qa = world;

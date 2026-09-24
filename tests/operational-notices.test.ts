@@ -136,7 +136,7 @@ function assistant(stopReason: "error" | "stop" | "aborted" = "error", timestamp
     role: "assistant" as const,
     content: [],
     api: "anthropic-messages" as const,
-    provider: "cliproxyapi",
+    provider: "opencodex",
     model: "claude-opus-5-5",
     stopReason,
     timestamp,

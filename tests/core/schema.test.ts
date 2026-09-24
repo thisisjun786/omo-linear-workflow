@@ -88,7 +88,7 @@ describe("frozen core schemas and role policy", () => {
         durableSessionId: "session",
         sessionPath,
         cwd: root,
-        provider: "cliproxyapi",
+        provider: "opencodex",
         modelId: "kimi-k3",
         thinking: "max",
         extensionProtocol: 1,

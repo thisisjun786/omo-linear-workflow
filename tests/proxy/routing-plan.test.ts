@@ -167,7 +167,7 @@ describe("upstream opencodex routing", () => {
   test("removes migration overrides from agents inheriting upstream categories", () => {
     const current: RoutingGroups = {
       categories: {},
-      agents: { reviewer: { models: ["cliproxyapi/opus"], disable: false } },
+      agents: { reviewer: { models: ["opencodex/opus"], disable: false } },
     };
     const result = planRouting(policy, available, current);
     expect(result.groups.agents["reviewer"]).toEqual({ disable: false });

@@ -955,8 +955,6 @@ export class Orchestrator {
           join(this.#root, "node_modules/.bin/omo"),
           "-e",
           join(this.#root, "dist/extension/index.js"),
-          "-e",
-          join(this.#root, "dist/proxy/index.js"),
           "--session",
           seedPath,
           "--name",

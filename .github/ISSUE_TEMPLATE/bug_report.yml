@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. Strip API keys, management keys, OAuth tokens and anything from `~/.config/cliproxyapi/` before pasting logs or config.
+        Thanks for the report. Strip API keys, OAuth tokens and anything from `~/.opencodex/` before pasting logs or config.
 
   - type: input
     id: version
@@ -21,7 +21,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS and architecture, Bun, pnpm, Node and git versions. Add Rust and Zig versions if the problem is in the Herdr build. Add the OMO and CLIProxyAPI versions if the problem is in the proxy extension or routing.
+      description: OS and architecture, Bun, pnpm, Node and git versions. Add Rust and Zig versions if the problem is in the Herdr build. Add the OMO and opencodex versions if the problem is in model routing.
       placeholder: |
         Linux x64 (Ubuntu 24.04)
         bun 1.4.0, pnpm 10.33.3, node 24.20.0, git 2.47

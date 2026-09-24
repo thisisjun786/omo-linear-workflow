@@ -43,9 +43,9 @@ Herdr isn't an optional component you install and match separately. It's OLW's
 required managed runtime. `bun run herdr` runs this build, and OLW creates its
 roles inside Herdr. The TUI and the shared host run this repository's
 `node_modules/.bin/omo`, so global OMO updates never mix versions. You also need
-CLIProxyAPI serving the role models below, plus the proxy access configuration.
-This repository doesn't issue or copy provider credentials. Account logins are
-managed in CLIProxyAPI.
+opencodex serving the role models below through its OMO client integration
+(`ocx integration client enable --client omo`). This repository doesn't issue or
+copy provider credentials. Account logins are managed in opencodex.
 
 ## Contributing and releases
 
@@ -61,64 +61,15 @@ runs those checks before publishing a GitHub release. The clone above installs
 [GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)
 for published versions and source archives.
 
-## Proxy model extension
+## Models through opencodex
 
-`bun run build` produces two separate bundles: `dist/extension/index.js` for
-session control and `dist/proxy/index.js` for model connectivity. New OLW role
-sessions and the generated shared host profile load both explicitly, so they
-don't depend on the user's global extension settings. The proxy extension can
-also be used on its own with regular OMO.
-
-```sh
-omo -e /absolute/path/to/omo-linear-workflow/dist/proxy/index.js
-```
-
-Register the same path in the `extensions` array of OMO's `settings.json` and it
-loads from the next start. Don't register the older standalone proxy extension
-path alongside it.
-
-Access files are read from the two locations below by default. Replace the
-example keys with real values and keep file permissions at `600`. Never put keys
-or provider OAuth files in the repository.
-
-`~/.config/cliproxyapi/omo-client.json`:
-
-```json
-{"baseUrl":"http://127.0.0.1:8317/v1","apiKey":"CLIENT_KEY"}
-```
-
-`~/.config/cliproxyapi/management-access.json`:
-
-```json
-{"managementUrl":"https://your-host:8318/management.html","managementKey":"MANAGEMENT_KEY"}
-```
-
-The client key is used for model calls. The management key is used to look up
-model definitions and aliases. Chat models are registered by merging `/v1/models`
-with management metadata, and refreshed at startup, when a new agent runs, and on
-`/proxy-refresh`. If some metadata lookups fail, the last successful list is kept.
-Individual models with incomplete data are excluded with a warning, and models
-dedicated to image or video generation aren't registered. Availability is checked
-right before each request, then the call goes out over a real Responses, Messages
-or Chat Completions transport.
-
-`providers.cliproxyapi.modelOverrides` in `models.json` still applies to user
-settings such as context size. Category and agent routing now targets opencodex
-(see below). The explicit per-role model assignments for OLW are kept separately. This feature
-doesn't enable other providers or restore direct authentication. A cost of `0`
-for a model with no registered price means no information, not free.
-
-### Model registration and disablement policy
-
-Model registration and enablement are managed directly by the user in the
-CLIProxyAPI management UI. OAuth models are toggled through **OAuth Model
-Disablement**, and OLW only reads that policy. Manual registration, enabling and
-disabling take priority over automatic routing recommendations. The current OMO
-list restriction has been lifted with `scope all`, and unused models aren't
-automatically blocked again at startup. Directly registered OpenAI-compatible
-providers such as MiMo aren't subject to the OAuth policy, so their separate
-model registration list is preserved. Management files, exceptions and recovery
-steps follow the [manual-first model policy](docs/proxy-model-policy.md).
+OLW role sessions and the shared host use OMO's `opencodex` provider directly.
+opencodex's OMO integration keeps `providers.opencodex` in `~/.omo/agent/models.json`
+current; OLW only reads it and loads no model extension of its own. Model
+registration, enablement and account logins belong to opencodex: enable or
+disable a model there, not in OLW. Do not add `modelOverrides` inside
+`providers.opencodex`, because opencodex treats foreign edits to its block as a
+conflict and stops refreshing it.
 
 ### Automatic upstream routing tracking
 
@@ -143,8 +94,8 @@ described in the [automatic routing operations guide](docs/proxy-routing.md).
 
 Verification: `bun test tests/proxy`, `bun run typecheck`, `bun run qa:proxy`.
 The last command uses real accounts to verify file-reading tool calls for the
-three role models. It needs the local access files and doesn't create or change
-Herdr workspaces or existing role sessions.
+three role models through opencodex. It doesn't create or change Herdr
+workspaces or existing role sessions.
 
 Linear authentication and lookups go through OMO's existing Linear MCP connection. When authentication is needed, the user runs `/mcp auth linear`. Then ask OMO to read `skills/define/SKILL.md` (`olw-define`) and `skills/plan/SKILL.md` (`olw-plan`) to prepare a revision-pinned snapshot. Import doesn't prove remote authentication or the latest revision, so the MCP verification steps in the skills must not be skipped. The local QA fixture `tests/fixtures/scope.json` must always be imported with `--fixture`.
 

@@ -7,7 +7,6 @@ const EXTENSIONS = [
   "./node_modules/omo-ai/plugin",
   "./node_modules/omo-ai/plugin/extensions/omo-member.js",
   "./dist/extension/index.js",
-  "./dist/proxy/index.js",
 ] as const;
 
 const hostStatusSchema = z.object({

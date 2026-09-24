@@ -7,7 +7,7 @@ The prerequisite is opencodex's OMO client integration
 (`ocx integration client enable --client omo`). It keeps the `opencodex` provider
 block in `~/.omo/agent/models.json` in step with the models enabled in opencodex.
 The synchronizer only reads the model IDs published there. It does not contact
-opencodex, CLIProxyAPI or any native provider, and it never enables or
+opencodex or any native provider, and it never enables or
 authenticates a provider. Model availability belongs to opencodex: enable or
 disable a model there, not in OLW.
 
@@ -60,9 +60,6 @@ Ollama Cloud, so a configured level is not guaranteed there.
 Native review/QA agents that inherit categories retain that upstream behavior:
 their old migration-generated model overrides are removed, rather than freezing
 the inherited category list into another model table.
-
-A receipt from the earlier CLIProxyAPI synchronizer is re-planned at the next
-start. Its untouched routes move to `opencodex` and are not treated as manual edits.
 
 ## Ownership and version policy
 
@@ -207,8 +204,8 @@ terminated. There is currently no single global tracking-disable switch.
 ## Verification
 
 `bun test tests/proxy` covers extraction, order/reasoning, opencodex service
-mapping, protected edits, unavailable routes, catalog changes, migration of
-CLIProxyAPI receipts, concurrent CLI starts and interrupted publication.
+mapping, protected edits, unavailable routes, catalog changes, concurrent CLI
+starts and interrupted publication.
 `bun scripts/qa-routing.ts` uses live accounts to launch a quick-category child
 and a named explore child through the managed launcher. Both must resolve to
 `opencodex`, read an unseen random file value and deliver a real runtime

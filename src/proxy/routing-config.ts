@@ -11,8 +11,8 @@ export const groupsSchema = z.object({
 });
 export const receiptSchema = z.object({
   generation: z.string(),
-  // Receipts written before the opencodex migration targeted CLIProxyAPI.
-  provider: z.string().default("cliproxyapi"),
+  // A receipt without a provider predates opencodex routing and is re-planned.
+  provider: z.string().optional(),
   version: z.string(),
   digest: z.string(),
   upstream: z.string(),

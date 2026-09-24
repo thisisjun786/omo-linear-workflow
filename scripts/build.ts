@@ -18,7 +18,6 @@ async function build(entrypoint: string, outfile: string, target: "bun" | "node"
     target,
     format: "esm",
     packages: "external",
-    external: ["@earendil-works/pi-ai", "@earendil-works/pi-ai/*"],
     sourcemap: "external",
     minify: false,
   });
@@ -31,7 +30,6 @@ async function build(entrypoint: string, outfile: string, target: "bun" | "node"
 await build("src/cli.ts", "dist/cli.js", "bun");
 await build("src/core/worker.ts", "dist/core/worker.js", "bun");
 await build("src/extension/index.ts", "dist/extension/index.js", "node");
-await build("src/proxy/index.ts", "dist/proxy/index.js", "node");
 await build("scripts/proxy-routing.ts", "dist/proxy/routing.js", "bun");
 await build("scripts/omo.ts", "dist/omo.js", "bun");
 process.stdout.write(

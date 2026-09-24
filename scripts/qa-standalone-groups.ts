@@ -496,8 +496,6 @@ async function main() {
             join(qa.controlRoot, "node_modules/.bin/omo"),
             "-e",
             join(qa.controlRoot, "dist/extension/index.js"),
-            "-e",
-            join(qa.controlRoot, "dist/proxy/index.js"),
             "--session",
             binding.sessionPath,
             "--name",

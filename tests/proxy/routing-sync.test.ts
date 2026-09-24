@@ -42,7 +42,6 @@ function source(chain: string | readonly Rung[]): string {
 function catalog(ids: readonly string[]): string {
   return JSON.stringify({
     providers: {
-      cliproxyapi: { modelOverrides: {} },
       opencodex: {
         baseUrl: "http://127.0.0.1:10100/v1",
         api: "openai-completions",
@@ -51,10 +50,6 @@ function catalog(ids: readonly string[]): string {
     },
   });
 }
-
-const quickRoute = z.object({
-  categories: z.object({ quick: z.object({ models: z.array(z.unknown()) }) }),
-});
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "olw-routing-"));
@@ -140,36 +135,6 @@ describe("routing synchronization real filesystem boundary", () => {
     expect(next.digest).not.toBe(first.digest);
   });
 
-  test("migrates untouched CLIProxyAPI routes to opencodex without --force", async () => {
-    // Given the state and configuration written by the CLIProxyAPI-era synchronizer.
-    const world = await fixture();
-    const current = await syncRouting(world.options);
-    const legacyManaged = groupsSchema.parse(
-      JSON.parse(JSON.stringify(current.managed).replaceAll('"opencodex/', '"cliproxyapi/')),
-    );
-    const legacyConfig = editRoutingConfig(
-      await readFile(world.options.configPath, "utf8"),
-      legacyManaged,
-    );
-    await writeFile(world.options.configPath, legacyConfig);
-    const legacy: Record<string, unknown> = {
-      ...current,
-      managed: legacyManaged,
-      configDigest: digest(legacyConfig),
-    };
-    delete legacy["provider"];
-    await writeFile(join(world.options.stateDir, "state.json"), JSON.stringify(legacy));
-    // When the next ordinary start checks routing.
-    const migrated = await syncRouting({ ...world.options, adopt: false });
-    // Then every untouched route moves to opencodex and none is treated as a manual override.
-    expect(migrated.provider).toBe("opencodex");
-    expect(migrated.overrides).toEqual([]);
-    expect(
-      quickRoute.parse(Bun.JSON5.parse(await readFile(world.options.configPath, "utf8"))).categories
-        .quick.models,
-    ).toEqual([{ model: "opencodex/gpt-6-luna", reasoning: "low" }]);
-  });
-
   test("a changed opencodex catalog updates untouched routes at the next start", async () => {
     // Given a preferred model that opencodex does not publish yet.
     const world = await fixture();
@@ -214,7 +179,7 @@ describe("routing synchronization real filesystem boundary", () => {
     const config = await readFile(world.options.configPath, "utf8"),
       state = await world.state();
     await writeFile(world.bundle, source("gpt-6-sol"));
-    await writeFile(world.options.catalogPath, JSON.stringify({ providers: { cliproxyapi: {} } }));
+    await writeFile(world.options.catalogPath, JSON.stringify({ providers: { other: {} } }));
     await expect(syncRouting(world.options)).rejects.toThrow("opencodex");
     expect(await readFile(world.options.configPath, "utf8")).toBe(config);
     expect(await world.state()).toBe(state);

@@ -47,9 +47,8 @@ Project rules that CI and review will hold you to:
 - No sleeps or timing-based waits in tests. Subscribe to the event or state
   change first, trigger the action, then await it with a bounded timeout.
 - Don't restart running Herdr servers or OMO sessions from build or test code.
-- Preserve the user's manual proxy choices. Direct registrations and
-  management-UI enable/disable decisions are authoritative; see
-  [docs/proxy-model-policy.md](docs/proxy-model-policy.md).
+- Preserve the user's model choices. Enable/disable decisions made in opencodex
+  are authoritative; OLW only reads the catalog it publishes to OMO.
 - Never modify real Linear objects during QA. Use `--fixture` and the owned
   fixtures under `tests/fixtures/`.
 - No credentials, SQLite files, `.omo/state/`, `.omo/herdr/` artifacts or other
@@ -110,8 +109,7 @@ approach the reviewer will say so once and explain why.
 Use the issue forms under `.github/ISSUE_TEMPLATE/`. A useful bug report has the
 OLW version (`package.json` or the commit SHA), OS and tool versions, exact
 commands, expected and actual results, and redacted logs. Strip API keys,
-management keys, OAuth tokens and anything from `~/.config/cliproxyapi/` before
-pasting.
+OAuth tokens and anything from `~/.opencodex/` before pasting.
 
 Feature requests should describe the problem and the outcome you want. A
 proposed design is welcome but optional.

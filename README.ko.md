@@ -40,8 +40,8 @@ OMO 지원 패치가 포함된 Herdr도 함께 준비합니다. `cargo`나 `zig`
 
 Herdr는 별도로 맞춰 설치하는 선택 항목이 아니라 OLW의 필수 관리형 런타임입니다.
 `bun run herdr`로 이 빌드를 실행할 수 있으며, OLW 역할 생성은 Herdr 안에서 실행합니다.
-TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하므로 전역 OMO 업데이트와 버전이 섞이지 않습니다. 아래 역할 모델을 제공하는 CLIProxyAPI와 프록시 접근 설정도 필요합니다.
-이 저장소가 제공사 자격 증명을 발급하거나 복사하지는 않습니다. 계정 로그인은 CLIProxyAPI에서 관리합니다.
+TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하므로 전역 OMO 업데이트와 버전이 섞이지 않습니다. 아래 역할 모델을 OMO 클라이언트 연동(`ocx integration client enable --client omo`)으로 제공하는 opencodex도 필요합니다.
+이 저장소가 제공사 자격 증명을 발급하거나 복사하지는 않습니다. 계정 로그인은 opencodex에서 관리합니다.
 
 ## 기여와 릴리즈
 
@@ -56,56 +56,14 @@ CI는 제공자 인증 없이 필수 네이티브 Herdr 빌드와 격리 설치 
 추가합니다. 발행된 버전과 소스 압축 파일은
 [GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)에서 확인합니다.
 
-## 프록시 모델 확장
+## opencodex를 통한 모델
 
-`bun run build`는 세션 제어용 `dist/extension/index.js`와 모델 연결용
-`dist/proxy/index.js`를 각각 만듭니다. 새 OLW 역할 세션과 생성된 공유 호스트
-프로필은 둘 다 명시적으로 로드하므로 사용자 전역 확장 설정에 의존하지 않습니다.
-프록시 확장만 일반 OMO에서 사용할 수도 있습니다.
-
-```sh
-omo -e /absolute/path/to/omo-linear-workflow/dist/proxy/index.js
-```
-
-OMO의 `settings.json`에 있는 `extensions` 배열에 같은 경로를 등록하면 다음
-시작부터 로드합니다. 기존 독립 프록시 확장 경로는 함께 등록하지 않습니다.
-
-접근 파일은 기본적으로 아래 두 곳에서 읽습니다. 예시의 키를 실제 값으로 바꾸고
-파일 권한을 `600`으로 유지합니다. 저장소에는 키나 제공사 OAuth 파일을 넣지 않습니다.
-
-`~/.config/cliproxyapi/omo-client.json`:
-
-```json
-{"baseUrl":"http://127.0.0.1:8317/v1","apiKey":"CLIENT_KEY"}
-```
-
-`~/.config/cliproxyapi/management-access.json`:
-
-```json
-{"managementUrl":"https://your-host:8318/management.html","managementKey":"MANAGEMENT_KEY"}
-```
-
-클라이언트 키는 모델 호출에, 관리 키는 모델 정의와 별칭 조회에 사용합니다.
-`/v1/models`와 관리 메타데이터를 합쳐 채팅 모델을 등록하고, 시작·새 에이전트 실행·
-`/proxy-refresh` 때 갱신합니다. 일부 메타데이터 조회가 실패하면 마지막 성공 목록을
-유지합니다. 불완전한 개별 모델은 경고와 함께 제외하며 이미지·영상 생성 전용
-모델은 등록하지 않습니다. 요청 직전에 가용성을 검사하고 실제 Responses,
-Messages 또는 Chat Completions 전송으로 연결합니다.
-
-`models.json`의 `providers.cliproxyapi.modelOverrides`는 컨텍스트 등 사용자 설정에
-계속 적용됩니다. 카테고리·에이전트 라우팅은 이제 opencodex를 대상으로 합니다(아래 참고).
-OLW 역할별 명시적 모델 지정은 별도로 유지합니다. 이 기능이 다른 제공자를 활성화하거나 직접 인증을 복원하지는 않습니다.
-등록 가격이 없는 모델의 비용 `0`은 무료가 아니라 정보 없음입니다.
-
-### 모델 등록과 비활성화 정책
-
-모델 등록과 사용 여부는 사용자가 CLIProxyAPI 관리 화면에서 직접 관리합니다.
-OAuth 모델은 **OAuth Model Disablement**로 켜고 끄며, OLW는 이 정책을 읽기만 합니다.
-수동 등록·활성화·비활성화가 자동 라우팅 추천보다 우선합니다. 현재 OMO 목록 제한은
-`scope all`로 해제했고, 시작할 때 미사용 모델을 자동으로 다시 차단하지 않습니다.
-MiMo처럼 직접 등록한 OpenAI 호환 제공자는 OAuth 정책 대상이 아니므로 별도 모델
-등록 목록을 보존합니다. 관리 파일·예외·복구 절차는
-[수동 우선 모델 정책](docs/proxy-model-policy.md)을 따릅니다.
+OLW 역할 세션과 공유 호스트는 OMO의 `opencodex` 제공자를 직접 사용합니다.
+opencodex의 OMO 연동이 `~/.omo/agent/models.json`의 `providers.opencodex`를 최신으로
+유지하며, OLW는 이를 읽기만 하고 자체 모델 확장을 로드하지 않습니다. 모델 등록·활성화와
+계정 로그인은 opencodex가 관리하므로 모델은 OLW가 아니라 opencodex에서 켜고 끕니다.
+opencodex는 자기 블록의 외부 편집을 충돌로 보고 갱신을 멈추므로
+`providers.opencodex` 안에 `modelOverrides`를 넣지 않습니다.
 
 ### 업스트림 라우팅 자동 추적
 
@@ -127,8 +85,8 @@ bun run proxy:routing sync --force
 [자동 라우팅 운영 안내](docs/proxy-routing.md)에 있습니다.
 
 검증: `bun test tests/proxy`, `bun run typecheck`, `bun run qa:proxy`.
-마지막 명령은 실제 계정을 사용해 세 역할 모델의 파일 읽기 도구 호출을 검증합니다.
-로컬 접근 파일이 필요하며 Herdr 작업 공간이나 기존 역할 세션을 만들거나 바꾸지 않습니다.
+마지막 명령은 실제 계정을 사용해 opencodex를 거친 세 역할 모델의 파일 읽기 도구 호출을 검증합니다.
+Herdr 작업 공간이나 기존 역할 세션을 만들거나 바꾸지 않습니다.
 
 Linear 인증과 조회는 OMO의 기존 Linear MCP 연결을 사용합니다. 인증이 필요하면 사용자가 `/mcp auth linear`를 실행합니다. 이후 `skills/define/SKILL.md`(`olw-define`), `skills/plan/SKILL.md`(`olw-plan`)를 읽도록 요청해 revision이 고정된 snapshot을 준비합니다. import는 원격 인증이나 최신 revision을 증명하지 않으므로 skill의 MCP 확인 절차를 생략하면 안 됩니다. 로컬 QA fixture인 `tests/fixtures/scope.json`에는 반드시 `--fixture`를 붙입니다.
 

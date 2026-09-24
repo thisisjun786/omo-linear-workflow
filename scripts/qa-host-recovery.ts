@@ -34,7 +34,7 @@ const created = z.object({
   readiness: z.literal("ready"),
   execution: z.literal("brief_accepted"),
 });
-const models = ["gpt-6-astra", "claude-opus-5-5"] as const;
+const models = [modelForRole("supervisor").modelId, modelForRole("parent").modelId];
 const evidenceDir = join(import.meta.dir, "../.omo/evidence/real-use-repairs/host-recovery");
 
 async function main() {
@@ -81,7 +81,7 @@ async function main() {
   };
   try {
     const profilePath = join(qa.controlRoot, "omo-host.json");
-    // Build the old profile from the real launch spec: only the proxy extension is absent.
+    // Build the old profile from the real launch spec: only the OLW extension is absent.
     const full = {
       spec_version: 1,
       core: {
@@ -91,7 +91,6 @@ async function main() {
           "./node_modules/omo-ai/plugin",
           "./node_modules/omo-ai/plugin/extensions/omo-member.js",
           "./dist/extension/index.js",
-          "./dist/proxy/index.js",
         ],
       },
       tunables: { coldStart: "persistent" },
@@ -122,7 +121,9 @@ async function main() {
     assert.equal(before.reachable, true);
     assert.equal(before.sessions.worker, 0);
     assert.ok(
-      !before.launchProfile?.core.extensions.some((path) => path.endsWith("/dist/proxy/index.js")),
+      !before.launchProfile?.core.extensions.some((path) =>
+        path.endsWith("/dist/extension/index.js"),
+      ),
     );
     // Native durable fixture is owned by this script, not by the OLW registry.
     const manager = SessionManager.create(
@@ -150,8 +151,6 @@ async function main() {
     );
     assert.ok(fixtureIdentity?.durableSessionId);
     fixtureSession = { id: opened.sessionId, path, durable: fixtureIdentity.durableSessionId };
-    const oldModels = await native.getAvailableModels();
-    assert.ok(!oldModels.some((m) => m.provider === "cliproxyapi"));
     const anchor = createHerdrClient(qa.herdrSocket);
     let focus: string | null;
     let workspaceCount: number;
@@ -181,7 +180,7 @@ async function main() {
     assert.equal(rejected.code, 3);
     const mismatch = refusal.parse(JSON.parse(rejected.stdout));
     assert.ok(
-      mismatch.error.details.missingExtensions.some((p) => p.endsWith("/dist/proxy/index.js")),
+      mismatch.error.details.missingExtensions.some((p) => p.endsWith("/dist/extension/index.js")),
     );
     assert.deepEqual(mismatch.error.details.recovery.argv, [
       host,
@@ -222,7 +221,9 @@ async function main() {
         before.generation !== null &&
         after.generation > before.generation,
     );
-    assert.ok(after.launchProfile?.core.extensions.some((p) => p.endsWith("/dist/proxy/index.js")));
+    assert.ok(
+      after.launchProfile?.core.extensions.some((p) => p.endsWith("/dist/extension/index.js")),
+    );
     await native.start();
     fixtureConnected = true;
     const reopened = await native.openSession({
@@ -247,7 +248,7 @@ async function main() {
     }
     const recoveredModels = await native.getAvailableModels();
     for (const model of models)
-      assert.ok(recoveredModels.some((m) => m.provider === "cliproxyapi" && m.id === model));
+      assert.ok(recoveredModels.some((m) => m.provider === "opencodex" && m.id === model));
     const supervisor = created.parse(await invoke(qa, createArgs)).binding;
     const supervisorRpc = await attach(supervisor);
     try {

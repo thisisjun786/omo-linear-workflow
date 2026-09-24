@@ -5,9 +5,8 @@ import { modelForRole, type RoleModel } from "../core/policy";
 import { optionalText } from "./routing-config";
 import { ROUTING_PROVIDER } from "./routing-plan";
 
-const PROXY_PROVIDERS = new Set([ROUTING_PROVIDER, "cliproxyapi"]);
 const isProxyModel = (qualified: string) =>
-  PROXY_PROVIDERS.has(qualified.slice(0, qualified.indexOf("/")));
+  qualified.slice(0, qualified.indexOf("/")) === ROUTING_PROVIDER;
 
 export const scopePreferenceSchema = z.object({ mode: z.enum(["all", "referenced"]) });
 const modelEntrySchema = z.union([z.string(), z.object({ model: z.string() })]);

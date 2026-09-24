@@ -16,11 +16,7 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "olw-host-profile-"));
   roots.push(root);
-  const files = [
-    "node_modules/omo-ai/plugin/extensions/omo-member.js",
-    "dist/extension/index.js",
-    "dist/proxy/index.js",
-  ];
+  const files = ["node_modules/omo-ai/plugin/extensions/omo-member.js", "dist/extension/index.js"];
   for (const file of files) {
     const path = join(root, file);
     await mkdir(join(path, ".."), { recursive: true });
@@ -38,7 +34,7 @@ async function fixture() {
   return { root, status };
 }
 
-test("rejects a running host missing the proxy without replacing its profile or sessions", async () => {
+test("rejects a running host missing the OLW extension without replacing its profile or sessions", async () => {
   const { root, status } = await fixture();
   const old = {
     ...status,
@@ -56,7 +52,7 @@ test("rejects a running host missing the proxy without replacing its profile or 
   expect(result).toMatchObject({
     name: "HostProfileMismatchError",
     details: {
-      missingExtensions: [join(root, "dist/proxy/index.js")],
+      missingExtensions: [join(root, "dist/extension/index.js")],
       generation: 4,
       sessions: { total: 3, worker: 1 },
       recovery: {
@@ -73,14 +69,14 @@ test("rejects a running host missing the proxy without replacing its profile or 
       },
     },
   });
-  expect(old.launchProfile.core.extensions).toHaveLength(3);
+  expect(old.launchProfile.core.extensions).toHaveLength(2);
 });
 
 test("accepts required effective extensions while retaining additional host extensions", async () => {
   const { root, status } = await fixture();
   status.launchProfile.core.extensions.push(join(root, "user-extension.js"));
   expect(await createHostProfile(root, status)).toBe(join(root, "omo-host.json"));
-  expect(status.launchProfile.core.extensions).toHaveLength(5);
+  expect(status.launchProfile.core.extensions).toHaveLength(4);
 });
 
 test("does not consider an unknown running launch profile ready", async () => {

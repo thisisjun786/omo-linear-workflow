@@ -190,7 +190,7 @@ async function main() {
       0,
       JSON.stringify(warm),
     );
-    assert.equal(await Bun.file(join(warm.root, "dist/proxy/index.js")).exists(), false);
+    assert.equal(await Bun.file(join(warm.root, "dist/extension/index.js")).exists(), false);
     console.log("QA_PHASE cache warmed and first root removed");
     const contaminated = await exercise(shared);
     log.shared = contaminated;

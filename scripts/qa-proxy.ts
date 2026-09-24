@@ -8,7 +8,6 @@ import { modelForRole } from "../src/core/policy";
 
 const root = resolve(import.meta.dir, "..");
 const evidenceRoot = join(root, ".omo/evidence");
-const extensionPath = join(root, "dist/proxy/index.js");
 const roleSchema = z.enum(["supervisor", "parent", "child"]);
 const roles =
   process.argv.length > 2 ? z.array(roleSchema).parse(process.argv.slice(2)) : roleSchema.options;
@@ -48,8 +47,6 @@ const results = await Promise.allSettled(
           "--no-session",
           "--no-model-fallback",
           "--no-extensions",
-          "-e",
-          extensionPath,
           "--no-skills",
           "--no-context-files",
           "--tools",
@@ -123,7 +120,6 @@ const results = await Promise.allSettled(
           timestamp: new Date().toISOString(),
           role,
           model,
-          extensionPath,
           exitCode,
           toolReads: reads.length,
           reply: text.trim(),

@@ -15,6 +15,14 @@ published.
 
 ### Added
 
+- User-managed opencodex model metadata catalog (`MODEL_CATALOG` in
+  `src/proxy/model-catalog.ts`). It overrides the context window, output limit,
+  input modalities and reasoning flag that ocx exports late or wrong, for example
+  the 32000 output stand-in on every model (lidge-jun/opencodex#5828). The
+  managed `omo` launcher and role panes load `dist/extension/model-catalog.js`,
+  which re-registers corrected models at session start.
+  `bun run proxy:routing catalog` lists the active changes and any redundant or
+  stale entries.
 - Issue children start in packet-bound mass-ulw mode, using native phase workflows
   and independent artifact verification before reporting to the existing parent.
 - Real child workflow QA for successful execution and recovery of invalid work

@@ -19,6 +19,11 @@ published.
   and independent artifact verification before reporting to the existing parent.
 - Real child workflow QA for successful execution and recovery of invalid work
   without repeating successful nodes: `qa:child-workflow happy|failed-node`.
+- Model chain warnings on every managed `omo` start, in `olw doctor` (under
+  `chains`, still `ok`) and via `bun run proxy:routing chains`: a category or
+  agent with no working model or a single remaining model, and OLW role models
+  missing from the opencodex catalog. Warnings never block a start and print once
+  per change.
 
 ### Changed
 
@@ -28,6 +33,12 @@ published.
   creating additional OLW roles and accessing live Linear remain forbidden.
 - Only children may hold an issue-packet goal. Supervisor/parent waiting and model
   assignments remain unchanged; existing bindings are not reinitialized.
+- An upstream xAI route is followed by the same model on Cursor when opencodex
+  publishes it (`xai/grok-4.7`, then `cursor/grok-4.7`). No other same-model host
+  becomes a second lane.
+- A managed category or agent route whose upstream choices opencodex no longer
+  publishes is written without models and listed as `unroutable`, instead of
+  rejecting the whole routing update.
 
 ### Removed
 

@@ -1,5 +1,5 @@
 diff --git a/distribution/agent-detection/index.toml b/distribution/agent-detection/index.toml
-index 1cd6c020..d5d5a6cf 100644
+index 1cd6c02..d5d5a6c 100644
 --- a/distribution/agent-detection/index.toml
 +++ b/distribution/agent-detection/index.toml
 @@ -80,6 +80,10 @@ path = "pi.toml"
@@ -13,8 +13,190 @@ index 1cd6c020..d5d5a6cf 100644
  [[agents]]
  id = "qwen"
  path = "qwen.toml"
+diff --git a/distribution/agent-detection/senpi.toml b/distribution/agent-detection/senpi.toml
+new file mode 100644
+index 0000000..2121f34
+--- /dev/null
++++ b/distribution/agent-detection/senpi.toml
+@@ -0,0 +1,176 @@
++id = "senpi"
++version = "2026.09.05.2"
++min_engine_version = 4
++updated_at = "2026-09-05T00:00:00Z"
++aliases = ["omo", "omo-senpi", "omo-native"]
++
++# Senpi powers the OmO Native coding-agent CLIs: npm @code-yeongyu/senpi
++# uses process.title / comm "senpi", while npm omo-ai exposes "omo".
++#
++# Working chrome (live herdr detection buffer, senpi 2026.8.7):
++#   "• Working (4m 27s • esc to interrupt)"
++# Context compaction uses a braille spinner and may leave overwritten text:
++#   "  ⠙ Compacting context... (esc to cancel)"
++#   "  ⠦ Compacting... (esc to cancel) ent benchmark implementation"
++# Active subagents render below the prompt box:
++#   " ⠏ Oracle review · agent:oracle(...) · turn 11 (...) · running · 3m 14s"
++# Latest source (Senpi 4df67dc87), rendered through a real Herdr PTY:
++# custom working indicators omit elapsed/interrupt hints: "⠴ Running eval".
++# Retry, branch summary, and automatic compaction use cancellation hints.
++# Default working alternates between • and ◦ without truecolor.
++# Permission prompts show
++# "Allow once" / "Allow always" / "Deny". Idle shows a bordered prompt
++# with "❯" and no interrupt suffix.
++
++[[rules]]
++id = "permission_prompt_blocked"
++state = "blocked"
++priority = 980
++region = "bottom_non_empty_lines(8)"
++visible_blocker = true
++line_regex = [
++  '^Permission required for .+$',
++  '^[ \t]*Allow once[ \t]*$',
++  '^[ \t]*Allow always[ \t]*$',
++  '^[ \t]*Deny[ \t]*$',
++]
++
++[[rules]]
++id = "permission_selector_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++# Current Senpi replaces the editor with a selector, including a selected arrow,
++# four choices and navigation hints. Retain the legacy prompt rule above.
++line_regex = [
++  '^ Permission required: [^\n]+$',
++  '^ → (?:Allow once|Allow always|Deny|Deny with feedback)[ \t]*$',
++  '^[ \t]*(?:→ )?Allow once[ \t]*$',
++  '^[ \t]*(?:→ )?Allow always[ \t]*$',
++  '^[ \t]*(?:→ )?Deny[ \t]*$',
++  '^[ \t]*(?:→ )?Deny with feedback[ \t]*$',
++]
++regex = ['(?m)^[ \t]*↑↓[ \t\n]+navigate[ \t\n]+[^ \t\n]+[ \t\n]+select[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "permission_feedback_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++line_regex = ['^ Feedback[ \t]*$', '^>[^\n]*$']
++regex = ['(?m)^[ \t]*[^ \t\n]+[ \t\n]+submit[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "compacting_context_working"
++state = "working"
++# Preserve goal/native attribution when compaction is displaced by widgets.
++priority = 904
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Compacting(?: context| before next prompt)?|Auto-compacting|Context overflow detected, compacting)(?:\.\.\.|…) \([^)\n]+ to cancel\)(?:[ \t]+[^\n]*)?(?:\n[^\n]*){0,3}\z']
++
++[[rules]]
++id = "retry_or_branch_summary_working"
++state = "working"
++priority = 910
++region = "senpi_current_status"
++visible_working = true
++regex = ['\A[ \t\n]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Retrying \([0-9]+/[0-9]+\)[ \t\n]+in[ \t\n]+[0-9]+s|Summarizing[ \t\n]+branch)(?:\.\.\.|…)[ \t\n]+\([^)]+[ \t\n]to[ \t\n]+cancel\)[ \t\n]*\z']
++
++[[rules]]
++id = "active_subagent_working"
++state = "working"
++priority = 905
++region = "after_last_horizontal_rule"
++visible_working = true
++line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category):.+ · running ·(?: .*)?[ \t]*$']
++
++[[rules]]
++id = "detached_eval_working"
++state = "working"
++priority = 904
++region = "senpi_current_footer"
++visible_working = true
++# Detached cells are removed from this footer on settlement; transcript cell boxes
++# and passive monitor/loop status text are deliberately not activity evidence.
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[ \t]+)?↗ (?:(?:js|py|rb|jl|ruby|julia) · |eval [1-9][0-9]*: )[^\n]+ \([0-9dhms ]+\)(?:[ \t]+(?:Pursuing goal|Goal (?:paused|blocked)|[▰▱]|Loop |◉ watching|mem:)[^\n]*)?[ \t]*$']
++# A completed goal objective can exactly reproduce live-eval + goal bytes.
++# Keep the conservative result for that unresolved information collision.
++not = [{ contains = [' · Goal achieved'] }]
++
++[[rules]]
++id = "btw_answering_working"
++state = "working"
++priority = 904
++region = "senpi_current_btw_panel"
++visible_working = true
++# Match the live panel's final cancellation row, not an answer quoting that row.
++regex = ['(?m)^[ \t]*btw: [^\n]+\n(?:[^\n]*\n)*[ \t]*answering… \(Esc to cancel\)[ \t]*\n[ \t]*─{3,}[ \t]*\n?[ \t]*\z']
++
++[[rules]]
++id = "wrapped_interrupt_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Working|Running [^\n]+)[^\n]*\([^)─❯\n]*(?:\n[ \t]*[^)─❯\n]*){1,3}to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "native_task_activity_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Exclude both "suspended" and its eight-column rendering "suspe...".
++# Rust regex has no lookaround: other lengths, or a differing character,
++# exclude exactly these fields without hiding another live task row.
++any = [
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^·\n]{1,7}|[^·\n]{10,}) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{7}|[^·\n]{1}[^u·\n][^·\n]{6}|[^·\n]{2}[^s·\n][^·\n]{5}|[^·\n]{3}[^p·\n][^·\n]{4}|[^·\n]{4}[^e·\n][^·\n]{3}|[^·\n]{5}[^\.·\n][^·\n]{2}|[^·\n]{6}[^\.·\n][^·\n]{1}|[^·\n]{7}[^\.·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{8}|[^·\n]{1}[^u·\n][^·\n]{7}|[^·\n]{2}[^s·\n][^·\n]{6}|[^·\n]{3}[^p·\n][^·\n]{5}|[^·\n]{4}[^e·\n][^·\n]{4}|[^·\n]{5}[^n·\n][^·\n]{3}|[^·\n]{6}[^d·\n][^·\n]{2}|[^·\n]{7}[^e·\n][^·\n]{1}|[^·\n]{8}[^d·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++]
++
++[[rules]]
++id = "active_dag_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Header fields may wrap at word boundaries. Only indented child rows may
++# intervene before the running node: never borrow a node from another parent.
++regex = ['(?m)^[ \t]*(?:▶ [^\n]+[ \t\n]+running|· [^\n]+[ \t\n]+resuming)[ \t\n]+wave[ \t\n]+[0-9]+/[0-9]+[ \t\n]+[0-9]+/[0-9]+[ \t\n]+done,[ \t\n]+[1-9][0-9]*[ \t\n]+running(?:,[ \t\n]+[0-9]+[ \t\n]+failed)?[ \t]*\n(?:[ \t]{3,}[^\n]*\n)*[ \t]{3,}▶ [^\n]+ · (?:agent|category):[^\n]+$']
++
++[[rules]]
++id = "goal_continuation_working"
++state = "working"
++priority = 905
++region = "senpi_current_footer"
++visible_working = true
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[^\n]*\b)?Pursuing goal(?: \([0-9dhms ]+\))?(?:[ \t]+.*)?$']
++not = [{ contains = ["Goal achieved"] }]
++
++[[rules]]
++id = "interrupt_suffix_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ \([^)\n]+ to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "custom_tool_indicator_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Running [a-zA-Z0-9_.-]+(?:: [^\n]+)?[ \t]*$']
++
++[[rules]]
++id = "working_literal"
++state = "working"
++priority = 100
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)\n]+\)|…|\.\.\.)?[ \t]*$']
 diff --git a/docs/next/website/src/content/docs/agent-automation.mdx b/docs/next/website/src/content/docs/agent-automation.mdx
-index e7c02ae3..612488aa 100644
+index e7c02ae..612488a 100644
 --- a/docs/next/website/src/content/docs/agent-automation.mdx
 +++ b/docs/next/website/src/content/docs/agent-automation.mdx
 @@ -41,7 +41,7 @@ Agent commands accept either a unique live name or the pane ID that currently ho
@@ -27,7 +209,7 @@ index e7c02ae3..612488aa 100644
  Successful `agent start` returns only after Herdr detects the expected agent in the same terminal and marks it ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. Startup waits for 30 seconds by default; `--timeout` must be greater than 3000 and no more than 300000 milliseconds.
  
 diff --git a/docs/next/website/src/content/docs/agents.mdx b/docs/next/website/src/content/docs/agents.mdx
-index d0612c3f..788c5ebc 100644
+index d0612c3..788c5eb 100644
 --- a/docs/next/website/src/content/docs/agents.mdx
 +++ b/docs/next/website/src/content/docs/agents.mdx
 @@ -33,6 +33,7 @@ Automatic detection works out of the box for common coding agents. The table sho
@@ -39,7 +221,7 @@ index d0612c3f..788c5ebc 100644
  | Muse | screen manifest | none |
  
 diff --git a/docs/next/website/src/content/docs/cli-reference.mdx b/docs/next/website/src/content/docs/cli-reference.mdx
-index 9f61d02d..32d7d38d 100644
+index 9f61d02..32d7d38 100644
 --- a/docs/next/website/src/content/docs/cli-reference.mdx
 +++ b/docs/next/website/src/content/docs/cli-reference.mdx
 @@ -345,7 +345,7 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
@@ -79,7 +261,7 @@ index 9f61d02d..32d7d38d 100644
  
  Plugin commands install and run local executable workflow plugins. A plugin is a manifest plus out-of-process commands; Herdr owns the host surface and plugins own their implementation language.
 diff --git a/docs/next/website/src/content/docs/integrations.mdx b/docs/next/website/src/content/docs/integrations.mdx
-index e584bb06..0a297e8f 100644
+index e584bb0..0a297e8 100644
 --- a/docs/next/website/src/content/docs/integrations.mdx
 +++ b/docs/next/website/src/content/docs/integrations.mdx
 @@ -131,6 +131,52 @@ Herdr uses `PI_CODING_AGENT_DIR` as the complete agent directory when set. Other
@@ -136,7 +318,7 @@ index e584bb06..0a297e8f 100644
  
  Install the Claude Code hook:
 diff --git a/docs/next/website/src/content/docs/ja/agent-automation.mdx b/docs/next/website/src/content/docs/ja/agent-automation.mdx
-index f69d6a3a..b6bc7127 100644
+index f69d6a3..b6bc712 100644
 --- a/docs/next/website/src/content/docs/ja/agent-automation.mdx
 +++ b/docs/next/website/src/content/docs/ja/agent-automation.mdx
 @@ -41,7 +41,7 @@ review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
@@ -149,7 +331,7 @@ index f69d6a3a..b6bc7127 100644
  成功した `agent start` は、同じターミナルで期待したエージェントを検出し、対話入力の準備ができたと Herdr が判断してから返ります。起動中の検出状態が `blocked` の場合、コマンドは直ちに `agent_not_ready` を返します。名前は `agent read` と `agent send-keys` で引き続き使用でき、検出状態が `idle` になるとプロンプトを送信できるようになります。起動待機はデフォルトで 30 秒です。`--timeout` は 3000 より大きく 300000 以下のミリ秒で指定します。
  
 diff --git a/docs/next/website/src/content/docs/ja/agents.mdx b/docs/next/website/src/content/docs/ja/agents.mdx
-index 3a365221..2fa89521 100644
+index 3a36522..2fa8952 100644
 --- a/docs/next/website/src/content/docs/ja/agents.mdx
 +++ b/docs/next/website/src/content/docs/ja/agents.mdx
 @@ -33,6 +33,7 @@ Herdr は複数のコーディングエージェントを同時に動かすた
@@ -161,7 +343,7 @@ index 3a365221..2fa89521 100644
  | Muse | スクリーンマニフェスト | なし |
  
 diff --git a/docs/next/website/src/content/docs/ja/cli-reference.mdx b/docs/next/website/src/content/docs/ja/cli-reference.mdx
-index fbda5674..df6b62ff 100644
+index fbda567..df6b62f 100644
 --- a/docs/next/website/src/content/docs/ja/cli-reference.mdx
 +++ b/docs/next/website/src/content/docs/ja/cli-reference.mdx
 @@ -324,7 +324,8 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
@@ -175,7 +357,7 @@ index fbda5674..df6b62ff 100644
  成功した start は、期待したエージェントが同じターミナルを所有し、対話入力の準備ができてから返ります。起動中の検出状態が `blocked` の場合、コマンドは直ちに `agent_not_ready` を返します。名前は `agent read` と `agent send-keys` で引き続き使用でき、検出状態が `idle` になるとプロンプトを送信できるようになります。デフォルトの起動タイムアウトは 30000 ミリ秒で、明示する値は 3000 より大きく 300000 以下でなければなりません。
  
 diff --git a/docs/next/website/src/content/docs/ja/integrations.mdx b/docs/next/website/src/content/docs/ja/integrations.mdx
-index 6086e6b6..0537727d 100644
+index 6086e6b..0537727 100644
 --- a/docs/next/website/src/content/docs/ja/integrations.mdx
 +++ b/docs/next/website/src/content/docs/ja/integrations.mdx
 @@ -133,6 +133,43 @@ Herdr はバンドルされた拡張を次の場所に書き込みます:
@@ -223,7 +405,7 @@ index 6086e6b6..0537727d 100644
  
  Claude Code フックをインストールします:
 diff --git a/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx b/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx
-index 8ad27952..616f25e9 100644
+index 8ad2795..616f25e 100644
 --- a/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/agent-automation.mdx
 @@ -41,7 +41,7 @@ review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
@@ -236,7 +418,7 @@ index 8ad27952..616f25e9 100644
  成功的 `agent start` 只有在 Herdr 于同一终端检测到预期智能体,并确认它可接受交互输入后才返回。如果启动期间检测到 `blocked`,命令会立即返回 `agent_not_ready`。该名称仍可用于 `agent read` 和 `agent send-keys`,检测变为 `idle` 后即可用于发送提示。默认等待启动 30 秒;`--timeout` 必须大于 3000 且不超过 300000 毫秒。
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/agents.mdx b/docs/next/website/src/content/docs/zh-cn/agents.mdx
-index bc749add..487aa4d9 100644
+index bc749ad..487aa4d 100644
 --- a/docs/next/website/src/content/docs/zh-cn/agents.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/agents.mdx
 @@ -33,6 +33,7 @@ Herdr 为同时运行多个编程智能体而生。每个智能体都待在一
@@ -248,7 +430,7 @@ index bc749add..487aa4d9 100644
  | Muse | 屏幕清单 | 无 |
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx b/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx
-index 4c7df02a..1b322dc7 100644
+index 4c7df02..1b322dc 100644
 --- a/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/cli-reference.mdx
 @@ -324,7 +324,8 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
@@ -262,7 +444,7 @@ index 4c7df02a..1b322dc7 100644
  成功的 start 只有在预期智能体占用同一终端并可接受交互输入后才返回。如果启动期间检测到 `blocked`,命令会立即返回 `agent_not_ready`。该名称仍可用于 `agent read` 和 `agent send-keys`,检测变为 `idle` 后即可用于发送提示。默认启动超时是 30000 毫秒;显式值必须大于 3000 且不超过 300000。
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/integrations.mdx b/docs/next/website/src/content/docs/zh-cn/integrations.mdx
-index 5eb1f322..598b7af9 100644
+index 5eb1f32..598b7af 100644
 --- a/docs/next/website/src/content/docs/zh-cn/integrations.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/integrations.mdx
 @@ -133,6 +133,41 @@ Herdr 把内置扩展写入:
@@ -308,7 +490,7 @@ index 5eb1f322..598b7af9 100644
  
  安装 Claude Code 钩子:
 diff --git a/docs/next/website/src/data/config-reference.json b/docs/next/website/src/data/config-reference.json
-index 36afe337..638ce1b3 100644
+index 36afe33..638ce1b 100644
 --- a/docs/next/website/src/data/config-reference.json
 +++ b/docs/next/website/src/data/config-reference.json
 @@ -1494,7 +1494,7 @@
@@ -321,7 +503,7 @@ index 36afe337..638ce1b3 100644
          {
            "key": "experimental.cjk_ime_cursor_shape",
 diff --git a/justfile b/justfile
-index 5c42bee6..47f220a9 100644
+index 5c42bee..47f220a 100644
 --- a/justfile
 +++ b/justfile
 @@ -96,6 +96,7 @@ integration-assets-test:
@@ -333,7 +515,7 @@ index 5c42bee6..47f220a9 100644
  # Regenerate the C API bindings with bindgen-cli 0.72.1
  libghostty-bindings *clang_args:
 diff --git a/scripts/agent_detection_manifest_check.py b/scripts/agent_detection_manifest_check.py
-index 6990a215..70763ca5 100644
+index 6990a21..70763ca 100644
 --- a/scripts/agent_detection_manifest_check.py
 +++ b/scripts/agent_detection_manifest_check.py
 @@ -40,6 +40,7 @@ REGION_RE = re.compile(
@@ -366,7 +548,7 @@ index 6990a215..70763ca5 100644
          )
          if cmp < 0 and not stages_new_engine_manifest:
 diff --git a/scripts/test_agent_detection_manifest_check.py b/scripts/test_agent_detection_manifest_check.py
-index fed0e06f..ef4c7ffd 100644
+index fed0e06..ef4c7ff 100644
 --- a/scripts/test_agent_detection_manifest_check.py
 +++ b/scripts/test_agent_detection_manifest_check.py
 @@ -101,6 +101,37 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
@@ -407,8 +589,424 @@ index fed0e06f..ef4c7ffd 100644
      def test_rejects_mutated_staged_published_manifest(self):
          with tempfile.TemporaryDirectory() as tmp:
              bundled, website = staged_grok_dirs(Path(tmp))
+diff --git a/src/api/mod.rs b/src/api/mod.rs
+index d28a82a..2552bff 100644
+--- a/src/api/mod.rs
++++ b/src/api/mod.rs
+@@ -36,6 +36,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
+             | Method::WorkspaceReportMetadata(_)
+             | Method::WorkspaceClose(_)
+             | Method::WorktreeCreate(_)
++            | Method::WorktreeCreateGrouped(_)
+             | Method::WorktreeOpen(_)
+             | Method::WorktreeRemove(_)
+             | Method::TabCreate(_)
+diff --git a/src/api/schema.rs b/src/api/schema.rs
+index 7c58fb6..e4a280e 100644
+--- a/src/api/schema.rs
++++ b/src/api/schema.rs
+@@ -95,6 +95,8 @@ pub enum Method {
+     WorktreeList(WorktreeListParams),
+     #[serde(rename = "worktree.create")]
+     WorktreeCreate(WorktreeCreateParams),
++    #[serde(rename = "worktree.create_grouped")]
++    WorktreeCreateGrouped(WorktreeCreateGroupedParams),
+     #[serde(rename = "worktree.open")]
+     WorktreeOpen(WorktreeOpenParams),
+     #[serde(rename = "worktree.remove")]
+diff --git a/src/api/schema/worktrees.rs b/src/api/schema/worktrees.rs
+index 3b0d4b3..12772ab 100644
+--- a/src/api/schema/worktrees.rs
++++ b/src/api/schema/worktrees.rs
+@@ -30,6 +30,17 @@ pub struct WorktreeCreateParams {
+     pub trust_repository: bool,
+ }
+ 
++// Separate RPC: an old server rejects this method rather than ignoring grouping metadata.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct WorktreeCreateGroupedParams {
++    #[serde(flatten)]
++    pub create: WorktreeCreateParams,
++    // None creates a linked worktree that becomes its own group head.
++    // Some targets the exact already-open group head workspace.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub group_head_workspace_id: Option<String>,
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+ pub struct WorktreeOpenParams {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+diff --git a/src/api/server.rs b/src/api/server.rs
+index ea7597e..4f7e6c4 100644
+--- a/src/api/server.rs
++++ b/src/api/server.rs
+@@ -409,6 +409,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
+         Method::WorkspaceClose(_) => "workspace.close",
+         Method::WorktreeList(_) => "worktree.list",
+         Method::WorktreeCreate(_) => "worktree.create",
++        Method::WorktreeCreateGrouped(_) => "worktree.create_grouped",
+         Method::WorktreeOpen(_) => "worktree.open",
+         Method::WorktreeRemove(_) => "worktree.remove",
+         Method::TabCreate(_) => "tab.create",
+diff --git a/src/app/actions.rs b/src/app/actions.rs
+index 8531433..fef3346 100644
+--- a/src/app/actions.rs
++++ b/src/app/actions.rs
+@@ -951,7 +951,10 @@ impl AppState {
+         self.workspaces
+             .get(ws_idx)
+             .and_then(|ws| ws.worktree_space())
+-            .filter(|space| !space.is_linked_worktree)
++            .filter(|space| {
++                !space.is_linked_worktree
++                    || crate::workspace::is_group_head(space, &self.workspaces[ws_idx].id)
++            })
+             .map(|space| {
+                 self.workspaces
+                     .iter()
+diff --git a/src/app/api.rs b/src/app/api.rs
+index 1270fef..3b6a56e 100644
+--- a/src/app/api.rs
++++ b/src/app/api.rs
+@@ -1029,7 +1029,11 @@ impl App {
+                 return self.handle_workspace_close(request.id, target);
+             }
+             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
+-            Method::WorktreeCreate(params) => {
++            Method::WorktreeCreate(params)
++            | Method::WorktreeCreateGrouped(crate::api::schema::WorktreeCreateGroupedParams {
++                create: params,
++                ..
++            }) => {
+                 let _ = params;
+                 return responses::encode_error(
+                     request.id,
+diff --git a/src/app/api/worktrees.rs b/src/app/api/worktrees.rs
+index 71f2e03..fc7f693 100644
+--- a/src/app/api/worktrees.rs
++++ b/src/app/api/worktrees.rs
+@@ -895,6 +895,145 @@ mod tests {
+             .expect("deferred API request should respond after completion event")
+     }
+ 
++    async fn grouped_create(
++        app: &mut App,
++        repo: &Path,
++        id: &str,
++        path: &Path,
++        head: Option<&str>,
++    ) -> String {
++        let (tx, rx) = response_channel();
++        let request = Request {
++            id: id.into(),
++            method: crate::api::schema::Method::WorktreeCreateGrouped(
++                crate::api::schema::WorktreeCreateGroupedParams {
++                    create: WorktreeCreateParams {
++                        cwd: head.is_none().then(|| repo.display().to_string()),
++                        branch: Some(format!("qa/{id}")),
++                        base: Some("HEAD".into()),
++                        path: Some(path.display().to_string()),
++                        ..WorktreeCreateParams::default()
++                    },
++                    group_head_workspace_id: head.map(str::to_string),
++                },
++            ),
++        };
++        assert!(app.handle_deferred_worktree_api_request(request, tx));
++        tokio::time::timeout(std::time::Duration::from_secs(10), async {
++            loop {
++                if let Ok(reply) = rx.try_recv() {
++                    return reply;
++                }
++                let event = app
++                    .event_rx
++                    .recv()
++                    .await
++                    .expect("worktree event channel closed");
++                app.handle_internal_event(event);
++                if let Ok(reply) = rx.try_recv() {
++                    return reply;
++                }
++            }
++        })
++        .await
++        .expect("worktree response timeout")
++    }
++
++    #[tokio::test]
++    async fn grouped_linked_heads_keep_same_repo_children_separate_without_a_root_workspace() {
++        let repo = create_committed_repo("grouped-source");
++        let root = unique_temp_path("grouped-checkouts");
++        let mut app = test_app();
++        app.state.default_shell = "/bin/sh".into();
++        app.state.workspaces.clear();
++        app.state.active = None;
++        let a = root.join("a");
++        let b = root.join("b");
++        let a_reply = grouped_create(&mut app, &repo, "head-a", &a, None).await;
++        let a_response: SuccessResponse = serde_json::from_str(&a_reply).unwrap();
++        let ResponseResult::WorktreeCreated {
++            workspace: a_ws, ..
++        } = a_response.result
++        else {
++            panic!("head a failed");
++        };
++        assert_eq!(
++            app.state.workspaces.len(),
++            1,
++            "no silent repository-root workspace"
++        );
++        let b_reply = grouped_create(&mut app, &repo, "head-b", &b, None).await;
++        let b_response: SuccessResponse = serde_json::from_str(&b_reply).unwrap();
++        let ResponseResult::WorktreeCreated {
++            workspace: b_ws, ..
++        } = b_response.result
++        else {
++            panic!("head b failed");
++        };
++        assert!(
++            crate::workspace::is_group_head(
++                app.state.workspaces[0].worktree_space().unwrap(),
++                &app.state.workspaces[0].id
++            ),
++            "head key={:?} id={:?}",
++            app.state.workspaces[0].worktree_space().unwrap().key,
++            app.state.workspaces[0].id
++        );
++        assert_eq!(
++            app.parse_workspace_id(&a_ws.workspace_id),
++            Some(0),
++            "reply={:?} ids={:?}",
++            a_ws.workspace_id,
++            app.state
++                .workspaces
++                .iter()
++                .map(|ws| &ws.id)
++                .collect::<Vec<_>>()
++        );
++        let ac = root.join("ac");
++        let bc = root.join("bc");
++        let ac_reply =
++            grouped_create(&mut app, &repo, "child-a", &ac, Some(&a_ws.workspace_id)).await;
++        let bc_reply =
++            grouped_create(&mut app, &repo, "child-b", &bc, Some(&b_ws.workspace_id)).await;
++        let _: SuccessResponse = serde_json::from_str(&ac_reply)
++            .unwrap_or_else(|error| panic!("child A: {error}: {ac_reply}"));
++        let _: SuccessResponse = serde_json::from_str(&bc_reply)
++            .unwrap_or_else(|error| panic!("child B: {error}: {bc_reply}"));
++        assert_eq!(app.state.workspaces.len(), 4);
++        let spaces = &app.state.workspaces;
++        let a_key = &spaces[0].worktree_space().unwrap().key;
++        let b_key = &spaces[1].worktree_space().unwrap().key;
++        assert_ne!(a_key, b_key);
++        assert_eq!(&spaces[2].worktree_space().unwrap().key, a_key);
++        assert_eq!(&spaces[3].worktree_space().unwrap().key, b_key);
++        assert!(spaces
++            .iter()
++            .all(|ws| ws.worktree_space().unwrap().is_linked_worktree));
++        assert_eq!(app.state.workspace_close_indices(0).len(), 2);
++        assert_eq!(app.state.workspace_close_indices(1).len(), 2);
++        let bad = Request {
++            id: "invalid".into(),
++            method: crate::api::schema::Method::WorktreeCreateGrouped(
++                crate::api::schema::WorktreeCreateGroupedParams {
++                    create: WorktreeCreateParams {
++                        path: Some(root.join("bad").display().to_string()),
++                        branch: Some("qa/bad".into()),
++                        ..WorktreeCreateParams::default()
++                    },
++                    group_head_workspace_id: Some(app.public_workspace_id(2)),
++                },
++            ),
++        };
++        let (tx, rx) = response_channel();
++        assert!(app.handle_deferred_worktree_api_request(bad, tx));
++        let error: ErrorResponse = serde_json::from_str(&rx.recv().unwrap()).unwrap();
++        assert_eq!(error.error.code, "invalid_group_head");
++        assert!(!root.join("bad").exists());
++        let _ = std::fs::remove_dir_all(root);
++        let _ = std::fs::remove_dir_all(repo);
++    }
++
+     #[tokio::test]
+     async fn api_worktree_create_opens_workspace_and_marks_membership() {
+         let repo = create_committed_repo("api-worktree-create-repo");
+@@ -1228,6 +1367,8 @@ mod tests {
+                 repo_name: "herdr".into(),
+                 label: None,
+                 focus: false,
++                grouped: false,
++                group_head: false,
+                 respond_to,
+             }),
+             result: Ok(()),
+diff --git a/src/app/api/worktrees/deferred.rs b/src/app/api/worktrees/deferred.rs
+index 9adbd70..e19bcc1 100644
+--- a/src/app/api/worktrees/deferred.rs
++++ b/src/app/api/worktrees/deferred.rs
+@@ -19,7 +19,17 @@ impl App {
+     ) -> bool {
+         match request.method {
+             crate::api::schema::Method::WorktreeCreate(params) => {
+-                self.start_api_worktree_create(request.id, params, respond_to);
++                self.start_api_worktree_create(request.id, params, None, false, respond_to);
++                true
++            }
++            crate::api::schema::Method::WorktreeCreateGrouped(params) => {
++                self.start_api_worktree_create(
++                    request.id,
++                    params.create,
++                    params.group_head_workspace_id,
++                    true,
++                    respond_to,
++                );
+                 true
+             }
+             crate::api::schema::Method::WorktreeRemove(params) => {
+@@ -95,6 +105,8 @@ impl App {
+         &mut self,
+         id: String,
+         params: WorktreeCreateParams,
++        group_head_workspace_id: Option<String>,
++        grouped: bool,
+         respond_to: std::sync::mpsc::Sender<String>,
+     ) {
+         let branch = params
+@@ -116,7 +128,50 @@ impl App {
+             return;
+         }
+         let base = params.base.unwrap_or_else(|| "HEAD".into());
+-        let source = match self.resolve_worktree_source(params.workspace_id, params.cwd) {
++        // Validate the exact head and the Git source before creating any directory or branch.
++        // A grouped head starts from cwd; a grouped child starts from its head's Git repo,
++        // never from the linked checkout (which Git cannot use as an independent source).
++        let source = if grouped {
++            if let Some(head_id) = group_head_workspace_id.as_deref() {
++                if params.workspace_id.is_some() || params.cwd.is_some() {
++                    Err(super::ApiFailure::new(
++                        "invalid_request",
++                        "grouped child must specify only group_head_workspace_id",
++                    ))
++                } else {
++                    self.parse_workspace_id(head_id)
++                        .and_then(|idx| self.state.workspaces.get(idx).map(|ws| (idx, ws)))
++                        .and_then(|(idx, ws)| {
++                            ws.worktree_space()
++                                .filter(|space| crate::workspace::is_group_head(space, &ws.id))
++                                .map(|space| (idx, space))
++                        })
++                        .map(|(idx, head)| WorktreeSource {
++                            workspace_idx: Some(idx),
++                            source_checkout_path: head.repo_root.clone(),
++                            source_repo_root: head.repo_root.clone(),
++                            repo_key: head.key.clone(),
++                            repo_name: head.label.clone(),
++                        })
++                        .ok_or_else(|| {
++                            super::ApiFailure::new(
++                                "invalid_group_head",
++                                format!("workspace {head_id} is not an open group head"),
++                            )
++                        })
++                }
++            } else if params.workspace_id.is_some() || params.cwd.is_none() {
++                Err(super::ApiFailure::new(
++                    "invalid_request",
++                    "grouped head requires cwd and no workspace_id",
++                ))
++            } else {
++                self.resolve_worktree_source(None, params.cwd)
++            }
++        } else {
++            self.resolve_worktree_source(params.workspace_id, params.cwd)
++        };
++        let source = match source {
+             Ok(source) => source,
+             Err(err) => {
+                 Self::send_api_response(respond_to, encode_error(id, err.code, err.message));
+@@ -182,6 +237,8 @@ impl App {
+             repo_name: source.repo_name,
+             label: params.label,
+             focus: params.focus,
++            grouped,
++            group_head: grouped && group_head_workspace_id.is_none(),
+             respond_to,
+         };
+         let path = checkout_path;
+@@ -256,6 +313,21 @@ impl App {
+             );
+             return;
+         }
++        if crate::workspace::is_group_head(&space, &self.state.workspaces[ws_idx].id)
++            && self
++                .state
++                .workspace_close_would_close_worktree_group(ws_idx)
++        {
++            Self::send_api_response(
++                respond_to,
++                encode_error(
++                    id,
++                    "workspace_group_close_required",
++                    "remove group children before removing their linked head",
++                ),
++            );
++            return;
++        }
+ 
+         #[cfg(windows)]
+         {
+@@ -404,8 +476,35 @@ impl App {
+             repo_key: api.repo_key,
+             repo_name: api.repo_name,
+         };
+-        if let Err(err) = self.ensure_source_parent_membership(&mut source, true) {
+-            Self::send_api_response(api.respond_to, encode_error(api.id, err.code, err.message));
++        if !api.grouped {
++            if let Err(err) = self.ensure_source_parent_membership(&mut source, true) {
++                Self::send_api_response(
++                    api.respond_to,
++                    encode_error(api.id, err.code, err.message),
++                );
++                return;
++            }
++        } else if api.group_head {
++            // The head is the newly created workspace, not an existing repository workspace.
++            source.workspace_idx = None;
++        } else if source.workspace_idx.is_none()
++            || !source.workspace_idx.is_some_and(|idx| {
++                self.state.workspaces.get(idx).is_some_and(|ws| {
++                    ws.worktree_space().is_some_and(|space| {
++                        crate::workspace::is_group_head(space, &ws.id)
++                            && space.key == source.repo_key
++                    })
++                })
++            })
++        {
++            Self::send_api_response(
++                api.respond_to,
++                encode_error(
++                    api.id,
++                    "invalid_group_head",
++                    "group head closed or changed during worktree creation",
++                ),
++            );
+             return;
+         }
+ 
+@@ -432,6 +531,11 @@ impl App {
+                 }
+             };
+ 
++        if api.group_head {
++            source.repo_key = format!("herdr-group:{}", self.state.workspaces[ws_idx].id);
++        }
++        // Group heads are physically linked Git worktrees; grouping is orthogonal.
++        // Record the same checkout and Git provenance as any other linked worktree.
+         self.mark_worktree_membership(
+             &source,
+             ws_idx,
 diff --git a/src/cli/integration.rs b/src/cli/integration.rs
-index a8d5a5bf..9443cb23 100644
+index a8d5a5b..9443cb2 100644
 --- a/src/cli/integration.rs
 +++ b/src/cli/integration.rs
 @@ -1,4 +1,14 @@
@@ -618,7 +1216,7 @@ index a8d5a5bf..9443cb23 100644
 +    }
 +}
 diff --git a/src/cli/spec.rs b/src/cli/spec.rs
-index 9465dcc3..4f94d229 100644
+index 9465dcc..4f94d22 100644
 --- a/src/cli/spec.rs
 +++ b/src/cli/spec.rs
 @@ -890,6 +890,7 @@ fn current_pane_args() -> [Arg; 2] {
@@ -629,8 +1227,104 @@ index 9465dcc3..4f94d229 100644
          .required(true)
          .value_parser(integration_target_values())
  }
+diff --git a/src/client/shell/sidebar.rs b/src/client/shell/sidebar.rs
+index 161aecd..8d44fb2 100644
+--- a/src/client/shell/sidebar.rs
++++ b/src/client/shell/sidebar.rs
+@@ -439,6 +439,13 @@ pub(crate) fn render_sidebar(
+     );
+ }
+ 
++fn is_group_head(workspace: &ClientShellWorkspace) -> bool {
++    workspace
++        .worktree
++        .as_ref()
++        .is_some_and(|space| space.key == format!("herdr-group:{}", workspace.workspace_id))
++}
++
+ pub(crate) fn workspace_entries(
+     snapshot: &ClientShellSnapshot,
+     collapsed_groups: &HashSet<String>,
+@@ -458,6 +465,7 @@ pub(crate) fn workspace_entries(
+                         .worktree
+                         .as_ref()
+                         .is_some_and(|worktree| !worktree.is_linked_worktree)
++                        || is_group_head(&snapshot.workspaces[*index])
+                 })
+         })
+         .map(|(key, _)| *key)
+@@ -491,6 +499,7 @@ pub(crate) fn workspace_entries(
+                     .worktree
+                     .as_ref()
+                     .is_some_and(|worktree| !worktree.is_linked_worktree)
++                    || is_group_head(&snapshot.workspaces[*member])
+             })
+             .unwrap_or(index);
+         entries.push(WorkspaceEntry {
+@@ -531,7 +540,7 @@ pub(crate) fn workspace_entries(
+ fn parent_group_key(snapshot: &ClientShellSnapshot, index: usize) -> Option<String> {
+     let workspace = snapshot.workspaces.get(index)?;
+     let worktree = workspace.worktree.as_ref()?;
+-    if worktree.is_linked_worktree {
++    if worktree.is_linked_worktree && !is_group_head(workspace) {
+         return None;
+     }
+     (snapshot
+@@ -586,7 +595,7 @@ pub(in crate::client::shell) fn displayed_workspace_status(
+     let Some(worktree) = workspace
+         .worktree
+         .as_ref()
+-        .filter(|worktree| !worktree.is_linked_worktree)
++        .filter(|worktree| !worktree.is_linked_worktree || is_group_head(workspace))
+     else {
+         return workspace.agent_status;
+     };
+diff --git a/src/client/shell/tests/workspace_navigation.rs b/src/client/shell/tests/workspace_navigation.rs
+index 7ea0206..b45e93b 100644
+--- a/src/client/shell/tests/workspace_navigation.rs
++++ b/src/client/shell/tests/workspace_navigation.rs
+@@ -26,6 +26,39 @@ fn grouped_workspaces() -> ClientShellSnapshot {
+     projected
+ }
+ 
++#[test]
++fn linked_group_heads_render_as_two_roots_with_their_own_children() {
++    let mut projected = workspaces(5);
++    for (index, key) in [
++        (0, "herdr-group:ws_1"),
++        (1, "herdr-group:ws_2"),
++        (2, "herdr-group:ws_1"),
++        (3, "herdr-group:ws_2"),
++    ] {
++        projected.workspaces[index].worktree = Some(ClientShellWorktree {
++            key: key.into(),
++            label: "same-repo".into(),
++            is_linked_worktree: true,
++        });
++    }
++    // Workspace 5 is an independent manager, not a forced ancestor.
++    let entries = super::sidebar::workspace_entries(&projected, &std::collections::HashSet::new());
++    assert_eq!(
++        entries
++            .iter()
++            .map(|entry| (entry.index, entry.indented))
++            .collect::<Vec<_>>(),
++        vec![(0, false), (2, true), (1, false), (3, true), (4, false)]
++    );
++    assert!(
++        super::sidebar::displayed_workspace_status(
++            &projected,
++            &projected.workspaces[0],
++            &std::collections::HashSet::new()
++        ) == projected.workspaces[0].agent_status
++    );
++}
++
+ fn navigation_state(mut projected: ClientShellSnapshot) -> (ClientShellState, ClientEndpointId) {
+     let (mut state, remote) = state_with_remote();
+     state.set_snapshot(Box::new(projected.clone()));
 diff --git a/src/config/model.rs b/src/config/model.rs
-index 6ef6274d..e4f920aa 100644
+index 6ef6274..e4f920a 100644
 --- a/src/config/model.rs
 +++ b/src/config/model.rs
 @@ -1060,7 +1060,8 @@ pub struct ExperimentalConfig {
@@ -644,7 +1338,7 @@ index 6ef6274d..e4f920aa 100644
      pub cjk_ime_agents: Vec<String>,
      /// Cursor shape rendered for the IME anchor when
 diff --git a/src/config/sidebar.rs b/src/config/sidebar.rs
-index 9a4cb5e0..6b66c05e 100644
+index 9a4cb5e..6b66c05 100644
 --- a/src/config/sidebar.rs
 +++ b/src/config/sidebar.rs
 @@ -408,15 +408,25 @@ where
@@ -700,7 +1394,7 @@ index 9a4cb5e0..6b66c05e 100644
 +    }
  }
 diff --git a/src/config/sound.rs b/src/config/sound.rs
-index 8eb2561e..3c9f26f1 100644
+index 8eb2561..3c9f26f 100644
 --- a/src/config/sound.rs
 +++ b/src/config/sound.rs
 @@ -145,6 +145,7 @@ impl AgentSoundOverrides {
@@ -712,7 +1406,7 @@ index 8eb2561e..3c9f26f1 100644
              None => AgentSoundSetting::Default,
          }
 diff --git a/src/detect/manifest.rs b/src/detect/manifest.rs
-index acd6b8f9..9369567d 100644
+index acd6b8f..9369567 100644
 --- a/src/detect/manifest.rs
 +++ b/src/detect/manifest.rs
 @@ -1,4 +1,5 @@
@@ -832,8 +1526,407 @@ index acd6b8f9..9369567d 100644
                  .map_err(|err| format!("rule {} could not be compiled: {err}", rule.id))
          })
          .collect()
+diff --git a/src/detect/manifest/senpi_regions.rs b/src/detect/manifest/senpi_regions.rs
+new file mode 100644
+index 0000000..6c95f17
+--- /dev/null
++++ b/src/detect/manifest/senpi_regions.rs
+@@ -0,0 +1,393 @@
++//! Senpi's current dock, distinct from the legacy generic border heuristics.
++//!
++//! The snapshot owns every byte. Parsing uses only borrowed slices and line
++//! offsets; the manifest evaluator caches this view once, not once per rule.
++
++use unicode_width::UnicodeWidthStr;
++
++pub(super) const ENGINE_VERSION: u32 = 4;
++
++#[derive(Debug, Clone, Copy)]
++pub(super) enum Region {
++    Dialog,
++    Status,
++    BtwPanel,
++    Footer,
++}
++
++impl Region {
++    pub(super) fn parse(name: &str) -> Option<Self> {
++        match name.trim() {
++            "senpi_current_dialog" => Some(Self::Dialog),
++            "senpi_current_status" => Some(Self::Status),
++            "senpi_current_btw_panel" => Some(Self::BtwPanel),
++            "senpi_current_footer" => Some(Self::Footer),
++            _ => None,
++        }
++    }
++}
++
++#[derive(Default)]
++pub(super) struct Regions<'a> {
++    dialog: &'a str,
++    status: &'a str,
++    btw_panel: &'a str,
++    footer: &'a str,
++}
++
++impl<'a> Regions<'a> {
++    pub(super) fn parse(screen: &'a str) -> Self {
++        let mut borders =
++            lines_rev(screen).filter_map(|line| border(line.text).map(|shape| (line, shape)));
++        let Some((bottom, bottom_shape)) = borders.next() else {
++            // Legacy captures can end at an unbordered prompt. Retain that
++            // bounded prefix, never the entire snapshot or a pasted prompt body.
++            let Some(prompt) = lines_rev(screen).find(|line| prompt_line(line.text)) else {
++                return Self::default();
++            };
++            return Self::dock(&screen[..prompt.start]);
++        };
++        let Some((top, top_shape)) = borders.next() else {
++            return Self::default();
++        };
++        if top_shape.width != bottom_shape.width
++            || bottom_shape.scrolled_up
++            || bottom_shape.status.is_some()
++        {
++            return Self::default();
++        }
++        let body = &screen[top.end..bottom.start];
++        let first = body
++            .lines()
++            .find(|line| !line.trim().is_empty())
++            .unwrap_or("");
++        let editor = prompt_line(first)
++            || (top_shape.scrolled_up
++                && body
++                    .lines()
++                    .all(|line| line.starts_with("  ") || line.trim().is_empty()));
++        let dialog = first.starts_with(" Permission required: ") || first.trim_end() == " Feedback";
++        if !editor && !dialog {
++            // Do not search behind an unknown current selector for an old editor.
++            return Self::default();
++        }
++        let mut result = Self::dock(&screen[..top.start]);
++        if let (true, Some(status)) = (editor, top_shape.status) {
++            result.status = status;
++        }
++        if dialog {
++            result.dialog = body;
++        }
++        result.footer = screen[bottom.end..]
++            .lines()
++            .rev()
++            .find(|line| !line.trim().is_empty())
++            .filter(|line| !line.starts_with([' ', '\t']))
++            .unwrap_or("");
++        result
++    }
++
++    pub(super) const fn get(&self, region: Region) -> &'a str {
++        match region {
++            Region::Dialog => self.dialog,
++            Region::Status => self.status,
++            Region::BtwPanel => self.btw_panel,
++            Region::Footer => self.footer,
++        }
++    }
++
++    fn dock(prefix: &'a str) -> Self {
++        let mut result = Self::default();
++        let mut block = DockBlock::Unknown;
++        let mut status_start = 0;
++        let mut rows = lines(prefix).peekable();
++        while let Some(line) = rows.next() {
++            if line.text.trim().is_empty() {
++                continue;
++            }
++            if let Some(shape) = border(line.text) {
++                if !block.valid_todo() {
++                    result.status = "";
++                }
++                if rows
++                    .peek()
++                    .is_some_and(|next| next.text.starts_with(" btw: "))
++                {
++                    // Text pads the question/answer, so its user-controlled
++                    // horizontal lines cannot close this column-zero panel.
++                    let closing = rows.find(|next| border(next.text).is_some());
++                    if let Some(closing) = closing.filter(|closing| {
++                        border(closing.text)
++                            .is_some_and(|closing_shape| closing_shape.width == shape.width)
++                    }) {
++                        result.btw_panel = &prefix[line.start..closing.end];
++                        block = DockBlock::Auxiliary;
++                        continue;
++                    }
++                }
++                result.status = "";
++                result.btw_panel = "";
++                block = DockBlock::Unknown;
++                continue;
++            }
++            if matches!(block, DockBlock::Todo { .. }) && line.text.starts_with(' ') {
++                if todo_task(line.text) {
++                    block = DockBlock::Todo { has_task: true };
++                }
++                continue;
++            }
++            if line.text.trim_end() == " Todo" {
++                block = DockBlock::Todo { has_task: false };
++                continue;
++            }
++            let trimmed = line.text.trim_start();
++            if trimmed.starts_with("Tip:")
++                || trimmed.starts_with('↳')
++                || trimmed.starts_with("Running PreToolUse hook")
++                || trimmed.starts_with("Running PostToolUse hook")
++            {
++                block = DockBlock::Auxiliary;
++                continue;
++            }
++            if spinner_line(trimmed) {
++                status_start = line.start;
++                result.status = &prefix[status_start..line.end];
++                block = DockBlock::Primary {
++                    compaction: trimmed.contains(" to cancel)") && trimmed.contains("ompacting"),
++                    stale_rows: 0,
++                };
++                continue;
++            }
++            match &mut block {
++                DockBlock::Primary {
++                    compaction,
++                    stale_rows,
++                } if line.text.starts_with([' ', '\t']) || (*compaction && *stale_rows < 3) => {
++                    // Older compaction captures include a few unindented
++                    // overwritten continuation rows. They cannot cross a border.
++                    *stale_rows += 1;
++                    result.status = &prefix[status_start..line.end];
++                }
++                DockBlock::Auxiliary if line.text.starts_with([' ', '\t']) => {}
++                DockBlock::Unknown
++                | DockBlock::Primary { .. }
++                | DockBlock::Auxiliary
++                | DockBlock::Todo { .. } => {
++                    result.status = "";
++                    result.btw_panel = "";
++                    block = DockBlock::Unknown;
++                }
++            }
++        }
++        if !block.valid_todo() {
++            result.status = "";
++            result.btw_panel = "";
++        }
++        result
++    }
++}
++
++#[derive(Default)]
++enum DockBlock {
++    #[default]
++    Unknown,
++    Primary {
++        compaction: bool,
++        stale_rows: usize,
++    },
++    Auxiliary,
++    Todo {
++        has_task: bool,
++    },
++}
++
++impl DockBlock {
++    const fn valid_todo(&self) -> bool {
++        !matches!(self, Self::Todo { has_task: false })
++    }
++}
++
++fn todo_task(line: &str) -> bool {
++    [" [ ] ", " [•] ", " [✓] ", " [×] "]
++        .iter()
++        .any(|prefix| line.starts_with(prefix))
++}
++
++fn spinner_line(line: &str) -> bool {
++    let mut chars = line.chars();
++    matches!(
++        chars.next(),
++        Some(
++            '•' | '◦'
++                | '●'
++                | '⠋'
++                | '⠙'
++                | '⠹'
++                | '⠸'
++                | '⠼'
++                | '⠴'
++                | '⠦'
++                | '⠧'
++                | '⠇'
++                | '⠏'
++        )
++    ) && chars.next() == Some(' ')
++}
++
++fn prompt_line(line: &str) -> bool {
++    line.trim_end() == "❯" || line.starts_with("❯ ")
++}
++
++struct Border<'a> {
++    width: usize,
++    scrolled_up: bool,
++    status: Option<&'a str>,
++}
++
++fn border(line: &str) -> Option<Border<'_>> {
++    // Keep indentation: trim_start() is exactly what lets editor content
++    // impersonate chrome in the legacy generic region.
++    let line = line.trim_end();
++    if let Some((status, _)) = line
++        .strip_prefix("── ")
++        .and_then(|text| text.rsplit_once(" ─"))
++        .filter(|(status, tail)| spinner_line(status) && tail.chars().all(|ch| ch == '─'))
++    {
++        return Some(Border {
++            width: line.width(),
++            scrolled_up: false,
++            status: Some(status),
++        });
++    }
++    if !line.starts_with("───") {
++        return None;
++    }
++    let scrolled_up = line.starts_with("─── ↑ ");
++    if let Some(scroll) = line
++        .strip_prefix("─── ↑ ")
++        .or_else(|| line.strip_prefix("─── ↓ "))
++    {
++        let (count, tail) = scroll.split_once(" more ")?;
++        if count.is_empty()
++            || count.starts_with('0')
++            || !count.bytes().all(|byte| byte.is_ascii_digit())
++            || !tail.chars().all(|ch| ch == '─')
++        {
++            return None;
++        }
++    } else if !line.chars().all(|ch| ch == '─') {
++        return None;
++    }
++    Some(Border {
++        width: line.chars().count(),
++        scrolled_up,
++        status: None,
++    })
++}
++
++struct Line<'a> {
++    start: usize,
++    end: usize,
++    text: &'a str,
++}
++
++fn lines(text: &str) -> impl Iterator<Item = Line<'_>> {
++    let mut offset = 0;
++    text.split_inclusive('\n').map(move |chunk| {
++        let start = offset;
++        offset += chunk.len();
++        Line {
++            start,
++            end: offset,
++            text: chunk.trim_end_matches(['\r', '\n']),
++        }
++    })
++}
++
++fn lines_rev(text: &str) -> impl Iterator<Item = Line<'_>> {
++    let mut offset = text.len();
++    text.split_inclusive('\n').rev().map(move |chunk| {
++        let end = offset;
++        offset -= chunk.len();
++        Line {
++            start: offset,
++            end,
++            text: chunk.trim_end_matches(['\r', '\n']),
++        }
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn status_embedded_in_current_editor_border_is_live() {
++        let status = "• Working (12s • esc to interrupt)";
++        let top = format!("── {status} {}", "─".repeat(40));
++        let bottom = "─".repeat(top.chars().count());
++        let screen = format!("old output\n{top}\n❯\n{bottom}\nfooter\n");
++        let parsed = Regions::parse(&screen);
++        assert_eq!(parsed.get(Region::Status), status);
++        assert_eq!(parsed.get(Region::Footer), "footer");
++    }
++
++    #[test]
++    fn status_pasted_inside_editor_border_is_not_live() {
++        let screen = "────────────────────────────────────────────────────\n❯ text\n  ── • Working (12s • esc to interrupt) ───────────────\n────────────────────────────────────────────────────\nfooter\n";
++        assert_eq!(Regions::parse(screen).get(Region::Status), "");
++    }
++
++    #[test]
++    fn indented_separators_remain_inside_the_editor() {
++        let screen =
++            " ⠋ Working\n──────────\n❯ text\n  ──────\n  ⠋ Running eval\n──────────\nfooter\n";
++        let parsed = Regions::parse(screen);
++        assert_eq!(parsed.get(Region::Status), " ⠋ Working\n");
++        assert_eq!(parsed.get(Region::Footer), "footer");
++        assert_eq!(parsed.get(Region::Dialog), "");
++    }
++
++    #[test]
++    fn scrolled_editor_cannot_be_a_permission_dialog() {
++        let screen = "─── ↑ 1 more ───────\n  Permission required: bash\n  → Allow once\n────────────────────\nfooter\n";
++        let parsed = Regions::parse(screen);
++        assert_eq!(parsed.get(Region::Dialog), "");
++        assert_eq!(parsed.get(Region::Footer), "footer");
++    }
++
++    #[test]
++    fn unknown_current_dialog_does_not_expose_the_previous_editor() {
++        let screen = " ⠋ Working\n──────────\n❯\n──────────\n──────────\n Unrelated dialog\n──────────\nfooter\n";
++        let parsed = Regions::parse(screen);
++        assert_eq!(parsed.get(Region::Status), "");
++        assert_eq!(parsed.get(Region::Dialog), "");
++    }
++
++    #[test]
++    fn selected_regions_are_borrowed_for_varied_unicode_and_line_endings() {
++        for width in [20, 40, 80, 110] {
++            for text in ["plain", "한글", "😺", "e\u{301}", "─"] {
++                for newline in ["\n", "\r\n"] {
++                    let border = "─".repeat(width);
++                    let screen = format!(" ⠋ Working{newline}{border}{newline}❯ {text}{newline}{border}{newline}{text}{newline}");
++                    let parsed = Regions::parse(&screen);
++                    assert_eq!(parsed.get(Region::Status).trim_end(), " ⠋ Working");
++                    assert_eq!(parsed.get(Region::Footer), text);
++                    for region in [
++                        Region::Status,
++                        Region::Dialog,
++                        Region::BtwPanel,
++                        Region::Footer,
++                    ] {
++                        let selected = parsed.get(region);
++                        if !selected.is_empty() {
++                            let offset = selected.as_ptr().addr() - screen.as_ptr().addr();
++                            assert_eq!(&screen[offset..offset + selected.len()], selected);
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
 diff --git a/src/detect/manifest/tests.rs b/src/detect/manifest/tests.rs
-index bdb0789d..00beaf71 100644
+index bdb0789..00beaf7 100644
 --- a/src/detect/manifest/tests.rs
 +++ b/src/detect/manifest/tests.rs
 @@ -99,6 +99,332 @@ fn known_agent_no_match_defaults_to_idle_fallback() {
@@ -1376,7 +2469,7 @@ index bdb0789d..00beaf71 100644
 +    assert_eq!(result.state, AgentState::Idle);
 +}
 diff --git a/src/detect/manifest_update.rs b/src/detect/manifest_update.rs
-index 33493059..aa79be05 100644
+index 3349305..aa79be0 100644
 --- a/src/detect/manifest_update.rs
 +++ b/src/detect/manifest_update.rs
 @@ -10,9 +10,9 @@ use std::{
@@ -1481,8 +2574,190 @@ index 33493059..aa79be05 100644
      #[test]
      fn catalog_rejects_unsafe_paths() {
          assert!(parse_catalog(
+diff --git a/src/detect/manifests/senpi.toml b/src/detect/manifests/senpi.toml
+new file mode 100644
+index 0000000..2121f34
+--- /dev/null
++++ b/src/detect/manifests/senpi.toml
+@@ -0,0 +1,176 @@
++id = "senpi"
++version = "2026.09.05.2"
++min_engine_version = 4
++updated_at = "2026-09-05T00:00:00Z"
++aliases = ["omo", "omo-senpi", "omo-native"]
++
++# Senpi powers the OmO Native coding-agent CLIs: npm @code-yeongyu/senpi
++# uses process.title / comm "senpi", while npm omo-ai exposes "omo".
++#
++# Working chrome (live herdr detection buffer, senpi 2026.8.7):
++#   "• Working (4m 27s • esc to interrupt)"
++# Context compaction uses a braille spinner and may leave overwritten text:
++#   "  ⠙ Compacting context... (esc to cancel)"
++#   "  ⠦ Compacting... (esc to cancel) ent benchmark implementation"
++# Active subagents render below the prompt box:
++#   " ⠏ Oracle review · agent:oracle(...) · turn 11 (...) · running · 3m 14s"
++# Latest source (Senpi 4df67dc87), rendered through a real Herdr PTY:
++# custom working indicators omit elapsed/interrupt hints: "⠴ Running eval".
++# Retry, branch summary, and automatic compaction use cancellation hints.
++# Default working alternates between • and ◦ without truecolor.
++# Permission prompts show
++# "Allow once" / "Allow always" / "Deny". Idle shows a bordered prompt
++# with "❯" and no interrupt suffix.
++
++[[rules]]
++id = "permission_prompt_blocked"
++state = "blocked"
++priority = 980
++region = "bottom_non_empty_lines(8)"
++visible_blocker = true
++line_regex = [
++  '^Permission required for .+$',
++  '^[ \t]*Allow once[ \t]*$',
++  '^[ \t]*Allow always[ \t]*$',
++  '^[ \t]*Deny[ \t]*$',
++]
++
++[[rules]]
++id = "permission_selector_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++# Current Senpi replaces the editor with a selector, including a selected arrow,
++# four choices and navigation hints. Retain the legacy prompt rule above.
++line_regex = [
++  '^ Permission required: [^\n]+$',
++  '^ → (?:Allow once|Allow always|Deny|Deny with feedback)[ \t]*$',
++  '^[ \t]*(?:→ )?Allow once[ \t]*$',
++  '^[ \t]*(?:→ )?Allow always[ \t]*$',
++  '^[ \t]*(?:→ )?Deny[ \t]*$',
++  '^[ \t]*(?:→ )?Deny with feedback[ \t]*$',
++]
++regex = ['(?m)^[ \t]*↑↓[ \t\n]+navigate[ \t\n]+[^ \t\n]+[ \t\n]+select[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "permission_feedback_blocked"
++state = "blocked"
++priority = 980
++region = "senpi_current_dialog"
++visible_blocker = true
++line_regex = ['^ Feedback[ \t]*$', '^>[^\n]*$']
++regex = ['(?m)^[ \t]*[^ \t\n]+[ \t\n]+submit[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
++
++[[rules]]
++id = "compacting_context_working"
++state = "working"
++# Preserve goal/native attribution when compaction is displaced by widgets.
++priority = 904
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Compacting(?: context| before next prompt)?|Auto-compacting|Context overflow detected, compacting)(?:\.\.\.|…) \([^)\n]+ to cancel\)(?:[ \t]+[^\n]*)?(?:\n[^\n]*){0,3}\z']
++
++[[rules]]
++id = "retry_or_branch_summary_working"
++state = "working"
++priority = 910
++region = "senpi_current_status"
++visible_working = true
++regex = ['\A[ \t\n]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Retrying \([0-9]+/[0-9]+\)[ \t\n]+in[ \t\n]+[0-9]+s|Summarizing[ \t\n]+branch)(?:\.\.\.|…)[ \t\n]+\([^)]+[ \t\n]to[ \t\n]+cancel\)[ \t\n]*\z']
++
++[[rules]]
++id = "active_subagent_working"
++state = "working"
++priority = 905
++region = "after_last_horizontal_rule"
++visible_working = true
++line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category):.+ · running ·(?: .*)?[ \t]*$']
++
++[[rules]]
++id = "detached_eval_working"
++state = "working"
++priority = 904
++region = "senpi_current_footer"
++visible_working = true
++# Detached cells are removed from this footer on settlement; transcript cell boxes
++# and passive monitor/loop status text are deliberately not activity evidence.
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[ \t]+)?↗ (?:(?:js|py|rb|jl|ruby|julia) · |eval [1-9][0-9]*: )[^\n]+ \([0-9dhms ]+\)(?:[ \t]+(?:Pursuing goal|Goal (?:paused|blocked)|[▰▱]|Loop |◉ watching|mem:)[^\n]*)?[ \t]*$']
++# A completed goal objective can exactly reproduce live-eval + goal bytes.
++# Keep the conservative result for that unresolved information collision.
++not = [{ contains = [' · Goal achieved'] }]
++
++[[rules]]
++id = "btw_answering_working"
++state = "working"
++priority = 904
++region = "senpi_current_btw_panel"
++visible_working = true
++# Match the live panel's final cancellation row, not an answer quoting that row.
++regex = ['(?m)^[ \t]*btw: [^\n]+\n(?:[^\n]*\n)*[ \t]*answering… \(Esc to cancel\)[ \t]*\n[ \t]*─{3,}[ \t]*\n?[ \t]*\z']
++
++[[rules]]
++id = "wrapped_interrupt_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++regex = ['(?m)^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Working|Running [^\n]+)[^\n]*\([^)─❯\n]*(?:\n[ \t]*[^)─❯\n]*){1,3}to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "native_task_activity_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Exclude both "suspended" and its eight-column rendering "suspe...".
++# Rust regex has no lookaround: other lengths, or a differing character,
++# exclude exactly these fields without hiding another live task row.
++any = [
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^·\n]{1,7}|[^·\n]{10,}) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{7}|[^·\n]{1}[^u·\n][^·\n]{6}|[^·\n]{2}[^s·\n][^·\n]{5}|[^·\n]{3}[^p·\n][^·\n]{4}|[^·\n]{4}[^e·\n][^·\n]{3}|[^·\n]{5}[^\.·\n][^·\n]{2}|[^·\n]{6}[^\.·\n][^·\n]{1}|[^·\n]{7}[^\.·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{8}|[^·\n]{1}[^u·\n][^·\n]{7}|[^·\n]{2}[^s·\n][^·\n]{6}|[^·\n]{3}[^p·\n][^·\n]{5}|[^·\n]{4}[^e·\n][^·\n]{4}|[^·\n]{5}[^n·\n][^·\n]{3}|[^·\n]{6}[^d·\n][^·\n]{2}|[^·\n]{7}[^e·\n][^·\n]{1}|[^·\n]{8}[^d·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
++]
++
++[[rules]]
++id = "active_dag_working"
++state = "working"
++priority = 904
++region = "after_last_horizontal_rule"
++visible_working = true
++# Header fields may wrap at word boundaries. Only indented child rows may
++# intervene before the running node: never borrow a node from another parent.
++regex = ['(?m)^[ \t]*(?:▶ [^\n]+[ \t\n]+running|· [^\n]+[ \t\n]+resuming)[ \t\n]+wave[ \t\n]+[0-9]+/[0-9]+[ \t\n]+[0-9]+/[0-9]+[ \t\n]+done,[ \t\n]+[1-9][0-9]*[ \t\n]+running(?:,[ \t\n]+[0-9]+[ \t\n]+failed)?[ \t]*\n(?:[ \t]{3,}[^\n]*\n)*[ \t]{3,}▶ [^\n]+ · (?:agent|category):[^\n]+$']
++
++[[rules]]
++id = "goal_continuation_working"
++state = "working"
++priority = 905
++region = "senpi_current_footer"
++visible_working = true
++line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[^\n]*\b)?Pursuing goal(?: \([0-9dhms ]+\))?(?:[ \t]+.*)?$']
++not = [{ contains = ["Goal achieved"] }]
++
++[[rules]]
++id = "interrupt_suffix_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ \([^)\n]+ to interrupt\)[ \t]*$']
++
++[[rules]]
++id = "custom_tool_indicator_working"
++state = "working"
++priority = 900
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Running [a-zA-Z0-9_.-]+(?:: [^\n]+)?[ \t]*$']
++
++[[rules]]
++id = "working_literal"
++state = "working"
++priority = 100
++region = "senpi_current_status"
++visible_working = true
++line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)\n]+\)|…|\.\.\.)?[ \t]*$']
 diff --git a/src/detect/mod.rs b/src/detect/mod.rs
-index 0c773f0e..6355a62e 100644
+index 0c773f0..6355a62 100644
 --- a/src/detect/mod.rs
 +++ b/src/detect/mod.rs
 @@ -64,11 +64,12 @@ pub enum Agent {
@@ -1712,850 +2987,22 @@ index 0c773f0e..6355a62e 100644
      #[test]
      fn identify_agent_in_job_detects_node_wrapped_pi_bundled_cli() {
          let job = crate::platform::ForegroundJob {
-diff --git a/src/integration/mod.rs b/src/integration/mod.rs
-index daa714e0..8cbde705 100644
---- a/src/integration/mod.rs
-+++ b/src/integration/mod.rs
-@@ -7,6 +7,7 @@ mod env;
- mod file_ops;
- mod opencode_config;
- mod registry;
-+pub(crate) mod senpi;
- mod targets;
- mod types;
- mod version;
-diff --git a/src/persist/restore.rs b/src/persist/restore.rs
-index 3c5775c9..69ec91f4 100644
---- a/src/persist/restore.rs
-+++ b/src/persist/restore.rs
-@@ -494,7 +494,7 @@ fn restore_tab(
-         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
-         let saved_managed_agent = saved_pane
-             .and_then(|pane| pane.managed_agent_kind.as_deref())
--            .and_then(crate::detect::parse_canonical_agent_label);
-+            .and_then(crate::detect::parse_persisted_agent_label);
-         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
-         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
-         let saved_history =
-diff --git a/src/persist/snapshot.rs b/src/persist/snapshot.rs
-index 07aaf3b9..0651b250 100644
---- a/src/persist/snapshot.rs
-+++ b/src/persist/snapshot.rs
-@@ -330,7 +330,7 @@ fn capture_tab(
-                     terminal.agent_name.clone(),
-                     terminal
-                         .managed_agent_kind()
--                        .map(|agent| crate::detect::agent_label(agent).to_string()),
-+                        .map(|agent| crate::detect::agent_manifest_id(agent).to_string()),
-                 )
-             })
-             .unwrap_or_default();
-@@ -593,6 +593,39 @@ mod tests {
-         assert_eq!(active_pane.managed_agent_kind.as_deref(), Some("pi"));
-     }
+diff --git a/src/events.rs b/src/events.rs
+index 9563899..92502b7 100644
+--- a/src/events.rs
++++ b/src/events.rs
+@@ -22,6 +22,8 @@ pub struct ApiWorktreeAddRequest {
+     pub repo_name: String,
+     pub label: Option<String>,
+     pub focus: bool,
++    pub grouped: bool,
++    pub group_head: bool,
+     pub respond_to: std::sync::mpsc::Sender<String>,
+ }
  
-+    #[test]
-+    fn senpi_snapshot_keeps_legacy_storage_and_canonical_runtime_identity() {
-+        let mut state = state_with_workspaces(&["senpi-snapshot"]);
-+        let root = state.workspaces[0].tabs[0].root_pane;
-+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
-+            .attached_terminal_id
-+            .clone();
-+        let now = std::time::Instant::now();
-+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
-+        terminal.begin_managed_agent(
-+            "reviewer".into(),
-+            crate::detect::Agent::Senpi,
-+            now,
-+            std::time::Duration::ZERO,
-+            std::time::Duration::from_secs(1),
-+        );
-+        terminal.set_detected_state(
-+            Some(crate::detect::Agent::Senpi),
-+            crate::detect::AgentState::Idle,
-+        );
-+        assert!(terminal.reconcile_managed_agent_at(now, false));
-+        assert_eq!(terminal.effective_agent_label(), Some("omo"));
-+        let snapshot = capture_from_state(&state);
-+        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
-+        assert_eq!(pane.managed_agent_kind.as_deref(), Some("senpi"));
-+        assert_eq!(
-+            pane.managed_agent_kind
-+                .as_deref()
-+                .and_then(crate::detect::parse_persisted_agent_label),
-+            Some(crate::detect::Agent::Senpi),
-+        );
-+    }
-+
-     #[test]
-     fn round_trip_empty_session() {
-         let snap = SessionSnapshot {
-diff --git a/distribution/agent-detection/senpi.toml b/distribution/agent-detection/senpi.toml
-new file mode 100644
-index 00000000..2121f34d
---- /dev/null
-+++ b/distribution/agent-detection/senpi.toml
-@@ -0,0 +1,176 @@
-+id = "senpi"
-+version = "2026.09.05.2"
-+min_engine_version = 4
-+updated_at = "2026-09-05T00:00:00Z"
-+aliases = ["omo", "omo-senpi", "omo-native"]
-+
-+# Senpi powers the OmO Native coding-agent CLIs: npm @code-yeongyu/senpi
-+# uses process.title / comm "senpi", while npm omo-ai exposes "omo".
-+#
-+# Working chrome (live herdr detection buffer, senpi 2026.8.7):
-+#   "• Working (4m 27s • esc to interrupt)"
-+# Context compaction uses a braille spinner and may leave overwritten text:
-+#   "  ⠙ Compacting context... (esc to cancel)"
-+#   "  ⠦ Compacting... (esc to cancel) ent benchmark implementation"
-+# Active subagents render below the prompt box:
-+#   " ⠏ Oracle review · agent:oracle(...) · turn 11 (...) · running · 3m 14s"
-+# Latest source (Senpi 4df67dc87), rendered through a real Herdr PTY:
-+# custom working indicators omit elapsed/interrupt hints: "⠴ Running eval".
-+# Retry, branch summary, and automatic compaction use cancellation hints.
-+# Default working alternates between • and ◦ without truecolor.
-+# Permission prompts show
-+# "Allow once" / "Allow always" / "Deny". Idle shows a bordered prompt
-+# with "❯" and no interrupt suffix.
-+
-+[[rules]]
-+id = "permission_prompt_blocked"
-+state = "blocked"
-+priority = 980
-+region = "bottom_non_empty_lines(8)"
-+visible_blocker = true
-+line_regex = [
-+  '^Permission required for .+$',
-+  '^[ \t]*Allow once[ \t]*$',
-+  '^[ \t]*Allow always[ \t]*$',
-+  '^[ \t]*Deny[ \t]*$',
-+]
-+
-+[[rules]]
-+id = "permission_selector_blocked"
-+state = "blocked"
-+priority = 980
-+region = "senpi_current_dialog"
-+visible_blocker = true
-+# Current Senpi replaces the editor with a selector, including a selected arrow,
-+# four choices and navigation hints. Retain the legacy prompt rule above.
-+line_regex = [
-+  '^ Permission required: [^\n]+$',
-+  '^ → (?:Allow once|Allow always|Deny|Deny with feedback)[ \t]*$',
-+  '^[ \t]*(?:→ )?Allow once[ \t]*$',
-+  '^[ \t]*(?:→ )?Allow always[ \t]*$',
-+  '^[ \t]*(?:→ )?Deny[ \t]*$',
-+  '^[ \t]*(?:→ )?Deny with feedback[ \t]*$',
-+]
-+regex = ['(?m)^[ \t]*↑↓[ \t\n]+navigate[ \t\n]+[^ \t\n]+[ \t\n]+select[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
-+
-+[[rules]]
-+id = "permission_feedback_blocked"
-+state = "blocked"
-+priority = 980
-+region = "senpi_current_dialog"
-+visible_blocker = true
-+line_regex = ['^ Feedback[ \t]*$', '^>[^\n]*$']
-+regex = ['(?m)^[ \t]*[^ \t\n]+[ \t\n]+submit[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
-+
-+[[rules]]
-+id = "compacting_context_working"
-+state = "working"
-+# Preserve goal/native attribution when compaction is displaced by widgets.
-+priority = 904
-+region = "senpi_current_status"
-+visible_working = true
-+regex = ['(?m)^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Compacting(?: context| before next prompt)?|Auto-compacting|Context overflow detected, compacting)(?:\.\.\.|…) \([^)\n]+ to cancel\)(?:[ \t]+[^\n]*)?(?:\n[^\n]*){0,3}\z']
-+
-+[[rules]]
-+id = "retry_or_branch_summary_working"
-+state = "working"
-+priority = 910
-+region = "senpi_current_status"
-+visible_working = true
-+regex = ['\A[ \t\n]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Retrying \([0-9]+/[0-9]+\)[ \t\n]+in[ \t\n]+[0-9]+s|Summarizing[ \t\n]+branch)(?:\.\.\.|…)[ \t\n]+\([^)]+[ \t\n]to[ \t\n]+cancel\)[ \t\n]*\z']
-+
-+[[rules]]
-+id = "active_subagent_working"
-+state = "working"
-+priority = 905
-+region = "after_last_horizontal_rule"
-+visible_working = true
-+line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category):.+ · running ·(?: .*)?[ \t]*$']
-+
-+[[rules]]
-+id = "detached_eval_working"
-+state = "working"
-+priority = 904
-+region = "senpi_current_footer"
-+visible_working = true
-+# Detached cells are removed from this footer on settlement; transcript cell boxes
-+# and passive monitor/loop status text are deliberately not activity evidence.
-+line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[ \t]+)?↗ (?:(?:js|py|rb|jl|ruby|julia) · |eval [1-9][0-9]*: )[^\n]+ \([0-9dhms ]+\)(?:[ \t]+(?:Pursuing goal|Goal (?:paused|blocked)|[▰▱]|Loop |◉ watching|mem:)[^\n]*)?[ \t]*$']
-+# A completed goal objective can exactly reproduce live-eval + goal bytes.
-+# Keep the conservative result for that unresolved information collision.
-+not = [{ contains = [' · Goal achieved'] }]
-+
-+[[rules]]
-+id = "btw_answering_working"
-+state = "working"
-+priority = 904
-+region = "senpi_current_btw_panel"
-+visible_working = true
-+# Match the live panel's final cancellation row, not an answer quoting that row.
-+regex = ['(?m)^[ \t]*btw: [^\n]+\n(?:[^\n]*\n)*[ \t]*answering… \(Esc to cancel\)[ \t]*\n[ \t]*─{3,}[ \t]*\n?[ \t]*\z']
-+
-+[[rules]]
-+id = "wrapped_interrupt_working"
-+state = "working"
-+priority = 900
-+region = "senpi_current_status"
-+visible_working = true
-+regex = ['(?m)^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Working|Running [^\n]+)[^\n]*\([^)─❯\n]*(?:\n[ \t]*[^)─❯\n]*){1,3}to interrupt\)[ \t]*$']
-+
-+[[rules]]
-+id = "native_task_activity_working"
-+state = "working"
-+priority = 904
-+region = "after_last_horizontal_rule"
-+visible_working = true
-+# Exclude both "suspended" and its eight-column rendering "suspe...".
-+# Rust regex has no lookaround: other lengths, or a differing character,
-+# exclude exactly these fields without hiding another live task row.
-+any = [
-+  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^·\n]{1,7}|[^·\n]{10,}) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
-+  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{7}|[^·\n]{1}[^u·\n][^·\n]{6}|[^·\n]{2}[^s·\n][^·\n]{5}|[^·\n]{3}[^p·\n][^·\n]{4}|[^·\n]{4}[^e·\n][^·\n]{3}|[^·\n]{5}[^\.·\n][^·\n]{2}|[^·\n]{6}[^\.·\n][^·\n]{1}|[^·\n]{7}[^\.·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
-+  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{8}|[^·\n]{1}[^u·\n][^·\n]{7}|[^·\n]{2}[^s·\n][^·\n]{6}|[^·\n]{3}[^p·\n][^·\n]{5}|[^·\n]{4}[^e·\n][^·\n]{4}|[^·\n]{5}[^n·\n][^·\n]{3}|[^·\n]{6}[^d·\n][^·\n]{2}|[^·\n]{7}[^e·\n][^·\n]{1}|[^·\n]{8}[^d·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
-+]
-+
-+[[rules]]
-+id = "active_dag_working"
-+state = "working"
-+priority = 904
-+region = "after_last_horizontal_rule"
-+visible_working = true
-+# Header fields may wrap at word boundaries. Only indented child rows may
-+# intervene before the running node: never borrow a node from another parent.
-+regex = ['(?m)^[ \t]*(?:▶ [^\n]+[ \t\n]+running|· [^\n]+[ \t\n]+resuming)[ \t\n]+wave[ \t\n]+[0-9]+/[0-9]+[ \t\n]+[0-9]+/[0-9]+[ \t\n]+done,[ \t\n]+[1-9][0-9]*[ \t\n]+running(?:,[ \t\n]+[0-9]+[ \t\n]+failed)?[ \t]*\n(?:[ \t]{3,}[^\n]*\n)*[ \t]{3,}▶ [^\n]+ · (?:agent|category):[^\n]+$']
-+
-+[[rules]]
-+id = "goal_continuation_working"
-+state = "working"
-+priority = 905
-+region = "senpi_current_footer"
-+visible_working = true
-+line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[^\n]*\b)?Pursuing goal(?: \([0-9dhms ]+\))?(?:[ \t]+.*)?$']
-+not = [{ contains = ["Goal achieved"] }]
-+
-+[[rules]]
-+id = "interrupt_suffix_working"
-+state = "working"
-+priority = 900
-+region = "senpi_current_status"
-+visible_working = true
-+line_regex = ['^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ \([^)\n]+ to interrupt\)[ \t]*$']
-+
-+[[rules]]
-+id = "custom_tool_indicator_working"
-+state = "working"
-+priority = 900
-+region = "senpi_current_status"
-+visible_working = true
-+line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Running [a-zA-Z0-9_.-]+(?:: [^\n]+)?[ \t]*$']
-+
-+[[rules]]
-+id = "working_literal"
-+state = "working"
-+priority = 100
-+region = "senpi_current_status"
-+visible_working = true
-+line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)\n]+\)|…|\.\.\.)?[ \t]*$']
-diff --git a/src/detect/manifest/senpi_regions.rs b/src/detect/manifest/senpi_regions.rs
-new file mode 100644
-index 00000000..6c95f176
---- /dev/null
-+++ b/src/detect/manifest/senpi_regions.rs
-@@ -0,0 +1,393 @@
-+//! Senpi's current dock, distinct from the legacy generic border heuristics.
-+//!
-+//! The snapshot owns every byte. Parsing uses only borrowed slices and line
-+//! offsets; the manifest evaluator caches this view once, not once per rule.
-+
-+use unicode_width::UnicodeWidthStr;
-+
-+pub(super) const ENGINE_VERSION: u32 = 4;
-+
-+#[derive(Debug, Clone, Copy)]
-+pub(super) enum Region {
-+    Dialog,
-+    Status,
-+    BtwPanel,
-+    Footer,
-+}
-+
-+impl Region {
-+    pub(super) fn parse(name: &str) -> Option<Self> {
-+        match name.trim() {
-+            "senpi_current_dialog" => Some(Self::Dialog),
-+            "senpi_current_status" => Some(Self::Status),
-+            "senpi_current_btw_panel" => Some(Self::BtwPanel),
-+            "senpi_current_footer" => Some(Self::Footer),
-+            _ => None,
-+        }
-+    }
-+}
-+
-+#[derive(Default)]
-+pub(super) struct Regions<'a> {
-+    dialog: &'a str,
-+    status: &'a str,
-+    btw_panel: &'a str,
-+    footer: &'a str,
-+}
-+
-+impl<'a> Regions<'a> {
-+    pub(super) fn parse(screen: &'a str) -> Self {
-+        let mut borders =
-+            lines_rev(screen).filter_map(|line| border(line.text).map(|shape| (line, shape)));
-+        let Some((bottom, bottom_shape)) = borders.next() else {
-+            // Legacy captures can end at an unbordered prompt. Retain that
-+            // bounded prefix, never the entire snapshot or a pasted prompt body.
-+            let Some(prompt) = lines_rev(screen).find(|line| prompt_line(line.text)) else {
-+                return Self::default();
-+            };
-+            return Self::dock(&screen[..prompt.start]);
-+        };
-+        let Some((top, top_shape)) = borders.next() else {
-+            return Self::default();
-+        };
-+        if top_shape.width != bottom_shape.width
-+            || bottom_shape.scrolled_up
-+            || bottom_shape.status.is_some()
-+        {
-+            return Self::default();
-+        }
-+        let body = &screen[top.end..bottom.start];
-+        let first = body
-+            .lines()
-+            .find(|line| !line.trim().is_empty())
-+            .unwrap_or("");
-+        let editor = prompt_line(first)
-+            || (top_shape.scrolled_up
-+                && body
-+                    .lines()
-+                    .all(|line| line.starts_with("  ") || line.trim().is_empty()));
-+        let dialog = first.starts_with(" Permission required: ") || first.trim_end() == " Feedback";
-+        if !editor && !dialog {
-+            // Do not search behind an unknown current selector for an old editor.
-+            return Self::default();
-+        }
-+        let mut result = Self::dock(&screen[..top.start]);
-+        if let (true, Some(status)) = (editor, top_shape.status) {
-+            result.status = status;
-+        }
-+        if dialog {
-+            result.dialog = body;
-+        }
-+        result.footer = screen[bottom.end..]
-+            .lines()
-+            .rev()
-+            .find(|line| !line.trim().is_empty())
-+            .filter(|line| !line.starts_with([' ', '\t']))
-+            .unwrap_or("");
-+        result
-+    }
-+
-+    pub(super) const fn get(&self, region: Region) -> &'a str {
-+        match region {
-+            Region::Dialog => self.dialog,
-+            Region::Status => self.status,
-+            Region::BtwPanel => self.btw_panel,
-+            Region::Footer => self.footer,
-+        }
-+    }
-+
-+    fn dock(prefix: &'a str) -> Self {
-+        let mut result = Self::default();
-+        let mut block = DockBlock::Unknown;
-+        let mut status_start = 0;
-+        let mut rows = lines(prefix).peekable();
-+        while let Some(line) = rows.next() {
-+            if line.text.trim().is_empty() {
-+                continue;
-+            }
-+            if let Some(shape) = border(line.text) {
-+                if !block.valid_todo() {
-+                    result.status = "";
-+                }
-+                if rows
-+                    .peek()
-+                    .is_some_and(|next| next.text.starts_with(" btw: "))
-+                {
-+                    // Text pads the question/answer, so its user-controlled
-+                    // horizontal lines cannot close this column-zero panel.
-+                    let closing = rows.find(|next| border(next.text).is_some());
-+                    if let Some(closing) = closing.filter(|closing| {
-+                        border(closing.text)
-+                            .is_some_and(|closing_shape| closing_shape.width == shape.width)
-+                    }) {
-+                        result.btw_panel = &prefix[line.start..closing.end];
-+                        block = DockBlock::Auxiliary;
-+                        continue;
-+                    }
-+                }
-+                result.status = "";
-+                result.btw_panel = "";
-+                block = DockBlock::Unknown;
-+                continue;
-+            }
-+            if matches!(block, DockBlock::Todo { .. }) && line.text.starts_with(' ') {
-+                if todo_task(line.text) {
-+                    block = DockBlock::Todo { has_task: true };
-+                }
-+                continue;
-+            }
-+            if line.text.trim_end() == " Todo" {
-+                block = DockBlock::Todo { has_task: false };
-+                continue;
-+            }
-+            let trimmed = line.text.trim_start();
-+            if trimmed.starts_with("Tip:")
-+                || trimmed.starts_with('↳')
-+                || trimmed.starts_with("Running PreToolUse hook")
-+                || trimmed.starts_with("Running PostToolUse hook")
-+            {
-+                block = DockBlock::Auxiliary;
-+                continue;
-+            }
-+            if spinner_line(trimmed) {
-+                status_start = line.start;
-+                result.status = &prefix[status_start..line.end];
-+                block = DockBlock::Primary {
-+                    compaction: trimmed.contains(" to cancel)") && trimmed.contains("ompacting"),
-+                    stale_rows: 0,
-+                };
-+                continue;
-+            }
-+            match &mut block {
-+                DockBlock::Primary {
-+                    compaction,
-+                    stale_rows,
-+                } if line.text.starts_with([' ', '\t']) || (*compaction && *stale_rows < 3) => {
-+                    // Older compaction captures include a few unindented
-+                    // overwritten continuation rows. They cannot cross a border.
-+                    *stale_rows += 1;
-+                    result.status = &prefix[status_start..line.end];
-+                }
-+                DockBlock::Auxiliary if line.text.starts_with([' ', '\t']) => {}
-+                DockBlock::Unknown
-+                | DockBlock::Primary { .. }
-+                | DockBlock::Auxiliary
-+                | DockBlock::Todo { .. } => {
-+                    result.status = "";
-+                    result.btw_panel = "";
-+                    block = DockBlock::Unknown;
-+                }
-+            }
-+        }
-+        if !block.valid_todo() {
-+            result.status = "";
-+            result.btw_panel = "";
-+        }
-+        result
-+    }
-+}
-+
-+#[derive(Default)]
-+enum DockBlock {
-+    #[default]
-+    Unknown,
-+    Primary {
-+        compaction: bool,
-+        stale_rows: usize,
-+    },
-+    Auxiliary,
-+    Todo {
-+        has_task: bool,
-+    },
-+}
-+
-+impl DockBlock {
-+    const fn valid_todo(&self) -> bool {
-+        !matches!(self, Self::Todo { has_task: false })
-+    }
-+}
-+
-+fn todo_task(line: &str) -> bool {
-+    [" [ ] ", " [•] ", " [✓] ", " [×] "]
-+        .iter()
-+        .any(|prefix| line.starts_with(prefix))
-+}
-+
-+fn spinner_line(line: &str) -> bool {
-+    let mut chars = line.chars();
-+    matches!(
-+        chars.next(),
-+        Some(
-+            '•' | '◦'
-+                | '●'
-+                | '⠋'
-+                | '⠙'
-+                | '⠹'
-+                | '⠸'
-+                | '⠼'
-+                | '⠴'
-+                | '⠦'
-+                | '⠧'
-+                | '⠇'
-+                | '⠏'
-+        )
-+    ) && chars.next() == Some(' ')
-+}
-+
-+fn prompt_line(line: &str) -> bool {
-+    line.trim_end() == "❯" || line.starts_with("❯ ")
-+}
-+
-+struct Border<'a> {
-+    width: usize,
-+    scrolled_up: bool,
-+    status: Option<&'a str>,
-+}
-+
-+fn border(line: &str) -> Option<Border<'_>> {
-+    // Keep indentation: trim_start() is exactly what lets editor content
-+    // impersonate chrome in the legacy generic region.
-+    let line = line.trim_end();
-+    if let Some((status, _)) = line
-+        .strip_prefix("── ")
-+        .and_then(|text| text.rsplit_once(" ─"))
-+        .filter(|(status, tail)| spinner_line(status) && tail.chars().all(|ch| ch == '─'))
-+    {
-+        return Some(Border {
-+            width: line.width(),
-+            scrolled_up: false,
-+            status: Some(status),
-+        });
-+    }
-+    if !line.starts_with("───") {
-+        return None;
-+    }
-+    let scrolled_up = line.starts_with("─── ↑ ");
-+    if let Some(scroll) = line
-+        .strip_prefix("─── ↑ ")
-+        .or_else(|| line.strip_prefix("─── ↓ "))
-+    {
-+        let (count, tail) = scroll.split_once(" more ")?;
-+        if count.is_empty()
-+            || count.starts_with('0')
-+            || !count.bytes().all(|byte| byte.is_ascii_digit())
-+            || !tail.chars().all(|ch| ch == '─')
-+        {
-+            return None;
-+        }
-+    } else if !line.chars().all(|ch| ch == '─') {
-+        return None;
-+    }
-+    Some(Border {
-+        width: line.chars().count(),
-+        scrolled_up,
-+        status: None,
-+    })
-+}
-+
-+struct Line<'a> {
-+    start: usize,
-+    end: usize,
-+    text: &'a str,
-+}
-+
-+fn lines(text: &str) -> impl Iterator<Item = Line<'_>> {
-+    let mut offset = 0;
-+    text.split_inclusive('\n').map(move |chunk| {
-+        let start = offset;
-+        offset += chunk.len();
-+        Line {
-+            start,
-+            end: offset,
-+            text: chunk.trim_end_matches(['\r', '\n']),
-+        }
-+    })
-+}
-+
-+fn lines_rev(text: &str) -> impl Iterator<Item = Line<'_>> {
-+    let mut offset = text.len();
-+    text.split_inclusive('\n').rev().map(move |chunk| {
-+        let end = offset;
-+        offset -= chunk.len();
-+        Line {
-+            start: offset,
-+            end,
-+            text: chunk.trim_end_matches(['\r', '\n']),
-+        }
-+    })
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    #[test]
-+    fn status_embedded_in_current_editor_border_is_live() {
-+        let status = "• Working (12s • esc to interrupt)";
-+        let top = format!("── {status} {}", "─".repeat(40));
-+        let bottom = "─".repeat(top.chars().count());
-+        let screen = format!("old output\n{top}\n❯\n{bottom}\nfooter\n");
-+        let parsed = Regions::parse(&screen);
-+        assert_eq!(parsed.get(Region::Status), status);
-+        assert_eq!(parsed.get(Region::Footer), "footer");
-+    }
-+
-+    #[test]
-+    fn status_pasted_inside_editor_border_is_not_live() {
-+        let screen = "────────────────────────────────────────────────────\n❯ text\n  ── • Working (12s • esc to interrupt) ───────────────\n────────────────────────────────────────────────────\nfooter\n";
-+        assert_eq!(Regions::parse(screen).get(Region::Status), "");
-+    }
-+
-+    #[test]
-+    fn indented_separators_remain_inside_the_editor() {
-+        let screen =
-+            " ⠋ Working\n──────────\n❯ text\n  ──────\n  ⠋ Running eval\n──────────\nfooter\n";
-+        let parsed = Regions::parse(screen);
-+        assert_eq!(parsed.get(Region::Status), " ⠋ Working\n");
-+        assert_eq!(parsed.get(Region::Footer), "footer");
-+        assert_eq!(parsed.get(Region::Dialog), "");
-+    }
-+
-+    #[test]
-+    fn scrolled_editor_cannot_be_a_permission_dialog() {
-+        let screen = "─── ↑ 1 more ───────\n  Permission required: bash\n  → Allow once\n────────────────────\nfooter\n";
-+        let parsed = Regions::parse(screen);
-+        assert_eq!(parsed.get(Region::Dialog), "");
-+        assert_eq!(parsed.get(Region::Footer), "footer");
-+    }
-+
-+    #[test]
-+    fn unknown_current_dialog_does_not_expose_the_previous_editor() {
-+        let screen = " ⠋ Working\n──────────\n❯\n──────────\n──────────\n Unrelated dialog\n──────────\nfooter\n";
-+        let parsed = Regions::parse(screen);
-+        assert_eq!(parsed.get(Region::Status), "");
-+        assert_eq!(parsed.get(Region::Dialog), "");
-+    }
-+
-+    #[test]
-+    fn selected_regions_are_borrowed_for_varied_unicode_and_line_endings() {
-+        for width in [20, 40, 80, 110] {
-+            for text in ["plain", "한글", "😺", "e\u{301}", "─"] {
-+                for newline in ["\n", "\r\n"] {
-+                    let border = "─".repeat(width);
-+                    let screen = format!(" ⠋ Working{newline}{border}{newline}❯ {text}{newline}{border}{newline}{text}{newline}");
-+                    let parsed = Regions::parse(&screen);
-+                    assert_eq!(parsed.get(Region::Status).trim_end(), " ⠋ Working");
-+                    assert_eq!(parsed.get(Region::Footer), text);
-+                    for region in [
-+                        Region::Status,
-+                        Region::Dialog,
-+                        Region::BtwPanel,
-+                        Region::Footer,
-+                    ] {
-+                        let selected = parsed.get(region);
-+                        if !selected.is_empty() {
-+                            let offset = selected.as_ptr().addr() - screen.as_ptr().addr();
-+                            assert_eq!(&screen[offset..offset + selected.len()], selected);
-+                        }
-+                    }
-+                }
-+            }
-+        }
-+    }
-+}
-diff --git a/src/detect/manifests/senpi.toml b/src/detect/manifests/senpi.toml
-new file mode 100644
-index 00000000..2121f34d
---- /dev/null
-+++ b/src/detect/manifests/senpi.toml
-@@ -0,0 +1,176 @@
-+id = "senpi"
-+version = "2026.09.05.2"
-+min_engine_version = 4
-+updated_at = "2026-09-05T00:00:00Z"
-+aliases = ["omo", "omo-senpi", "omo-native"]
-+
-+# Senpi powers the OmO Native coding-agent CLIs: npm @code-yeongyu/senpi
-+# uses process.title / comm "senpi", while npm omo-ai exposes "omo".
-+#
-+# Working chrome (live herdr detection buffer, senpi 2026.8.7):
-+#   "• Working (4m 27s • esc to interrupt)"
-+# Context compaction uses a braille spinner and may leave overwritten text:
-+#   "  ⠙ Compacting context... (esc to cancel)"
-+#   "  ⠦ Compacting... (esc to cancel) ent benchmark implementation"
-+# Active subagents render below the prompt box:
-+#   " ⠏ Oracle review · agent:oracle(...) · turn 11 (...) · running · 3m 14s"
-+# Latest source (Senpi 4df67dc87), rendered through a real Herdr PTY:
-+# custom working indicators omit elapsed/interrupt hints: "⠴ Running eval".
-+# Retry, branch summary, and automatic compaction use cancellation hints.
-+# Default working alternates between • and ◦ without truecolor.
-+# Permission prompts show
-+# "Allow once" / "Allow always" / "Deny". Idle shows a bordered prompt
-+# with "❯" and no interrupt suffix.
-+
-+[[rules]]
-+id = "permission_prompt_blocked"
-+state = "blocked"
-+priority = 980
-+region = "bottom_non_empty_lines(8)"
-+visible_blocker = true
-+line_regex = [
-+  '^Permission required for .+$',
-+  '^[ \t]*Allow once[ \t]*$',
-+  '^[ \t]*Allow always[ \t]*$',
-+  '^[ \t]*Deny[ \t]*$',
-+]
-+
-+[[rules]]
-+id = "permission_selector_blocked"
-+state = "blocked"
-+priority = 980
-+region = "senpi_current_dialog"
-+visible_blocker = true
-+# Current Senpi replaces the editor with a selector, including a selected arrow,
-+# four choices and navigation hints. Retain the legacy prompt rule above.
-+line_regex = [
-+  '^ Permission required: [^\n]+$',
-+  '^ → (?:Allow once|Allow always|Deny|Deny with feedback)[ \t]*$',
-+  '^[ \t]*(?:→ )?Allow once[ \t]*$',
-+  '^[ \t]*(?:→ )?Allow always[ \t]*$',
-+  '^[ \t]*(?:→ )?Deny[ \t]*$',
-+  '^[ \t]*(?:→ )?Deny with feedback[ \t]*$',
-+]
-+regex = ['(?m)^[ \t]*↑↓[ \t\n]+navigate[ \t\n]+[^ \t\n]+[ \t\n]+select[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
-+
-+[[rules]]
-+id = "permission_feedback_blocked"
-+state = "blocked"
-+priority = 980
-+region = "senpi_current_dialog"
-+visible_blocker = true
-+line_regex = ['^ Feedback[ \t]*$', '^>[^\n]*$']
-+regex = ['(?m)^[ \t]*[^ \t\n]+[ \t\n]+submit[ \t\n]+[^ \t\n]+[ \t\n]+cancel[ \t]*$']
-+
-+[[rules]]
-+id = "compacting_context_working"
-+state = "working"
-+# Preserve goal/native attribution when compaction is displaced by widgets.
-+priority = 904
-+region = "senpi_current_status"
-+visible_working = true
-+regex = ['(?m)^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Compacting(?: context| before next prompt)?|Auto-compacting|Context overflow detected, compacting)(?:\.\.\.|…) \([^)\n]+ to cancel\)(?:[ \t]+[^\n]*)?(?:\n[^\n]*){0,3}\z']
-+
-+[[rules]]
-+id = "retry_or_branch_summary_working"
-+state = "working"
-+priority = 910
-+region = "senpi_current_status"
-+visible_working = true
-+regex = ['\A[ \t\n]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Retrying \([0-9]+/[0-9]+\)[ \t\n]+in[ \t\n]+[0-9]+s|Summarizing[ \t\n]+branch)(?:\.\.\.|…)[ \t\n]+\([^)]+[ \t\n]to[ \t\n]+cancel\)[ \t\n]*\z']
-+
-+[[rules]]
-+id = "active_subagent_working"
-+state = "working"
-+priority = 905
-+region = "after_last_horizontal_rule"
-+visible_working = true
-+line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category):.+ · running ·(?: .*)?[ \t]*$']
-+
-+[[rules]]
-+id = "detached_eval_working"
-+state = "working"
-+priority = 904
-+region = "senpi_current_footer"
-+visible_working = true
-+# Detached cells are removed from this footer on settlement; transcript cell boxes
-+# and passive monitor/loop status text are deliberately not activity evidence.
-+line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[ \t]+)?↗ (?:(?:js|py|rb|jl|ruby|julia) · |eval [1-9][0-9]*: )[^\n]+ \([0-9dhms ]+\)(?:[ \t]+(?:Pursuing goal|Goal (?:paused|blocked)|[▰▱]|Loop |◉ watching|mem:)[^\n]*)?[ \t]*$']
-+# A completed goal objective can exactly reproduce live-eval + goal bytes.
-+# Keep the conservative result for that unresolved information collision.
-+not = [{ contains = [' · Goal achieved'] }]
-+
-+[[rules]]
-+id = "btw_answering_working"
-+state = "working"
-+priority = 904
-+region = "senpi_current_btw_panel"
-+visible_working = true
-+# Match the live panel's final cancellation row, not an answer quoting that row.
-+regex = ['(?m)^[ \t]*btw: [^\n]+\n(?:[^\n]*\n)*[ \t]*answering… \(Esc to cancel\)[ \t]*\n[ \t]*─{3,}[ \t]*\n?[ \t]*\z']
-+
-+[[rules]]
-+id = "wrapped_interrupt_working"
-+state = "working"
-+priority = 900
-+region = "senpi_current_status"
-+visible_working = true
-+regex = ['(?m)^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:Working|Running [^\n]+)[^\n]*\([^)─❯\n]*(?:\n[ \t]*[^)─❯\n]*){1,3}to interrupt\)[ \t]*$']
-+
-+[[rules]]
-+id = "native_task_activity_working"
-+state = "working"
-+priority = 904
-+region = "after_last_horizontal_rule"
-+visible_working = true
-+# Exclude both "suspended" and its eight-column rendering "suspe...".
-+# Rust regex has no lookaround: other lengths, or a differing character,
-+# exclude exactly these fields without hiding another live task row.
-+any = [
-+  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^·\n]{1,7}|[^·\n]{10,}) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
-+  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{7}|[^·\n]{1}[^u·\n][^·\n]{6}|[^·\n]{2}[^s·\n][^·\n]{5}|[^·\n]{3}[^p·\n][^·\n]{4}|[^·\n]{4}[^e·\n][^·\n]{3}|[^·\n]{5}[^\.·\n][^·\n]{2}|[^·\n]{6}[^\.·\n][^·\n]{1}|[^·\n]{7}[^\.·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
-+  { line_regex = ['^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ · (?:agent|category|model):[^\n]+ · (?:[^s·\n][^·\n]{8}|[^·\n]{1}[^u·\n][^·\n]{7}|[^·\n]{2}[^s·\n][^·\n]{6}|[^·\n]{3}[^p·\n][^·\n]{5}|[^·\n]{4}[^e·\n][^·\n]{4}|[^·\n]{5}[^n·\n][^·\n]{3}|[^·\n]{6}[^d·\n][^·\n]{2}|[^·\n]{7}[^e·\n][^·\n]{1}|[^·\n]{8}[^d·\n]) · <?[0-9]+(?:ms|[smhd])(?: [0-9]+[smhd])*[ \t]*$'] },
-+]
-+
-+[[rules]]
-+id = "active_dag_working"
-+state = "working"
-+priority = 904
-+region = "after_last_horizontal_rule"
-+visible_working = true
-+# Header fields may wrap at word boundaries. Only indented child rows may
-+# intervene before the running node: never borrow a node from another parent.
-+regex = ['(?m)^[ \t]*(?:▶ [^\n]+[ \t\n]+running|· [^\n]+[ \t\n]+resuming)[ \t\n]+wave[ \t\n]+[0-9]+/[0-9]+[ \t\n]+[0-9]+/[0-9]+[ \t\n]+done,[ \t\n]+[1-9][0-9]*[ \t\n]+running(?:,[ \t\n]+[0-9]+[ \t\n]+failed)?[ \t]*\n(?:[ \t]{3,}[^\n]*\n)*[ \t]{3,}▶ [^\n]+ · (?:agent|category):[^\n]+$']
-+
-+[[rules]]
-+id = "goal_continuation_working"
-+state = "working"
-+priority = 905
-+region = "senpi_current_footer"
-+visible_working = true
-+line_regex = ['^[ \t]*(?:\([^)\n]*OmO Native\)[^\n]*\b)?Pursuing goal(?: \([0-9dhms ]+\))?(?:[ \t]+.*)?$']
-+not = [{ contains = ["Goal achieved"] }]
-+
-+[[rules]]
-+id = "interrupt_suffix_working"
-+state = "working"
-+priority = 900
-+region = "senpi_current_status"
-+visible_working = true
-+line_regex = ['^[ \t]*[•◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] .+ \([^)\n]+ to interrupt\)[ \t]*$']
-+
-+[[rules]]
-+id = "custom_tool_indicator_working"
-+state = "working"
-+priority = 900
-+region = "senpi_current_status"
-+visible_working = true
-+line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Running [a-zA-Z0-9_.-]+(?:: [^\n]+)?[ \t]*$']
-+
-+[[rules]]
-+id = "working_literal"
-+state = "working"
-+priority = 100
-+region = "senpi_current_status"
-+visible_working = true
-+line_regex = ['^[ \t]*[•◦●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)\n]+\)|…|\.\.\.)?[ \t]*$']
 diff --git a/src/integration/assets/senpi/herdr-agent-state.test.ts b/src/integration/assets/senpi/herdr-agent-state.test.ts
 new file mode 100644
-index 00000000..3e7c07ca
+index 0000000..3e7c07c
 --- /dev/null
 +++ b/src/integration/assets/senpi/herdr-agent-state.test.ts
 @@ -0,0 +1,246 @@
@@ -2807,7 +3254,7 @@ index 00000000..3e7c07ca
 +});
 diff --git a/src/integration/assets/senpi/herdr-agent-state.ts b/src/integration/assets/senpi/herdr-agent-state.ts
 new file mode 100644
-index 00000000..48a1bfe1
+index 0000000..48a1bfe
 --- /dev/null
 +++ b/src/integration/assets/senpi/herdr-agent-state.ts
 @@ -0,0 +1,170 @@
@@ -2981,9 +3428,21 @@ index 00000000..48a1bfe1
 +    }
 +  });
 +}
+diff --git a/src/integration/mod.rs b/src/integration/mod.rs
+index daa714e..8cbde70 100644
+--- a/src/integration/mod.rs
++++ b/src/integration/mod.rs
+@@ -7,6 +7,7 @@ mod env;
+ mod file_ops;
+ mod opencode_config;
+ mod registry;
++pub(crate) mod senpi;
+ mod targets;
+ mod types;
+ mod version;
 diff --git a/src/integration/senpi.rs b/src/integration/senpi.rs
 new file mode 100644
-index 00000000..22e646df
+index 0000000..22e646d
 --- /dev/null
 +++ b/src/integration/senpi.rs
 @@ -0,0 +1,261 @@
@@ -3250,7 +3709,7 @@ index 00000000..22e646df
 +mod tests;
 diff --git a/src/integration/senpi/tests.rs b/src/integration/senpi/tests.rs
 new file mode 100644
-index 00000000..351f013f
+index 0000000..351f013
 --- /dev/null
 +++ b/src/integration/senpi/tests.rs
 @@ -0,0 +1,282 @@
@@ -3536,3 +3995,232 @@ index 00000000..351f013f
 +    assert!(!path.exists());
 +    assert!(!uninstall_at(&path).unwrap());
 +}
+diff --git a/src/persist/restore.rs b/src/persist/restore.rs
+index 3c5775c..da6ca9c 100644
+--- a/src/persist/restore.rs
++++ b/src/persist/restore.rs
+@@ -438,8 +438,12 @@ fn restored_worktree_space_membership(
+ ) -> Option<crate::workspace::WorktreeSpaceMembership> {
+     space.filter(|space| {
+         space.checkout_path.exists()
+-            && crate::workspace::git_space_metadata(&space.checkout_path)
+-                .is_some_and(|current| current.key == space.key)
++            && crate::workspace::git_space_metadata(&space.checkout_path).is_some_and(|current| {
++                current.key == space.key
++                    || (space.key.starts_with("herdr-group:")
++                        && crate::workspace::git_space_metadata(&space.repo_root)
++                            .is_some_and(|source| source.key == current.key))
++            })
+     })
+ }
+ 
+@@ -494,7 +498,7 @@ fn restore_tab(
+         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+         let saved_managed_agent = saved_pane
+             .and_then(|pane| pane.managed_agent_kind.as_deref())
+-            .and_then(crate::detect::parse_canonical_agent_label);
++            .and_then(crate::detect::parse_persisted_agent_label);
+         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
+         let saved_history =
+@@ -1009,6 +1013,66 @@ mod tests {
+         assert_eq!(restored_worktree_space_membership(Some(membership)), None);
+     }
+ 
++    #[test]
++    fn restored_explicit_group_keeps_linked_head_and_child_membership() {
++        let unique = std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .unwrap()
++            .as_nanos();
++        let dir = std::env::temp_dir().join(format!(
++            "herdr-group-restore-{}-{unique}",
++            std::process::id()
++        ));
++        let repo = dir.join("repo");
++        let head = dir.join("head");
++        let child = dir.join("child");
++        std::fs::create_dir_all(&repo).unwrap();
++        let git = |args: &[&str]| {
++            let status = std::process::Command::new("git")
++                .arg("-C")
++                .arg(&repo)
++                .args(args)
++                .status()
++                .unwrap();
++            assert!(status.success(), "git command failed: {args:?}");
++        };
++        git(&["init", "-q"]);
++        std::fs::write(repo.join("README"), "fixture").unwrap();
++        git(&["add", "README"]);
++        git(&[
++            "-c",
++            "user.name=Fixture",
++            "-c",
++            "user.email=fixture@example.invalid",
++            "commit",
++            "-qm",
++            "seed",
++        ]);
++        git(&["worktree", "add", "-qb", "qa/head", head.to_str().unwrap()]);
++        git(&[
++            "worktree",
++            "add",
++            "-qb",
++            "qa/child",
++            child.to_str().unwrap(),
++        ]);
++        let key = "herdr-group:w-head".to_string();
++        for checkout_path in [head, child] {
++            let membership = crate::workspace::WorktreeSpaceMembership {
++                key: key.clone(),
++                label: "fixture".into(),
++                repo_root: repo.clone(),
++                checkout_path,
++                is_linked_worktree: true,
++            };
++            assert_eq!(
++                restored_worktree_space_membership(Some(membership.clone())),
++                Some(membership)
++            );
++        }
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
+     #[test]
+     fn restore_plan_respects_opt_in_and_allowlist() {
+         let pi_session_path = test_session_path("pi-session.jsonl");
+diff --git a/src/persist/snapshot.rs b/src/persist/snapshot.rs
+index 07aaf3b..0651b25 100644
+--- a/src/persist/snapshot.rs
++++ b/src/persist/snapshot.rs
+@@ -330,7 +330,7 @@ fn capture_tab(
+                     terminal.agent_name.clone(),
+                     terminal
+                         .managed_agent_kind()
+-                        .map(|agent| crate::detect::agent_label(agent).to_string()),
++                        .map(|agent| crate::detect::agent_manifest_id(agent).to_string()),
+                 )
+             })
+             .unwrap_or_default();
+@@ -593,6 +593,39 @@ mod tests {
+         assert_eq!(active_pane.managed_agent_kind.as_deref(), Some("pi"));
+     }
+ 
++    #[test]
++    fn senpi_snapshot_keeps_legacy_storage_and_canonical_runtime_identity() {
++        let mut state = state_with_workspaces(&["senpi-snapshot"]);
++        let root = state.workspaces[0].tabs[0].root_pane;
++        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
++            .attached_terminal_id
++            .clone();
++        let now = std::time::Instant::now();
++        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
++        terminal.begin_managed_agent(
++            "reviewer".into(),
++            crate::detect::Agent::Senpi,
++            now,
++            std::time::Duration::ZERO,
++            std::time::Duration::from_secs(1),
++        );
++        terminal.set_detected_state(
++            Some(crate::detect::Agent::Senpi),
++            crate::detect::AgentState::Idle,
++        );
++        assert!(terminal.reconcile_managed_agent_at(now, false));
++        assert_eq!(terminal.effective_agent_label(), Some("omo"));
++        let snapshot = capture_from_state(&state);
++        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
++        assert_eq!(pane.managed_agent_kind.as_deref(), Some("senpi"));
++        assert_eq!(
++            pane.managed_agent_kind
++                .as_deref()
++                .and_then(crate::detect::parse_persisted_agent_label),
++            Some(crate::detect::Agent::Senpi),
++        );
++    }
++
+     #[test]
+     fn round_trip_empty_session() {
+         let snap = SessionSnapshot {
+diff --git a/src/server/headless.rs b/src/server/headless.rs
+index f07c0c3..724741f 100644
+--- a/src/server/headless.rs
++++ b/src/server/headless.rs
+@@ -3094,7 +3094,9 @@ impl HeadlessServer {
+         }
+         if matches!(
+             &msg.request.method,
+-            api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
++            api::schema::Method::WorktreeCreate(_)
++                | api::schema::Method::WorktreeCreateGrouped(_)
++                | api::schema::Method::WorktreeRemove(_)
+         ) {
+             let deferred_changed = self
+                 .app
+diff --git a/src/server/headless/client_views.rs b/src/server/headless/client_views.rs
+index 4e0bd2e..5215a88 100644
+--- a/src/server/headless/client_views.rs
++++ b/src/server/headless/client_views.rs
+@@ -237,6 +237,7 @@ impl HeadlessServer {
+                 | Method::WorkspaceClose(_)
+                 | Method::WorkspaceCreate(_)
+                 | Method::WorktreeCreate(_)
++                | Method::WorktreeCreateGrouped(_)
+                 | Method::WorktreeOpen(_)
+                 | Method::WorktreeRemove(_)
+         )
+@@ -277,6 +278,7 @@ impl HeadlessServer {
+                 | Method::WorkspaceMoveBlock(_)
+                 | Method::WorkspaceRename(_)
+                 | Method::WorktreeCreate(_)
++                | Method::WorktreeCreateGrouped(_)
+                 | Method::WorktreeOpen(_)
+                 | Method::WorktreeRemove(_)
+         )
+@@ -305,6 +307,7 @@ impl HeadlessServer {
+                 | Method::WorkspaceCreate(_)
+                 | Method::WorkspaceFocus(_)
+                 | Method::WorktreeCreate(_)
++                | Method::WorktreeCreateGrouped(_)
+                 | Method::WorktreeOpen(_)
+                 | Method::WorktreeRemove(_)
+         )
+diff --git a/src/server/headless/endpoint_requests.rs b/src/server/headless/endpoint_requests.rs
+index 4f02b67..f57cfcc 100644
+--- a/src/server/headless/endpoint_requests.rs
++++ b/src/server/headless/endpoint_requests.rs
+@@ -105,11 +105,16 @@ impl HeadlessServer {
+             client.shell_endpoint_command_surface_revision = Some(client.shell_projection_revision);
+             let deferred_worktree = matches!(
+                 &request.method,
+-                api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
++                api::schema::Method::WorktreeCreate(_)
++                    | api::schema::Method::WorktreeCreateGrouped(_)
++                    | api::schema::Method::WorktreeRemove(_)
+             );
+             let deferred_navigation = matches!(
+                 &request.method,
+                 api::schema::Method::WorktreeCreate(params) if params.focus
++            ) || matches!(
++                &request.method,
++                api::schema::Method::WorktreeCreateGrouped(params) if params.create.focus
+             );
+             client.shell_deferred_navigation_request_id =
+                 deferred_worktree.then(|| api_request_id.clone());
+diff --git a/src/workspace.rs b/src/workspace.rs
+index 8944b88..4e4cb32 100644
+--- a/src/workspace.rs
++++ b/src/workspace.rs
+@@ -38,6 +38,11 @@ pub struct WorktreeSpaceMembership {
+     pub is_linked_worktree: bool,
+ }
+ 
++// An explicit group is keyed to its head workspace ID, not the Git common dir.
++pub fn is_group_head(space: &WorktreeSpaceMembership, workspace_id: &str) -> bool {
++    space.key == format!("herdr-group:{workspace_id}")
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct WorkspaceGitStatus {
+     pub workspace_id: String,

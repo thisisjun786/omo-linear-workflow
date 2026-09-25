@@ -6,6 +6,6 @@
   "rustToolchain": "1.96.1",
   "zigVersion": "0.16.0",
   "patch": "patches/herdr-0.9.1-omo.patch",
-  "patchSha256": "ac3229248130ce3d3d9121e1a29b6204732c14a15829c5bb94b0fb8653732168",
+  "patchSha256": "32466d94df6d2474cc49fba1d4594b1fce79b9eb02516a65d569ee6e2d330005",
   "referenceBinarySha256": "e259912d271a2c014fcc6ae7f9845409feeb0204191735b2a982952ba6eec88f"
 }

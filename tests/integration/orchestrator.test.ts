@@ -12,9 +12,10 @@ import type {
   RuntimeIdentity,
   ScopeSnapshot,
 } from "../../src/core/contracts";
+import { modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../../src/herdr";
-import { createHostProfile } from "../../src/host-profile";
+import { createHostProfile, RUNTIME_CACHE_MARKER } from "../../src/host-profile";
 import {
   Orchestrator,
   type OrchestratorDependencies,
@@ -72,7 +73,6 @@ describe("host profile", () => {
     const root = await ownedRoot("omo-cli-profile-");
     await Bun.write(join(root, "node_modules/omo-ai/plugin/extensions/omo-member.js"), "");
     await Bun.write(join(root, "dist/extension/index.js"), "");
-    await Bun.write(join(root, "dist/proxy/index.js"), "");
     await chmod(join(root, "node_modules/omo-ai/plugin"), 0o755);
 
     const path = await createHostProfile(root);
@@ -86,7 +86,6 @@ describe("host profile", () => {
           "./node_modules/omo-ai/plugin",
           "./node_modules/omo-ai/plugin/extensions/omo-member.js",
           "./dist/extension/index.js",
-          "./dist/proxy/index.js",
         ],
       },
       tunables: { coldStart: "persistent" },
@@ -95,6 +94,7 @@ describe("host profile", () => {
         OMO_INITIATIVE_HOST: "1",
         OMO_INITIATIVE_ROOT: root,
         OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
+        [RUNTIME_CACHE_MARKER]: "1",
       },
     });
     await rm(root, { recursive: true, force: true });
@@ -195,11 +195,17 @@ class FakeHerdr implements HerdrClient {
     const separator = process.platform === "win32" ? ";" : ":";
     expect(env).toEqual({
       PATH: `${join(this.root, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: expect.stringMatching(
+        new RegExp(`^${RegExp.escape(join(this.root, ".omo/cache"))}/[^/]+/cli$`),
+      ),
+      XDG_CACHE_HOME: expect.stringMatching(
+        new RegExp(`^${RegExp.escape(join(this.root, ".omo/cache"))}/[^/]+/host$`),
+      ),
     });
     expect(argv).toContain(join(this.root, "node_modules/.bin/omo"));
     expect(argv).not.toContain("omo");
     expect(argv).toContain(join(this.root, "dist/extension/index.js"));
-    expect(argv).toContain(join(this.root, "dist/proxy/index.js"));
+    expect(argv).not.toContain(join(this.root, "dist/proxy/index.js"));
     if (this.verifyIdentity) {
       const fileIndex = argv.indexOf("--session");
       const idIndex = argv.indexOf("--session-id");
@@ -215,8 +221,8 @@ class FakeHerdr implements HerdrClient {
       const restored = SessionManager.open(file, join(this.cwd, "sessions"), this.cwd);
       expect(restored.getSessionId()).toBe(requestedId);
       expect(restored.buildSessionContext().model).toEqual({
-        provider: "cliproxyapi",
-        modelId: "gpt-6-astra",
+        provider: modelForRole("supervisor").provider,
+        modelId: modelForRole("supervisor").modelId,
       });
       expect(restored.buildSessionContext().thinkingLevel).toBe("high");
     }
@@ -367,6 +373,12 @@ describe("orchestrator startup", () => {
           expect(env["PATH"]).toBe(
             `${join(controlRoot, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
           );
+          expect(env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"]).toMatch(
+            new RegExp(`^${RegExp.escape(join(controlRoot, ".omo/cache"))}/[^/]+/cli$`),
+          );
+          expect(env["XDG_CACHE_HOME"]).toMatch(
+            new RegExp(`^${RegExp.escape(join(controlRoot, ".omo/cache"))}/[^/]+/host$`),
+          );
           events.push("host");
         },
         gitTip: async () => "commit",
@@ -479,9 +491,10 @@ describe("orchestrator startup", () => {
           });
           expect(rejected).toMatchObject({ ok: false });
         }
+        // Management closure no longer requires parents to close first.
         expect(await restarted.close("binding")).toMatchObject({
-          ok: false,
-          error: { code: "children_active" },
+          ok: true,
+          value: { launchState: "closed" },
         });
         const listed = restarted.status();
         if (!listed.ok) throw new Error(listed.error.message);
@@ -676,6 +689,7 @@ describe("orchestrator startup", () => {
       const imported = await orchestrator.importScope(scopeFile, true);
       if (!imported.ok) throw new Error(imported.error.message);
 
+      if (scope.initiative === null) throw new Error("Expected initiative fixture");
       const created = await orchestrator.createSupervisor({
         initiativeId: scope.initiative.id,
         scopeDigest: imported.value.digest,

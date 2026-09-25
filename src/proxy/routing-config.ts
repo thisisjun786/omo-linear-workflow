@@ -11,6 +11,8 @@ export const groupsSchema = z.object({
 });
 export const receiptSchema = z.object({
   generation: z.string(),
+  // A receipt without a provider predates opencodex routing and is re-planned.
+  provider: z.string().optional(),
   version: z.string(),
   digest: z.string(),
   upstream: z.string(),
@@ -19,6 +21,8 @@ export const receiptSchema = z.object({
   available: z.array(z.string()),
   overrides: z.array(z.string()),
   skipped: z.array(z.string()),
+  // Managed routes with no served candidate; absent in receipts written before this field.
+  unroutable: z.array(z.string()).default([]),
   changes: z.array(z.string()),
   backup: z.string().nullable(),
 });

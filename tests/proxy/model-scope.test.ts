@@ -11,37 +11,37 @@ test("selection scope retains every live reference but not catalog or thinking h
     categories: {
       quick: {
         models: [
-          { model: "cliproxyapi/old-but-used", reasoning: "low" },
-          { model: "cliproxyapi/mimo-v2.6-pro", reasoning: "max" },
+          { model: "opencodex/old-but-used", reasoning: "low" },
+          { model: "opencodex/mimo-v2.6-pro", reasoning: "max" },
         ],
-        description: "cliproxyapi/not-a-model-reference",
+        description: "opencodex/not-a-model-reference",
       },
     },
     agents: {
       worker: {
         model: "short-id",
-        fallback_models: [{ provider: "cliproxyapi", model_id: "agent-fallback" }],
+        fallback_models: [{ provider: "opencodex", model_id: "agent-fallback" }],
       },
     },
-    model_profiles: { work: { models: ["cliproxyapi/profile"] } },
+    model_profiles: { work: { models: ["opencodex/profile"] } },
   };
   const settings = {
-    defaultProvider: "cliproxyapi",
+    defaultProvider: "opencodex",
     defaultModel: "main",
-    compaction: { model: "cliproxyapi/summary" },
-    lookAt: { models: ["cliproxyapi/vision"] },
+    compaction: { model: "opencodex/summary" },
+    lookAt: { models: ["opencodex/vision"] },
     retry: {
       fallbackChains: {
-        "cliproxyapi/retry-primary": ["cliproxyapi/retry-fallback"],
+        "opencodex/retry-primary": ["opencodex/retry-fallback"],
         "unused-native-guard": [],
       },
     },
-    favoriteModels: ["cliproxyapi/favorite"],
-    modelThinkingLevels: { "cliproxyapi/mimo-v2.6-flash": "high" },
+    favoriteModels: ["opencodex/favorite"],
+    modelThinkingLevels: { "opencodex/mimo-v2.6-flash": "high" },
   };
   // When forming the OMO selection scope, not deleting the upstream catalog.
   const result = referencedModels(config, settings, [
-    { provider: "cliproxyapi", modelId: "role", thinking: "high" },
+    { provider: "opencodex", modelId: "role", thinking: "high" },
   ]);
   // Then even an older in-use fallback stays, while unused MiMo gets no exemption.
   expect(result).toEqual(
@@ -59,18 +59,52 @@ test("selection scope retains every live reference but not catalog or thinking h
       "summary",
       "vision",
     ]
-      .map((id) => `cliproxyapi/${id}`)
+      .map((id) => `opencodex/${id}`)
       .sort(),
   );
 });
 
 test("selection scope follows changed references rather than a fixed model allowlist", () => {
   // Given a new upstream model in the applied configuration.
-  const config = { categories: { quick: { models: [{ model: "cliproxyapi/new-model" }] } } };
+  const config = { categories: { quick: { models: [{ model: "opencodex/new-model" }] } } };
   // When the next launch computes its scope.
   const result = referencedModels(config, {}, []);
   // Then the newly referenced model is included without another allowlist edit.
-  expect(result).toEqual(["cliproxyapi/new-model"]);
+  expect(result).toEqual(["opencodex/new-model"]);
+});
+
+test("selection scope keeps opencodex routes and qualifies a bare selection with the main provider", async () => {
+  // Given everything routed through opencodex, including namespaced model IDs.
+  const home = await mkdtemp(join(tmpdir(), "olw-model-scope-ocx-"));
+  try {
+    await mkdir(join(home, ".omo/agent"), { recursive: true });
+    await mkdir(join(home, ".omo/proxy-routing"), { recursive: true });
+    await writeFile(
+      join(home, ".omo/agent/settings.json"),
+      JSON.stringify({
+        defaultProvider: "opencodex",
+        defaultModel: "anthropic/claude-opus-5-5",
+        compaction: { model: "opencodex/gpt-5.6-luna" },
+      }),
+    );
+    await writeFile(
+      join(home, ".omo/omo.jsonc"),
+      '{"categories":{"quick":{"models":[{"model":"opencodex/gpt-6-luna--fast"}]}}}',
+    );
+    await writeFile(join(home, ".omo/proxy-routing/model-scope.json"), '{"mode":"referenced"}');
+    // When the launcher narrows the picker for a bare --model selection.
+    const args = await modelScopeArguments(home, ["--model", "gpt-6-sol"]);
+    // Then opencodex references stay and the selection uses the main provider.
+    expect(args[1]?.split(",")).toEqual([
+      "opencodex/anthropic/claude-opus-5-5",
+      "opencodex/gpt-5.6-luna",
+      "opencodex/gpt-6-astra",
+      "opencodex/gpt-6-luna--fast",
+      "opencodex/gpt-6-sol",
+    ]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test.each(["referenced", "all"] as const)(
@@ -81,7 +115,7 @@ test.each(["referenced", "all"] as const)(
     const state = join(home, ".omo/proxy-routing");
     const settingsPath = join(home, ".omo/agent/settings.json");
     const settings =
-      '{"defaultProvider":"cliproxyapi","defaultModel":"main","enabledModels":["cliproxyapi/*"]}\n';
+      '{"defaultProvider":"opencodex","defaultModel":"main","enabledModels":["opencodex/*"]}\n';
     try {
       await mkdir(state, { recursive: true });
       await mkdir(join(home, ".omo/agent"), { recursive: true });
@@ -90,7 +124,7 @@ test.each(["referenced", "all"] as const)(
         join(home, ".omo/omo.jsonc"),
         mode === "all"
           ? "invalid configuration during recovery"
-          : '{"categories":{"quick":{"models":["cliproxyapi/mimo-v2.6-pro"]}}}',
+          : '{"categories":{"quick":{"models":["opencodex/mimo-v2.6-pro"]}}}',
       );
       await writeFile(
         join(state, "model-scope.json"),
@@ -123,11 +157,11 @@ test.each(["referenced", "all"] as const)(
       if (mode === "all") expect(args).toEqual([]);
       else {
         expect(args[0]).toBe("--models");
-        expect(args[1]?.split(",")).toContain("cliproxyapi/mimo-v2.6-pro");
-        expect(args[1]?.split(",")).not.toContain("cliproxyapi/mimo-v2.6-flash");
-        expect(await modelScopeArguments(home, ["--models", "cliproxyapi/*"])).toEqual([]);
-        expect((await modelScopeArguments(home, ["--model", "cliproxyapi/explicit"]))[1]).toContain(
-          "cliproxyapi/explicit",
+        expect(args[1]?.split(",")).toContain("opencodex/mimo-v2.6-pro");
+        expect(args[1]?.split(",")).not.toContain("opencodex/mimo-v2.6-flash");
+        expect(await modelScopeArguments(home, ["--models", "opencodex/*"])).toEqual([]);
+        expect((await modelScopeArguments(home, ["--model", "opencodex/explicit"]))[1]).toContain(
+          "opencodex/explicit",
         );
       }
     } finally {

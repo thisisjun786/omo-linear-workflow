@@ -18,60 +18,49 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-function source(model: string): string {
-  const chain = [{ providers: ["native"], model, variant: "low" }];
+interface Rung {
+  readonly providers: readonly string[];
+  readonly model: string;
+  readonly variant?: string;
+}
+
+function source(chain: string | readonly Rung[]): string {
+  const rungs =
+    typeof chain === "string" ? [{ providers: ["openai"], model: chain, variant: "low" }] : chain;
   return `const categories=${JSON.stringify({
-    "visual-engineering": chain,
-    "deep-low": chain,
-    quick: chain,
+    "visual-engineering": rungs,
+    "deep-low": rungs,
+    quick: rungs,
   })}; const agents=${JSON.stringify({
-    explore: chain,
-    librarian: chain,
-    "plan-consultant": chain,
-    "plan-reviewer": chain,
+    explore: rungs,
+    librarian: rungs,
+    "plan-consultant": rungs,
+    "plan-reviewer": rungs,
   })}; const reviewer={name:"omo-native-test",mode:"subagent",categories:["quick"]};`;
+}
+
+function catalog(ids: readonly string[]): string {
+  return JSON.stringify({
+    providers: {
+      opencodex: {
+        baseUrl: "http://127.0.0.1:10100/v1",
+        api: "openai-completions",
+        models: ids.map((id) => ({ id, name: id })),
+      },
+    },
+  });
 }
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "olw-routing-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  let offline = false;
-  let discoveries = 0;
-  const models = ["gpt-6-luna", "gpt-6-sol"];
-  const server = Bun.serve({
-    port: 0,
-    fetch(request) {
-      if (offline) return new Response("offline", { status: 503 });
-      const path = new URL(request.url).pathname;
-      if (path === "/v1/models") {
-        discoveries++;
-        return Response.json({ data: models.map((id) => ({ id })) });
-      }
-      if (path.endsWith("/oauth-model-alias")) return Response.json({ "oauth-model-alias": null });
-      return Response.json({
-        models: path.endsWith("/codex")
-          ? models.map((id) => ({
-              id,
-              context_length: 100000,
-              max_completion_tokens: 10000,
-              supportedInputModalities: ["text"],
-              thinking: { levels: ["low", "high"] },
-            }))
-          : [],
-      });
-    },
-  });
-  cleanups.push(async () => {
-    await server.stop(true);
-  });
   const packageRoot = join(root, "upstream");
   await mkdir(join(packageRoot, "bin"), { recursive: true });
   await mkdir(join(packageRoot, "plugin/extensions"), { recursive: true });
   const upstream = join(packageRoot, "bin/omo.js");
   const bundle = join(packageRoot, "plugin/extensions/omo-task.js");
   const configPath = join(root, "omo.jsonc");
-  const clientCredentials = join(root, "client.json");
-  const managementCredentials = join(root, "management.json");
+  const catalogPath = join(root, "models.json");
   await Promise.all([
     writeFile(upstream, ""),
     writeFile(
@@ -81,20 +70,15 @@ async function fixture() {
     writeFile(bundle, source("gpt-6-luna")),
     writeFile(
       configPath,
-      '{\n// user-owned comment\n"model_profiles":{"mine":{"models":["cliproxyapi/opus"]}},\n"categories":{}, "agents":{}\n}\n',
+      '{\n// user-owned comment\n"model_profiles":{"mine":{"models":["opencodex/opus"]}},\n"categories":{}, "agents":{}\n}\n',
     ),
-    writeFile(clientCredentials, JSON.stringify({ baseUrl: `${server.url}v1`, apiKey: "fixture" })),
-    writeFile(
-      managementCredentials,
-      JSON.stringify({ managementUrl: String(server.url), managementKey: "fixture" }),
-    ),
+    writeFile(catalogPath, catalog(["gpt-6-luna", "gpt-6-sol"])),
   ]);
   const options: SyncOptions = {
     upstream,
     configPath,
     stateDir: join(root, "state"),
-    clientCredentials,
-    managementCredentials,
+    catalogPath,
     adopt: true,
     check: false,
     force: false,
@@ -102,21 +86,19 @@ async function fixture() {
   return {
     options,
     bundle,
-    setOffline: () => {
-      offline = true;
-    },
-    discoveries: () => discoveries,
+    setCatalog: (ids: readonly string[]) => writeFile(catalogPath, catalog(ids)),
     state: () => readFile(join(options.stateDir, "state.json"), "utf8"),
   };
 }
 
-describe("routing synchronization real filesystem and HTTP boundary", () => {
+describe("routing synchronization real filesystem boundary", () => {
   test("read-only check shows the next policy without changing configuration", async () => {
     const world = await fixture();
     const before = await readFile(world.options.configPath, "utf8");
     const result = await syncRouting({ ...world.options, check: true });
+    expect(result.provider).toBe("opencodex");
     expect(result.managed.categories["quick"]).toEqual({
-      models: [{ model: "cliproxyapi/gpt-6-luna", reasoning: "low" }],
+      models: [{ model: "opencodex/gpt-6-luna", reasoning: "low" }],
     });
     expect(await readFile(world.options.configPath, "utf8")).toBe(before);
     expect(await Bun.file(join(world.options.stateDir, "state.json")).exists()).toBe(false);
@@ -130,7 +112,7 @@ describe("routing synchronization real filesystem and HTTP boundary", () => {
     await writeFile(
       world.options.configPath,
       editRoutingConfig(config, {
-        categories: { ...first.managed.categories, quick: { models: ["cliproxyapi/opus"] } },
+        categories: { ...first.managed.categories, quick: { models: ["opencodex/opus"] } },
         agents: first.managed.agents,
       }),
     );
@@ -144,13 +126,40 @@ describe("routing synchronization real filesystem and HTTP boundary", () => {
       })
       .parse(Bun.JSON5.parse(updatedText));
     expect(updatedText.slice(0, unownedPrefix.length)).toBe(unownedPrefix);
-    expect(updated.categories["quick"]?.["models"]).toEqual(["cliproxyapi/opus"]);
+    expect(updated.categories["quick"]?.["models"]).toEqual(["opencodex/opus"]);
     expect(updated.categories["deep-low"]?.["models"]).toEqual([
-      { model: "cliproxyapi/gpt-6-sol", reasoning: "low" },
+      { model: "opencodex/gpt-6-sol", reasoning: "low" },
     ]);
-    expect(updated.model_profiles["mine"]?.models).toEqual(["cliproxyapi/opus"]);
+    expect(updated.model_profiles["mine"]?.models).toEqual(["opencodex/opus"]);
     expect(next.overrides).toContain("categories.quick");
     expect(next.digest).not.toBe(first.digest);
+  });
+
+  test("a changed opencodex catalog updates untouched routes at the next start", async () => {
+    // Given a preferred model that opencodex does not publish yet.
+    const world = await fixture();
+    await writeFile(
+      world.bundle,
+      source([
+        { providers: ["openai"], model: "gpt-6-terra", variant: "high" },
+        { providers: ["openai"], model: "gpt-6-luna", variant: "low" },
+      ]),
+    );
+    const first = await syncRouting(world.options);
+    expect(first.managed.categories["quick"]).toEqual({
+      models: [{ model: "opencodex/gpt-6-luna", reasoning: "low" }],
+    });
+    // When the user enables it in opencodex, which rewrites the OMO catalog.
+    await world.setCatalog(["gpt-6-luna", "gpt-6-sol", "gpt-6-terra"]);
+    const next = await syncRouting({ ...world.options, adopt: false });
+    // Then the next ordinary start restores upstream order without --force.
+    expect(next.managed.categories["quick"]).toEqual({
+      models: [
+        { model: "opencodex/gpt-6-terra", reasoning: "high" },
+        { model: "opencodex/gpt-6-luna", reasoning: "low" },
+      ],
+    });
+    expect(next.generation).not.toBe(first.generation);
   });
 
   test("unrecognized upstream structure leaves the last valid files byte-identical", async () => {
@@ -164,28 +173,30 @@ describe("routing synchronization real filesystem and HTTP boundary", () => {
     expect(await world.state()).toBe(state);
   });
 
-  test("proxy failure retains the previous generation without choosing another provider", async () => {
+  test("a missing opencodex catalog retains the previous generation without choosing another provider", async () => {
     const world = await fixture();
     await syncRouting(world.options);
     const config = await readFile(world.options.configPath, "utf8"),
       state = await world.state();
     await writeFile(world.bundle, source("gpt-6-sol"));
-    world.setOffline();
-    await expect(syncRouting(world.options)).rejects.toThrow("503");
+    await writeFile(world.options.catalogPath, JSON.stringify({ providers: { other: {} } }));
+    await expect(syncRouting(world.options)).rejects.toThrow("opencodex");
     expect(await readFile(world.options.configPath, "utf8")).toBe(config);
     expect(await world.state()).toBe(state);
   });
 
-  test("unchanged startup needs no proxy connection and does not rewrite state", async () => {
+  test("unchanged startup tolerates an unreadable catalog and does not rewrite state", async () => {
     const world = await fixture();
     const receipt = await syncRouting(world.options);
-    world.setOffline();
+    const state = await world.state();
+    await rm(world.options.catalogPath);
     expect(await syncRouting({ ...world.options, adopt: false })).toEqual(receipt);
-    expect(world.discoveries()).toBe(1);
+    expect(await world.state()).toBe(state);
   });
 
   test("two actual CLI starts serialize publication under the same lock", async () => {
     const world = await fixture();
+    await world.setCatalog(["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "anthropic/claude-opus-5-5"]);
     const args = [
       process.execPath,
       resolve(import.meta.dir, "../../scripts/proxy-routing.ts"),
@@ -197,10 +208,8 @@ describe("routing synchronization real filesystem and HTTP boundary", () => {
       world.options.configPath,
       "--state-dir",
       world.options.stateDir,
-      "--client",
-      world.options.clientCredentials,
-      "--management",
-      world.options.managementCredentials,
+      "--catalog",
+      world.options.catalogPath,
     ];
     const children = [
       Bun.spawn(args, { stdout: "pipe", stderr: "pipe" }),
@@ -219,13 +228,15 @@ describe("routing synchronization real filesystem and HTTP boundary", () => {
           new Response(child.stdout).text(),
           new Response(child.stderr).text(),
         ]);
-        expect(stderr).toBe("");
         expect(code).toBe(0);
-        return receiptSchema.parse(JSON.parse(stdout));
+        return { stderr, receipt: receiptSchema.parse(JSON.parse(stdout)) };
       }),
     );
-    expect(new Set(results.map((result) => result.generation)).size).toBe(1);
-    expect(world.discoveries()).toBe(1);
+    expect(new Set(results.map((result) => result.receipt.generation)).size).toBe(1);
+    // The fixture's one-model routes warn once; the serialized second start stays quiet.
+    expect(results.map((result) => result.stderr).join("")).toMatch(
+      /^Proxy routing: Model chain warnings: categories\.visual-engineering \(no fallback: only gpt-6-luna is available\);[^\n]*\n$/,
+    );
   }, 15000);
 
   test("recovers receipt publication after a process died after replacing configuration", async () => {

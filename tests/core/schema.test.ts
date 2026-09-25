@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Binding } from "../../src/core/contracts";
 import { matchesRuntime, modelForRole } from "../../src/core/policy";
-import { envelopeSchema, workerRequestSchema } from "../../src/core/schema";
+import {
+  assignmentSchema,
+  deliveryRecordSchema,
+  envelopeSchema,
+  workerRequestSchema,
+} from "../../src/core/schema";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -12,20 +17,20 @@ afterEach(async () => {
 });
 
 describe("frozen core schemas and role policy", () => {
-  test("modelForRole returns exactly the three proven tuples", () => {
+  test("modelForRole returns exactly the three opencodex tuples", () => {
     expect(modelForRole("supervisor")).toEqual({
-      provider: "cliproxyapi",
+      provider: "opencodex",
       modelId: "gpt-6-astra",
       thinking: "high",
     });
     expect(modelForRole("parent")).toEqual({
-      provider: "cliproxyapi",
-      modelId: "claude-opus-5-5",
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
       thinking: "xhigh",
     });
     expect(modelForRole("child")).toEqual({
-      provider: "cliproxyapi",
-      modelId: "claude-opus-5-5",
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
       thinking: "xhigh",
     });
   });
@@ -83,11 +88,63 @@ describe("frozen core schemas and role policy", () => {
         durableSessionId: "session",
         sessionPath,
         cwd: root,
-        provider: "cliproxyapi",
+        provider: "opencodex",
         modelId: "kimi-k3",
         thinking: "max",
         extensionProtocol: 1,
       }),
+    ).toBe(false);
+  });
+
+  test("only parents can omit an owner and only posted reports can address the user inbox", () => {
+    const parent = {
+      role: "parent",
+      initiativeId: null,
+      projectId: "project",
+      ownerBindingId: null,
+    };
+    expect(assignmentSchema.safeParse(parent).success).toBe(true);
+    expect(assignmentSchema.safeParse({ ...parent, role: "child", issueId: "issue" }).success).toBe(
+      false,
+    );
+    expect(assignmentSchema.safeParse({ role: "supervisor", initiativeId: null }).success).toBe(
+      false,
+    );
+    const envelope = {
+      version: 1,
+      id: "m",
+      fromBindingId: "parent",
+      toBindingId: null,
+      designationId: "d",
+      snapshotDigest: "digest",
+      kind: "report",
+      outcome: "blocked",
+      text: "question",
+      evidence: [],
+    };
+    const posted = { envelope, state: "posted", receipt: null };
+    expect(deliveryRecordSchema.safeParse(posted).success).toBe(true);
+    expect(deliveryRecordSchema.safeParse({ ...posted, state: "accepted" }).success).toBe(false);
+    expect(
+      deliveryRecordSchema.safeParse({
+        ...posted,
+        envelope: { ...envelope, toBindingId: "manager" },
+      }).success,
+    ).toBe(false);
+    expect(
+      deliveryRecordSchema.safeParse({
+        ...posted,
+        receipt: {
+          kind: "error",
+          error: { code: "fixture", message: "fixture", next_action: "inspect" },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      deliveryRecordSchema.safeParse({
+        ...posted,
+        envelope: { ...envelope, kind: "instruction", outcome: null },
+      }).success,
     ).toBe(false);
   });
 

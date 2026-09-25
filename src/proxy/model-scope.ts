@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { z } from "zod";
 import { modelForRole, type RoleModel } from "../core/policy";
 import { optionalText } from "./routing-config";
+import { ROUTING_PROVIDER } from "./routing-plan";
+
+const isProxyModel = (qualified: string) =>
+  qualified.slice(0, qualified.indexOf("/")) === ROUTING_PROVIDER;
 
 export const scopePreferenceSchema = z.object({ mode: z.enum(["all", "referenced"]) });
 const modelEntrySchema = z.union([z.string(), z.object({ model: z.string() })]);
@@ -17,7 +21,7 @@ const routeGroupsSchema = z.object({
   model_profiles: z.record(z.string(), routeSchema).default({}),
 });
 const scopeSettingsSchema = z.object({
-  defaultProvider: z.string().default("cliproxyapi"),
+  defaultProvider: z.string().default(ROUTING_PROVIDER),
   defaultModel: z.string().optional(),
   favoriteModels: z.array(z.string()).optional(),
   compaction: z.object({ model: z.string().optional() }).optional(),
@@ -40,7 +44,7 @@ export function referencedModels(
   const add = (model: string | undefined) => {
     if (!model) return;
     const qualified = model.includes("/") ? model : `${tuning.defaultProvider}/${model}`;
-    if (qualified.startsWith("cliproxyapi/")) models.add(qualified);
+    if (isProxyModel(qualified)) models.add(qualified);
   };
   const addEntry = (entry: z.infer<typeof modelEntrySchema>) =>
     add(typeof entry === "string" ? entry : entry.model);
@@ -86,15 +90,16 @@ export async function modelScopeArguments(
   if (flags.some((flag) => flag === "--models" || flag.startsWith("--models="))) return [];
   const text = await optionalText(join(home, ".omo/proxy-routing/model-scope.json"));
   if (!text || scopePreferenceSchema.parse(JSON.parse(text)).mode === "all") return [];
-  const models = await readReferencedModels(
-    join(home, ".omo/omo.jsonc"),
-    join(home, ".omo/agent/settings.json"),
-  );
+  const settingsPath = join(home, ".omo/agent/settings.json");
+  const models = await readReferencedModels(join(home, ".omo/omo.jsonc"), settingsPath);
   const selectedIndex = flags.findIndex((flag) => flag === "--model" || flag === "-m");
   const selected = selectedIndex >= 0 ? flags[selectedIndex + 1] : undefined;
   if (selected) {
-    const qualified = selected.includes("/") ? selected : `cliproxyapi/${selected}`;
-    if (qualified.startsWith("cliproxyapi/") && !models.includes(qualified)) models.push(qualified);
+    const { defaultProvider } = scopeSettingsSchema.parse(
+      JSON.parse(await readFile(settingsPath, "utf8")),
+    );
+    const qualified = selected.includes("/") ? selected : `${defaultProvider}/${selected}`;
+    if (isProxyModel(qualified) && !models.includes(qualified)) models.push(qualified);
   }
   return ["--models", models.join(",")];
 }

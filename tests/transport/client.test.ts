@@ -111,7 +111,7 @@ class FakeRpc implements RpcPort {
               durableSessionId: binding.durableSessionId,
               sessionPath,
               cwd: binding.cwd,
-              provider: "cliproxyapi",
+              provider: "opencodex",
               modelId: "kimi-k3",
               thinking: "max",
               extensionProtocol: 1,
@@ -177,15 +177,15 @@ describe("native session client", () => {
     ];
     expect(await session.hasUserMessage("recorded")).toBe(true);
     expect(await session.hasUserMessage("not-user")).toBe(false);
-    await session.configure({ provider: "cliproxyapi", modelId: "kimi-k3", thinking: "max" });
-    expect(rpc.configuration).toEqual(["cliproxyapi/kimi-k3", "max"]);
+    await session.configure({ provider: "opencodex", modelId: "kimi-k3", thinking: "max" });
+    expect(rpc.configuration).toEqual(["opencodex/kimi-k3", "max"]);
     expect(await session.describe()).toEqual({
       ok: true,
       value: {
         durableSessionId: binding.durableSessionId,
         sessionPath,
         cwd: binding.cwd,
-        provider: "cliproxyapi",
+        provider: "opencodex",
         modelId: "kimi-k3",
         thinking: "max",
         extensionProtocol: 1,

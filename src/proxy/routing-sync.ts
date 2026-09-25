@@ -1,9 +1,6 @@
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { CatalogDiscovery, DEFAULT_CHANNELS } from "./catalog";
-import { withPriorityModels } from "./priority-models";
 import {
   digest,
   editRoutingConfig,
@@ -14,20 +11,38 @@ import {
   receiptSchema,
   recoverRouting,
 } from "./routing-config";
-import { planRouting, RoutingError } from "./routing-plan";
-import { clientAccessSchema, managementAccessSchema } from "./schema";
+import { planRouting, ROUTING_PROVIDER, RoutingError } from "./routing-plan";
 
 const configSchema = groupsSchema.partial().passthrough();
 const packageSchema = z.object({ name: z.literal("omo-ai"), version: z.string().min(1) });
+const catalogSchema = z.object({
+  disabledProviders: z.array(z.string()).optional(),
+  providers: z.record(z.string(), z.unknown()),
+});
+const providerCatalogSchema = z.object({
+  models: z.array(z.object({ id: z.string().min(1) })).min(1),
+});
 export interface SyncOptions {
   readonly upstream: string;
   readonly configPath: string;
   readonly stateDir: string;
-  readonly clientCredentials: string;
-  readonly managementCredentials: string;
+  /** OMO's models.json, whose opencodex block the opencodex integration maintains. */
+  readonly catalogPath: string;
   readonly adopt: boolean;
   readonly check: boolean;
   readonly force: boolean;
+}
+
+async function readCatalog(path: string): Promise<string[]> {
+  const catalog = catalogSchema.parse(JSON.parse(await readFile(path, "utf8")));
+  if (catalog.disabledProviders?.includes(ROUTING_PROVIDER))
+    throw new RoutingError(`${ROUTING_PROVIDER} is disabled in ${path}`);
+  const models = providerCatalogSchema.safeParse(catalog.providers[ROUTING_PROVIDER]);
+  if (!models.success)
+    throw new RoutingError(
+      `${path} has no ${ROUTING_PROVIDER} models; run \`ocx integration client enable --client omo\``,
+    );
+  return models.data.models.map((model) => model.id);
 }
 
 export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt> {
@@ -48,50 +63,28 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
       "Routing tracking is not initialized; run proxy:routing sync --adopt after checking its diff",
     );
   const sourceDigest = digest(source);
-  if (
+  const unchanged =
     !options.force &&
-    previous?.digest === sourceDigest &&
+    previous?.provider === ROUTING_PROVIDER &&
+    previous.digest === sourceDigest &&
     previous.version === identity.version &&
     previous.configDigest === digest(configText) &&
     previous.upstream === options.upstream
-  )
-    return previous;
+      ? previous
+      : undefined;
+  let available: string[];
+  try {
+    available = await readCatalog(options.catalogPath);
+  } catch (error) {
+    // An unchanged start never needed the catalog, so its absence must not block OMO.
+    if (unchanged) return unchanged;
+    throw error;
+  }
+  if (unchanged && JSON.stringify(unchanged.available) === JSON.stringify(available))
+    return unchanged;
   const { extractRoutingPolicy } = await import("./routing-source");
   const policy = extractRoutingPolicy(source, identity.version);
   const config = configSchema.parse(Bun.JSON5.parse(configText));
-  let available = previous?.available;
-  if (options.force || !available || previous?.digest !== sourceDigest) {
-    const [clientText, managementText] = await Promise.all([
-      readFile(options.clientCredentials, "utf8"),
-      readFile(options.managementCredentials, "utf8"),
-    ]);
-    const client = clientAccessSchema.parse(JSON.parse(clientText));
-    const management = managementAccessSchema.parse(JSON.parse(managementText));
-    const discovery = new CatalogDiscovery({
-      clientBaseUrl: client.baseUrl,
-      clientKey: client.apiKey,
-      managementUrl: management.managementUrl,
-      managementKey: management.managementKey,
-      channels: DEFAULT_CHANNELS,
-      nativeCosts: new Map(),
-      nativeModels: async () => {
-        // Standalone CLI execution has no Senpi extension-loader import aliases.
-        // Resolve the policy authority's public SDK catalog, only when compatible
-        // providers need it; do not enable or authenticate any native provider.
-        const engine = await Bun.resolve("@code-yeongyu/senpi", root);
-        const catalog = await Bun.resolve("@earendil-works/pi-ai/providers/all", dirname(engine));
-        const native: typeof import("@earendil-works/pi-ai/providers/all") = await import(
-          pathToFileURL(catalog).href
-        );
-        return native
-          .getBuiltinProviders()
-          .flatMap((provider) => native.getBuiltinModels(provider));
-      },
-    });
-    available = withPriorityModels(
-      await discovery.discover({ force: true, signal: AbortSignal.timeout(15_000) }),
-    ).map((model) => model.id);
-  }
   const plan = planRouting(
     policy,
     new Set(available),
@@ -110,6 +103,7 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   }
   const receipt: RoutingReceipt = {
     generation: crypto.randomUUID(),
+    provider: ROUTING_PROVIDER,
     version: policy.version,
     digest: policy.digest,
     upstream: options.upstream,
@@ -118,6 +112,7 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
     available,
     overrides: [...plan.overrides],
     skipped: [...new Set(plan.skipped)],
+    unroutable: [...plan.unroutable],
     changes: [...plan.changes],
     backup,
   };

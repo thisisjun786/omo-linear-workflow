@@ -1,6 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
-import type { Assignment, Binding, RuntimeIdentity } from "./contracts";
+import type { Assignment, Binding, DeliveryRecord, RuntimeIdentity } from "./contracts";
+
+export function canRetryDelivery(record: DeliveryRecord): boolean {
+  return (
+    record.envelope.kind !== "operational_notice" &&
+    record.state === "rejected" &&
+    record.receipt?.kind === "error" &&
+    record.receipt.error.code === "turn_conflict_before_delivery"
+  );
+}
 
 export function initializationMessageId(bindingId: string): string {
   return `initialization:${bindingId}`;
@@ -14,8 +23,8 @@ export interface RoleModel {
 
 export function modelForRole(role: Assignment["role"]): RoleModel {
   if (role === "supervisor")
-    return { provider: "cliproxyapi", modelId: "gpt-6-astra", thinking: "high" };
-  return { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" };
+    return { provider: "opencodex", modelId: "gpt-6-astra", thinking: "high" };
+  return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
 }
 
 const seedEntrySchema = z.discriminatedUnion("type", [

@@ -17,7 +17,7 @@ export interface Ref {
 export interface ScopeSnapshot {
   readonly version: 1;
   readonly source: "linear-export" | "fixture";
-  readonly initiative: Ref;
+  readonly initiative: Ref | null;
   readonly projects: Array<{ readonly project: Ref; readonly issues: Ref[] }>;
   readonly decisionRefs: Ref[];
 }
@@ -34,13 +34,14 @@ export type Assignment =
   | { readonly role: "supervisor"; readonly initiativeId: string }
   | {
       readonly role: "parent";
-      readonly initiativeId: string;
+      readonly initiativeId: string | null;
       readonly projectId: string;
-      readonly ownerBindingId: string;
+      // Optional management link, not the source of this parent's approval.
+      readonly ownerBindingId: string | null;
     }
   | {
       readonly role: "child";
-      readonly initiativeId: string;
+      readonly initiativeId: string | null;
       readonly projectId: string;
       readonly issueId: string;
       readonly ownerBindingId: string;
@@ -82,17 +83,43 @@ export interface InitializationClaim {
   readonly disposition: "new" | "replay" | "in_progress";
   readonly binding: Binding;
 }
+export interface RuntimeFailure {
+  readonly source: "turn_end";
+  readonly sessionEntryId: string;
+  readonly durableSessionId: string;
+  readonly sessionPath: string;
+  readonly cwd: string;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly timestamp: number;
+  readonly stopReason: "error";
+  readonly errorMessage: string | null;
+}
+export interface RuntimeFailureClaim {
+  readonly version: 1;
+  readonly kind: "runtime_failure";
+  readonly failure: RuntimeFailure;
+}
+export interface OperationalNotice {
+  readonly failure: RuntimeFailure;
+  readonly binding: Binding;
+  readonly ownerBindingId: string | null;
+  // Why no native contact was attempted; never a claim of non-acceptance after a send.
+  readonly localReason: string | null;
+}
 export interface Envelope {
   readonly version: 1;
   readonly id: string;
   readonly fromBindingId: string;
-  readonly toBindingId: string;
+  // null addresses the local user inbox; it is never a native binding.
+  readonly toBindingId: string | null;
   readonly designationId: string;
   readonly snapshotDigest: string;
-  readonly kind: "instruction" | "coordination" | "report";
+  readonly kind: "instruction" | "coordination" | "report" | "operational_notice";
   readonly text: string;
   readonly outcome: "completed" | "blocked" | "failed" | null;
   readonly evidence: string[];
+  readonly operational?: OperationalNotice | undefined;
 }
 export type NativeReceipt =
   | {
@@ -113,10 +140,18 @@ export type NativeReceipt =
         readonly details?: unknown;
       };
     };
-export interface DeliveryRecord {
-  readonly envelope: Envelope;
+export interface DeliveryAttempt {
+  readonly number: number;
+  readonly nativeKey: string;
   readonly state: "sending" | "accepted" | "rejected" | "uncertain";
   readonly receipt: NativeReceipt | null;
+  readonly uncertaintyReason: string | null;
+}
+export interface DeliveryRecord {
+  readonly envelope: Envelope;
+  readonly state: "sending" | "accepted" | "rejected" | "uncertain" | "posted";
+  readonly receipt: NativeReceipt | null;
+  readonly attempts?: readonly DeliveryAttempt[] | undefined;
 }
 export interface RuntimeIdentity {
   readonly durableSessionId: string;
@@ -130,7 +165,8 @@ export interface RuntimeIdentity {
 export interface ClaimResult {
   readonly disposition: "new" | "replay" | "in_progress";
   readonly record: DeliveryRecord;
-  readonly target: Binding;
+  readonly target: Binding | null;
+  readonly nativeKey?: string | undefined;
 }
 export interface ReserveInput {
   readonly bindingId: string;
@@ -142,6 +178,10 @@ export interface ReserveInput {
   readonly checkout: Checkout | null;
   readonly herdrSocket: string;
   readonly omoSocket: string;
+}
+export interface ScopeFilter {
+  readonly initiativeId?: string;
+  readonly projectId?: string;
 }
 export interface Registry {
   importScope(snapshot: ScopeSnapshot): Result<{ readonly digest: string }>;
@@ -156,15 +196,19 @@ export interface Registry {
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;
   setLaunchState(id: string, state: Binding["launchState"]): Result<Binding>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;
+  setOwner(parentId: string, supervisorId: string | null): Result<Binding>;
   beginClose(id: string): Result<Binding>;
   finishClose(id: string): Result<Binding>;
   beginInitialization(id: string, text: string): Result<InitializationClaim>;
   finishInitialization(id: string, state: "accepted" | "rejected" | "uncertain"): Result<Binding>;
   authorize(senderSessionId: string, envelope: Envelope): Result<Binding>;
-  claim(senderSessionId: string, envelope: Envelope): Result<ClaimResult>;
-  finish(messageId: string, receipt: NativeReceipt): Result<DeliveryRecord>;
-  uncertain(messageId: string, reason: string): Result<DeliveryRecord>;
+  claim(senderSessionId: string, envelope: Envelope | RuntimeFailureClaim): Result<ClaimResult>;
+  finish(messageId: string, receipt: NativeReceipt, nativeKey?: string): Result<DeliveryRecord>;
+  uncertain(messageId: string, reason: string, nativeKey?: string): Result<DeliveryRecord>;
   delivery(messageId: string): Result<DeliveryRecord>;
+  post(senderSessionId: string, envelope: Envelope): Result<DeliveryRecord>;
+  postedReports(filter: ScopeFilter): Result<DeliveryRecord[]>;
+  operationalNotices(filter: ScopeFilter): Result<DeliveryRecord[]>;
   close(): void;
 }
 export type WorkerRequest =
@@ -177,18 +221,35 @@ export type WorkerRequest =
   | {
       readonly version: 1;
       readonly dbPath: string;
-      readonly action: "authorize" | "claim";
+      readonly action: "authorize";
       readonly input: { readonly senderSessionId: string; readonly envelope: Envelope };
     }
   | {
       readonly version: 1;
       readonly dbPath: string;
+      readonly action: "claim";
+      readonly input: {
+        readonly senderSessionId: string;
+        readonly envelope: Envelope | RuntimeFailureClaim;
+      };
+    }
+  | {
+      readonly version: 1;
+      readonly dbPath: string;
       readonly action: "finish";
-      readonly input: { readonly messageId: string; readonly receipt: NativeReceipt };
+      readonly input: {
+        readonly messageId: string;
+        readonly receipt: NativeReceipt;
+        readonly nativeKey?: string | undefined;
+      };
     }
   | {
       readonly version: 1;
       readonly dbPath: string;
       readonly action: "uncertain";
-      readonly input: { readonly messageId: string; readonly reason: string };
+      readonly input: {
+        readonly messageId: string;
+        readonly reason: string;
+        readonly nativeKey?: string | undefined;
+      };
     };

@@ -13,6 +13,41 @@ published.
 
 ## [Unreleased]
 
+### Added
+
+- Issue children start in packet-bound mass-ulw mode, using native phase workflows
+  and independent artifact verification before reporting to the existing parent.
+- Real child workflow QA for successful execution and recovery of invalid work
+  without repeating successful nodes: `qa:child-workflow happy|failed-node`.
+- Model chain warnings on every managed `omo` start, in `olw doctor` (under
+  `chains`, still `ok`) and via `bun run proxy:routing chains`: a category or
+  agent with no working model or a single remaining model, and OLW role models
+  missing from the opencodex catalog. Warnings never block a start and print once
+  per change.
+
+### Changed
+
+- Models route through opencodex. The routing synchronizer reads the
+  opencodex-owned catalog in `models.json`, and OLW role pins use `opencodex`.
+- Child fixture standby permits internal workers only after explicit instruction;
+  creating additional OLW roles and accessing live Linear remain forbidden.
+- Only children may hold an issue-packet goal. Supervisor/parent waiting and model
+  assignments remain unchanged; existing bindings are not reinitialized.
+- An upstream xAI route is followed by the same model on Cursor when opencodex
+  publishes it (`xai/grok-4.7`, then `cursor/grok-4.7`). No other same-model host
+  becomes a second lane.
+- A managed category or agent route whose upstream choices opencodex no longer
+  publishes is written without models and listed as `unroutable`, instead of
+  rejecting the whole routing update.
+
+### Removed
+
+- The CLIProxyAPI model extension (`dist/proxy/index.js`), its `/proxy-refresh`
+  command, access files and manual-first CLIProxyAPI policy document. Role
+  launches and the shared host profile no longer load it. Remove that path from
+  OMO's `settings.json` `extensions`. A routing receipt without a provider is
+  still re-planned at the next start.
+
 ## [0.1.0]
 
 Released: 2026-09-23

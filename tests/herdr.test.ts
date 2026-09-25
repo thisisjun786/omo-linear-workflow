@@ -214,6 +214,54 @@ describe("HerdrClient", () => {
     ]);
   });
 
+  test("grouped worktrees address an exact head with a versioned RPC", async () => {
+    const server = await fixture((socket, request) => {
+      ok(socket, request.id, {
+        type: "worktree_created",
+        workspace: workspace("new", "tab"),
+        root_pane: pane("pane", "new", "tab", "/worktree"),
+        worktree: { path: "/worktree" },
+      });
+    });
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    const checkout = {
+      originalRepoRoot: "/repo",
+      path: "/worktree",
+      branch: "child",
+      baseBranch: "parent",
+      baseCommit: "abc",
+    };
+    await client.createWorktree(checkout, "head", { head: true });
+    await client.createWorktree(checkout, "child", { parentWorkspaceId: "w-parent" });
+    expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: "worktree.create_grouped",
+        params: {
+          cwd: "/repo",
+          branch: "child",
+          base: "parent",
+          path: "/worktree",
+          label: "head",
+          focus: false,
+          trust_repository: false,
+        },
+      },
+      {
+        method: "worktree.create_grouped",
+        params: {
+          group_head_workspace_id: "w-parent",
+          branch: "child",
+          base: "parent",
+          path: "/worktree",
+          label: "child",
+          focus: false,
+          trust_repository: false,
+        },
+      },
+    ]);
+  });
+
   test("quotes hostile argv/env once and uses explicit pane.send_input", async () => {
     let command = "";
     const server = await fixture((socket, request) => {
@@ -287,76 +335,97 @@ describe("HerdrClient", () => {
     stop();
   });
 
-  test("maps snapshots, reports identity, and sends bounded cleanup requests", async () => {
-    const server = await fixture((socket, request) => {
-      if (request.method === "worktree.remove") {
+  test.each([
+    { repoKey: undefined, groupHeadWorkspaceId: undefined },
+    { repoKey: "/repo/.git", groupHeadWorkspaceId: undefined },
+    { repoKey: "herdr-group:ws", groupHeadWorkspaceId: "ws" },
+    { repoKey: "herdr-group:parent", groupHeadWorkspaceId: "parent" },
+  ])(
+    "maps snapshot group identity and bounded cleanup: %j",
+    async ({ repoKey, groupHeadWorkspaceId }) => {
+      const server = await fixture((socket, request) => {
+        if (request.method === "worktree.remove") {
+          ok(socket, request.id, {
+            type: "worktree_removed",
+            workspace_id: "child",
+            path: "/worktrees/child",
+            forced: false,
+          });
+          return;
+        }
+        if (request.method !== "session.snapshot") {
+          ok(socket, request.id);
+          return;
+        }
         ok(socket, request.id, {
-          type: "worktree_removed",
-          workspace_id: "child",
-          path: "/worktrees/child",
-          forced: false,
+          type: "session_snapshot",
+          snapshot: {
+            version: "1",
+            protocol: 1,
+            focused_workspace_id: "ws",
+            focused_tab_id: "tab",
+            focused_pane_id: "pane",
+            workspaces: [
+              {
+                ...workspace("ws", "tab"),
+                ...(repoKey === undefined ? {} : { worktree: { repo_key: repoKey } }),
+              },
+            ],
+            tabs: [],
+            panes: [
+              {
+                ...pane("pane", "ws", "tab", "/cwd", 42),
+                agent_session: { source: "x", agent: "omo", kind: "path", value: "/session" },
+              },
+            ],
+            layouts: [
+              {
+                workspace_id: "ws",
+                tab_id: "tab",
+                focused_pane_id: "pane",
+                panes: [{ pane_id: "pane" }],
+              },
+            ],
+            agents: [],
+          },
         });
-        return;
-      }
-      if (request.method !== "session.snapshot") {
-        ok(socket, request.id);
-        return;
-      }
-      ok(socket, request.id, {
-        type: "session_snapshot",
-        snapshot: {
-          version: "1",
-          protocol: 1,
-          focused_workspace_id: "ws",
-          focused_tab_id: "tab",
-          focused_pane_id: "pane",
-          workspaces: [workspace("ws", "tab")],
-          tabs: [],
-          panes: [
-            {
-              ...pane("pane", "ws", "tab", "/cwd", 42),
-              agent_session: { source: "x", agent: "omo", kind: "path", value: "/session" },
-            },
-          ],
-          layouts: [
-            {
-              workspace_id: "ws",
-              tab_id: "tab",
-              focused_pane_id: "pane",
-              panes: [{ pane_id: "pane" }],
-            },
-          ],
-          agents: [],
-        },
       });
-    });
-    const client = createHerdrClient(server.path);
-    cleanups.push(() => client.close());
-    await expect(client.snapshot()).resolves.toEqual({
-      focusedWorkspaceId: "ws",
-      focusedTabId: "tab",
-      focusedPaneId: "pane",
-      workspaces: [{ workspaceId: "ws", rootPaneId: "pane", cwd: "/cwd", label: "ws" }],
-      panes: [{ paneId: "pane", workspaceId: "ws", revision: 42, sessionPath: "/session" }],
-    });
-    await client.reportSession("pane", "/session");
-    await client.removeWorktree("child");
-    expect(server.requests.slice(1).map(({ method, params }) => ({ method, params }))).toEqual([
-      {
-        method: "pane.report_agent_session",
-        params: {
-          pane_id: "pane",
-          source: "omo-initiative",
-          agent: "omo",
-          agent_session_path: "/session",
+      const client = createHerdrClient(server.path);
+      cleanups.push(() => client.close());
+      await expect(client.snapshot()).resolves.toEqual({
+        focusedWorkspaceId: "ws",
+        focusedTabId: "tab",
+        focusedPaneId: "pane",
+        workspaces: [
+          {
+            workspaceId: "ws",
+            rootPaneId: "pane",
+            cwd: "/cwd",
+            label: "ws",
+            ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),
+          },
+        ],
+        panes: [{ paneId: "pane", workspaceId: "ws", revision: 42, sessionPath: "/session" }],
+      });
+      await client.reportSession("pane", "/session");
+      await client.removeWorktree("child");
+      expect(server.requests.slice(1).map(({ method, params }) => ({ method, params }))).toEqual([
+        {
+          method: "pane.report_agent_session",
+          params: {
+            pane_id: "pane",
+            source: "omo-initiative",
+            agent: "omo",
+            agent_session_path: "/session",
+          },
         },
-      },
-      {
-        method: "worktree.remove",
-        params: { workspace_id: "child", force: false, trust_repository: false },
-      },
-    ]);
-  });
+        {
+          method: "worktree.remove",
+          params: { workspace_id: "child", force: false, trust_repository: false },
+        },
+      ]);
+    },
+  );
 
   test("preserves upstream errors and rejects disconnects", async () => {
     let first = true;

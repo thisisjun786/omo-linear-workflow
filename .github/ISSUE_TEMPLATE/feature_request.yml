@@ -23,7 +23,7 @@ body:
     id: scope
     attributes:
       label: Scope and constraints
-      description: Which part of OLW this touches (CLI, Herdr runtime, proxy extension, routing, skills, docs), and anything it must not change. Check AGENTS.md if you're unsure whether it conflicts with an existing contract.
+      description: Which part of OLW this touches (CLI, Herdr runtime, model routing, skills, docs), and anything it must not change. Check AGENTS.md if you're unsure whether it conflicts with an existing contract.
 
   - type: textarea
     id: alternatives

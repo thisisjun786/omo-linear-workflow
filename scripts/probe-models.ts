@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { modelForRole } from "../src/core/policy";
 
 const responseSchema = z.object({
   id: z.literal("model-state"),
@@ -16,11 +17,10 @@ class ProbeError extends Error {
   }
 }
 
-const roles = [
-  { role: "supervisor", model: "cliproxyapi/gpt-6-astra", thinking: "high" },
-  { role: "parent", model: "cliproxyapi/claude-opus-5-5", thinking: "xhigh" },
-  { role: "child", model: "cliproxyapi/claude-opus-5-5", thinking: "xhigh" },
-] as const;
+const roles = (["supervisor", "parent", "child"] as const).map((role) => {
+  const { provider, modelId, thinking } = modelForRole(role);
+  return { role, model: `${provider}/${modelId}`, thinking };
+});
 
 for (const role of roles) {
   const child = Bun.spawn(

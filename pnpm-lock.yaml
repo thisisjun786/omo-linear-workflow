@@ -6,8 +6,11 @@ settings:
 
 patchedDependencies:
   '@code-yeongyu/senpi@2026.9.22-4':
-    hash: 8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07
-    path: patches/senpi-mcp-optional-types.patch
+    hash: 2d01430cb6812bda78a011e662d85141a28cbb22e36853326b2196e19a53da3a
+    path: patches/@code-yeongyu__senpi@2026.9.22-4.patch
+  omo-ai@5.0.0-0.beta.84:
+    hash: 90aea8907d58061b8a349e37bce4b9beaa137dcc69ac57e854d88eb9d4b8d01b
+    path: patches/omo-ai@5.0.0-0.beta.84.patch
 
 importers:
 
@@ -15,10 +18,10 @@ importers:
     dependencies:
       '@code-yeongyu/senpi':
         specifier: 2026.9.22-4
-        version: 2026.9.22-4(patch_hash=8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07)
+        version: 2026.9.22-4(patch_hash=2d01430cb6812bda78a011e662d85141a28cbb22e36853326b2196e19a53da3a)
       omo-ai:
         specifier: 5.0.0-0.beta.84
-        version: 5.0.0-0.beta.84
+        version: 5.0.0-0.beta.84(patch_hash=90aea8907d58061b8a349e37bce4b9beaa137dcc69ac57e854d88eb9d4b8d01b)
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
@@ -637,7 +640,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.14':
     optional: true
 
-  '@code-yeongyu/senpi@2026.9.22-4(patch_hash=8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07)':
+  '@code-yeongyu/senpi@2026.9.22-4(patch_hash=2d01430cb6812bda78a011e662d85141a28cbb22e36853326b2196e19a53da3a)':
     optionalDependencies:
       '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.278
       '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.278
@@ -764,10 +767,10 @@ snapshots:
     dependencies:
       '@types/node': 26.6.2
 
-  omo-ai@5.0.0-0.beta.84:
+  omo-ai@5.0.0-0.beta.84(patch_hash=90aea8907d58061b8a349e37bce4b9beaa137dcc69ac57e854d88eb9d4b8d01b):
     dependencies:
       '@babel/parser': 8.0.4
-      '@code-yeongyu/senpi': 2026.9.22-4(patch_hash=8e9e944cb3ee7702a7c26dd05b59cb52a6c59d395eb071c10bd752a193cf3e07)
+      '@code-yeongyu/senpi': 2026.9.22-4(patch_hash=2d01430cb6812bda78a011e662d85141a28cbb22e36853326b2196e19a53da3a)
 
   typescript@5.9.3: {}
 

@@ -16,7 +16,8 @@ export function digestOf(snapshot: ScopeSnapshot): string {
 }
 
 function allRefs(snapshot: ScopeSnapshot): Ref[] {
-  const refs: Ref[] = [snapshot.initiative, ...snapshot.decisionRefs];
+  const refs: Ref[] = [...snapshot.decisionRefs];
+  if (snapshot.initiative !== null) refs.push(snapshot.initiative);
   for (const project of snapshot.projects) {
     refs.push(project.project, ...project.issues);
   }

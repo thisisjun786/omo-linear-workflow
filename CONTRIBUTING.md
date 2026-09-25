@@ -47,9 +47,8 @@ Project rules that CI and review will hold you to:
 - No sleeps or timing-based waits in tests. Subscribe to the event or state
   change first, trigger the action, then await it with a bounded timeout.
 - Don't restart running Herdr servers or OMO sessions from build or test code.
-- Preserve the user's manual proxy choices. Direct registrations and
-  management-UI enable/disable decisions are authoritative; see
-  [docs/proxy-model-policy.md](docs/proxy-model-policy.md).
+- Preserve the user's model choices. Enable/disable decisions made in opencodex
+  are authoritative; OLW only reads the catalog it publishes to OMO.
 - Never modify real Linear objects during QA. Use `--fixture` and the owned
   fixtures under `tests/fixtures/`.
 - No credentials, SQLite files, `.omo/state/`, `.omo/herdr/` artifacts or other
@@ -68,7 +67,10 @@ bun run build
 
 `bun run build` includes the managed Herdr build on first run. The isolated QA
 scripts (`bun run qa:events`, `qa:linear`, `qa:proxy`, `qa:routing`) are useful
-for runtime-facing changes. `qa:events` needs Herdr plus real model access;
+for runtime-facing changes. For child execution changes, also run
+`bun run qa:child-workflow happy` and `bun run qa:child-workflow failed-node`;
+these use real models, native DAG events and isolated role fixtures with cleanup.
+`qa:events` needs Herdr plus real model access;
 `qa:proxy` and `qa:routing` need proxy access files. `qa:linear` uses a local MCP
 fixture and no live Linear account. CI has no live provider credentials, so
 its automatic checks must not depend on them.
@@ -107,8 +109,7 @@ approach the reviewer will say so once and explain why.
 Use the issue forms under `.github/ISSUE_TEMPLATE/`. A useful bug report has the
 OLW version (`package.json` or the commit SHA), OS and tool versions, exact
 commands, expected and actual results, and redacted logs. Strip API keys,
-management keys, OAuth tokens and anything from `~/.config/cliproxyapi/` before
-pasting.
+OAuth tokens and anything from `~/.opencodex/` before pasting.
 
 Feature requests should describe the problem and the outcome you want. A
 proposed design is welcome but optional.

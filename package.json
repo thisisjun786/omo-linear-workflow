@@ -21,6 +21,7 @@
     "herdr:build": "bun scripts/build-herdr.ts",
     "qa:herdr": "bun scripts/qa-herdr.ts",
     "qa:events": "bun scripts/qa-events.ts",
+    "qa:child-workflow": "bun scripts/qa-child-workflow.ts",
     "qa:linear": "bun scripts/qa-linear.ts",
     "qa:proxy": "bun scripts/qa-proxy.ts",
     "qa:routing": "bun scripts/qa-routing.ts",
@@ -35,7 +36,8 @@
   "pnpm": {
     "onlyBuiltDependencies": ["omo-ai"],
     "patchedDependencies": {
-      "@code-yeongyu/senpi@2026.9.22-4": "patches/senpi-mcp-optional-types.patch"
+      "@code-yeongyu/senpi@2026.9.22-4": "patches/@code-yeongyu__senpi@2026.9.22-4.patch",
+      "omo-ai@5.0.0-0.beta.84": "patches/omo-ai@5.0.0-0.beta.84.patch"
     }
   },
   "devDependencies": {

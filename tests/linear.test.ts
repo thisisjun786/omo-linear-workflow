@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type { Binding, Result, ScopeSnapshot } from "../src/core/contracts";
 import { buildRoleBrief, readScopeSnapshot } from "../src/linear";
 
@@ -23,7 +24,9 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-function fixtureSnapshot(): ScopeSnapshot {
+function fixtureSnapshot(): ScopeSnapshot & {
+  readonly initiative: NonNullable<ScopeSnapshot["initiative"]>;
+} {
   return {
     version: 1,
     source: "fixture",
@@ -96,13 +99,19 @@ describe("readScopeSnapshot", () => {
     );
     expect(snapshot.version).toBe(1);
     expect(snapshot.source).toBe("fixture");
-    expect(snapshot.initiative.id).toBe("initiative-omo-1");
+    expect(snapshot.initiative?.id).toBe("initiative-omo-1");
     expect(snapshot.projects).toHaveLength(1);
     expect(snapshot.projects[0]?.project.id).toBe("project-omo-1");
     expect(snapshot.projects[0]?.issues.map((issue) => issue.id)).toEqual([
       "issue-omo-1",
       "issue-omo-2",
     ]);
+  });
+
+  test("imports a project-only snapshot with explicit null initiative", async () => {
+    const snapshot: ScopeSnapshot = { ...fixtureSnapshot(), initiative: null };
+    const file = await tempFile("project-only.json", JSON.stringify(snapshot));
+    expect(value(await readScopeSnapshot(file))).toEqual(snapshot);
   });
 
   test("rejects a missing file", async () => {
@@ -233,6 +242,36 @@ describe("buildRoleBrief", () => {
     expect(brief).toContain("initiative_id: initiative-omo-1");
   });
 
+  test("standalone parent brief exposes its approved issues and user contact without an initiative", () => {
+    const binding = makeBinding("parent", {
+      assignment: {
+        role: "parent",
+        projectId: "project-omo-1",
+        initiativeId: null,
+        ownerBindingId: null,
+      },
+    });
+    const parsed: unknown = Bun.YAML.parse(
+      buildRoleBrief(binding, { ...snapshot, initiative: null }),
+    );
+    expect(parsed).toMatchObject({
+      scope_refs: {
+        initiative_id: null,
+        project_id: "project-omo-1",
+        issue_ids: ["issue-omo-1", "issue-omo-2"],
+      },
+      initial_manager_binding_id: null,
+      user_contact: "direct_prompt_in_this_session",
+      user_report_state: "posted_not_native_acceptance",
+      behavior: {
+        no_autonomous_goal_loop: true,
+        wait_for_explicit_instruction: true,
+        report_route: "current_manager_or_user_inbox",
+        management_link_changes_approval: false,
+      },
+    });
+  });
+
   test("child brief embeds project and issue scope refs", () => {
     const binding = makeBinding("child");
     const brief = buildRoleBrief(binding, snapshot);
@@ -240,6 +279,55 @@ describe("buildRoleBrief", () => {
     expect(brief).toContain("project_id: project-omo-1");
     expect(brief).toContain("issue_id: issue-omo-1");
   });
+
+  test.each(["fixture", "linear-export"] as const)(
+    "child selects packet-bound workflow execution for %s scope",
+    (source) => {
+      const brief = buildRoleBrief(makeBinding("child"), { ...snapshot, source });
+      const parsed = z.record(z.string(), z.unknown()).parse(Bun.YAML.parse(brief));
+      expect(parsed).toMatchObject({
+        role: "child",
+        scope_refs: { issue_id: "issue-omo-1" },
+        behavior: {
+          execution_mode: "mass-ulw",
+          execution_trigger: "explicit_issue_packet",
+          execution_skills: ["olw-run", "mass-ulw"],
+          internal_workers: "native_workflow_nodes_not_roles",
+          issue_goal: "packet_bound",
+          verify_artifacts_before_report: true,
+          wait_for_explicit_instruction: true,
+        },
+      });
+      const behavior = z.record(z.string(), z.unknown()).parse(parsed["behavior"]);
+      expect(behavior["no_autonomous_goal_loop"]).toBeUndefined();
+      if (source === "fixture") {
+        expect(parsed).toMatchObject({
+          qa_standby: true,
+          respond_only_to_explicit_messages: true,
+          never_fetch_live_linear: true,
+          never_create_additional_olw_roles: true,
+          never_implement_repository_work_autonomously: true,
+        });
+        expect(parsed["never_create_additional_sessions"]).toBeUndefined();
+      } else {
+        expect(parsed["qa_standby"]).toBeUndefined();
+      }
+    },
+  );
+
+  test.each(["parent", "supervisor"] as const)(
+    "%s retains event-driven coordination without an issue workflow",
+    (role) => {
+      const brief = buildRoleBrief(makeBinding(role), snapshot);
+      const parsed = z
+        .object({ behavior: z.record(z.string(), z.unknown()) })
+        .parse(Bun.YAML.parse(brief.slice(brief.indexOf("behavior:"))));
+      expect(parsed.behavior["no_autonomous_goal_loop"]).toBe(true);
+      expect(parsed.behavior["wait_for_explicit_instruction"]).toBe(true);
+      expect(parsed.behavior["execution_mode"]).toBeUndefined();
+      expect(parsed.behavior["issue_goal"]).toBeUndefined();
+    },
+  );
 
   test("fixture brief instructs qa standby without autonomous loops", () => {
     const binding = makeBinding("supervisor");

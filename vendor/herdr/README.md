@@ -9,7 +9,8 @@ cached artifact is reused without downloading source or invoking a compiler.
 `manifest.json` records the upstream repository, full commit SHA, version,
 Rust toolchain, Zig version, patch path and SHA256. The OMO/Senpi detection and
 integration patch includes both previously tracked edits and seven new source
-files from the working 0.9.1 port. `LICENSE` is upstream's Apache-2.0 license;
+files from the working 0.9.1 port. It also includes opt-in workspace grouping
+for linked Git worktrees (LINA-148). `LICENSE` is upstream's Apache-2.0 license;
 the vendored Herdr material retains that license.
 
 Current inputs:
@@ -59,6 +60,40 @@ The executable is selected by manifest identity plus platform/architecture;
 normal TypeScript rebuilds do not remove it. Do not hand-edit generated source
 or artifacts. Build failures do not publish a usable receipt and do not replace
 the existing TypeScript distribution.
+
+## Explicit worktree groups (LINA-148)
+
+The additive `worktree.create_grouped` socket method has the ordinary
+`worktree.create` fields plus optional `group_head_workspace_id`:
+
+- To create a parent group head, send `cwd` pointing at the primary Git checkout,
+  a new `branch` and `path`, and omit `group_head_workspace_id`. The new checkout
+  remains a linked Git worktree, but its new workspace is the group head; Herdr
+  does not open an implicit repo-root workspace. Set `focus:false` to preserve
+  the user's focus.
+- To create a child, send the exact parent's `workspace_id` as
+  `group_head_workspace_id`, with `branch`, `base`, and `path`; omit `cwd` and
+  `workspace_id`. The method validates the open head before any Git side effect.
+  A missing workspace, unrelated manager workspace, or other group's child is
+  rejected with `invalid_group_head`. Two heads from one Git repo have different
+  group identities.
+- Existing `worktree.create` requests and workspaces without explicit grouping
+  retain upstream Git-common-dir grouping. Explicit groups are persisted and
+  restored while the linked checkout and its Git source exist. Remove children
+  before removing a linked head; closing a head with children requires
+  `close_group:true` as with a legacy group.
+
+An old Herdr server does not know `worktree.create_grouped`: it rejects the
+method instead of silently ignoring an unknown JSON field and producing the
+wrong sidebar. `HerdrClient.createWorktree(checkout, label, { head: true })`
+creates a head; `{ parentWorkspaceId: parent.workspaceId }` creates a child;
+omitting the third argument retains the old request. OLW passes head options for
+new parents and child options for their exact live parent workspace. Snapshot
+`worktree.repo_key` values in the `herdr-group:<workspace-id>` namespace identify
+explicit membership; the client exposes that as `groupHeadWorkspaceId`. Before
+child allocation, OLW checks the parent's workspace ID, cwd and head identity.
+An existing legacy parent without that metadata retains legacy placement; OLW
+does not silently regroup existing workspaces.
 
 ## Updates and rollback
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { planRouting, type RoutingGroups } from "../../src/proxy/routing-plan";
-import type { UpstreamPolicy } from "../../src/proxy/routing-source";
+import type { RouteRung, UpstreamPolicy } from "../../src/proxy/routing-source";
 
 const available = new Set(["sol", "luna", "opus"]);
 const policy: UpstreamPolicy = {
@@ -21,85 +21,151 @@ const policy: UpstreamPolicy = {
 };
 const empty: RoutingGroups = { categories: {}, agents: {} };
 
-describe("upstream proxy routing", () => {
-  test.each([
-    {
-      offered: ["kimi-k2.7-code-highspeed", "luna"],
-      expected: "kimi-k2.7-code-highspeed",
-      reasoning: "off",
-    },
-    {
-      offered: ["kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed", "luna"],
-      expected: "kimi-for-coding-highspeed",
-      reasoning: "off",
-    },
-    { offered: ["kimi-k3", "luna"], expected: "luna", reasoning: "low" },
-  ])("resolves the verified HighSpeed identity without changing reasoning: $expected", (row) => {
-    // Given the Kimi product ID followed by a distinct upstream alternative.
-    const upstream: UpstreamPolicy = {
-      ...policy,
-      categories: {},
-      agents: {
-        explore: {
-          models: [
-            {
-              providers: ["kimi-coding", "kimi-for-coding"],
-              model: "kimi-for-coding-highspeed",
-              variant: "off",
-            },
-            { providers: ["openai"], model: "luna", variant: "low" },
-          ],
+function quick(chain: readonly RouteRung[], offered: readonly string[]) {
+  return planRouting(
+    { ...policy, agents: {}, categories: { quick: chain } },
+    new Set(offered),
+    empty,
+  );
+}
+
+describe("upstream opencodex routing", () => {
+  test("maps each upstream provider lane to the same opencodex service", () => {
+    // Given upstream lanes for Anthropic, Kimi Code, Xiaomi and xAI.
+    const result = quick(
+      [
+        {
+          providers: ["anthropic-subscription", "anthropic"],
+          model: "claude-opus-5-5",
+          variant: "max",
         },
-      },
-    };
-    // When only a verified spelling, the exact ID, or an unrelated Kimi is offered.
-    const result = planRouting(upstream, new Set(row.offered), empty);
-    // Then choose the same HighSpeed identity when possible, never K3 in its place.
-    expect(result.groups.agents["explore"]?.["models"]).toEqual(
-      row.expected === "luna"
-        ? [{ model: "cliproxyapi/luna", reasoning: "low" }]
-        : [
-            { model: `cliproxyapi/${row.expected}`, reasoning: row.reasoning },
-            { model: "cliproxyapi/luna", reasoning: "low" },
-          ],
+        {
+          providers: ["kimi-coding", "kimi-for-coding", "moonshotai"],
+          model: "kimi-k3",
+          variant: "max",
+        },
+        {
+          providers: ["kimi-coding", "kimi-for-coding"],
+          model: "kimi-for-coding-highspeed",
+          variant: "off",
+        },
+        { providers: ["xiaomi", "opencode-go"], model: "mimo-v2.6-pro", variant: "max" },
+        { providers: ["xai", "github-copilot"], model: "grok-4.7", variant: "xhigh" },
+      ],
+      // When opencodex namespaces those services and also hosts K3 on Ollama Cloud.
+      [
+        "anthropic/claude-opus-5-5",
+        "ollama-cloud/kimi-k3",
+        "kimi/k3[1m]",
+        "kimi/kimi-for-coding-highspeed",
+        "mimo/mimo-v2.6-pro",
+        "xai/grok-4.7",
+      ],
     );
+    // Then reasoning is unchanged and K3 stays on Kimi Code, where OMO names it k3.
+    expect(result.groups.categories["quick"]).toEqual({
+      models: [
+        { model: "opencodex/anthropic/claude-opus-5-5", reasoning: "max" },
+        { model: "opencodex/kimi/k3[1m]", reasoning: "max" },
+        { model: "opencodex/kimi/kimi-for-coding-highspeed", reasoning: "off" },
+        { model: "opencodex/mimo/mimo-v2.6-pro", reasoning: "max" },
+        { model: "opencodex/xai/grok-4.7", reasoning: "xhigh" },
+      ],
+    });
+  });
+
+  test("uses the opencodex Fast row for an upstream fast selector, never the base model", () => {
+    // Given a priority-tier selector followed by a distinct alternative.
+    const chain = [
+      { providers: ["chatgpt-subscription", "openai"], model: "gpt-6-luna-fast", variant: "low" },
+      { providers: ["openai"], model: "gpt-6-sol", variant: "medium" },
+    ];
+    // When opencodex publishes its --fast row, it is the same tier selector.
+    expect(
+      quick(chain, ["gpt-6-luna", "gpt-6-luna--fast", "gpt-6-sol"]).groups.categories["quick"],
+    ).toEqual({
+      models: [
+        { model: "opencodex/gpt-6-luna--fast", reasoning: "low" },
+        { model: "opencodex/gpt-6-sol", reasoning: "medium" },
+      ],
+    });
+    // Then without that row the rung is skipped rather than silently served at standard tier.
+    const withoutFast = quick(chain, ["gpt-6-luna", "gpt-6-sol"]);
+    expect(withoutFast.groups.categories["quick"]).toEqual({
+      models: [{ model: "opencodex/gpt-6-sol", reasoning: "medium" }],
+    });
+    expect(withoutFast.skipped).toContain("categories.quick: gpt-6-luna-fast");
   });
 
   test.each(["off", "max"])(
-    "resolves current DeepSeek Flash identity with %s reasoning",
+    "serves the current DeepSeek Flash identity from another opencodex host with %s reasoning",
     (reasoning) => {
-      // Given the official rolling ID and a separately registered V4.1 model.
-      const upstream: UpstreamPolicy = {
-        ...policy,
-        agents: {},
-        categories: {
-          quick: [
-            { providers: ["openai"], model: "luna", variant: "low" },
-            { providers: ["deepseek"], model: "deepseek-flash", variant: reasoning },
-          ],
-        },
-      };
-      // When the proxy advertises the verified current version of that rolling ID.
-      const result = planRouting(upstream, new Set(["luna", "deepseek-v4.1-flash"]), empty);
-      // Then preserve upstream order and reasoning instead of treating Flash as absent.
+      // Given DeepSeek's rolling ID, which opencodex serves only on Ollama Cloud.
+      const result = quick(
+        [
+          { providers: ["openai"], model: "luna", variant: "low" },
+          { providers: ["deepseek"], model: "deepseek-flash", variant: reasoning },
+        ],
+        ["luna", "command-code/deepseek-deepseek-v4.1-flash", "ollama-cloud/deepseek-v4.1-flash"],
+      );
+      // Then the exact V4.1 Flash ID is used and the reasoning level is preserved.
       expect(result.groups.categories["quick"]).toEqual({
         models: [
-          { model: "cliproxyapi/luna", reasoning: "low" },
-          { model: "cliproxyapi/deepseek-v4.1-flash", reasoning },
+          { model: "opencodex/luna", reasoning: "low" },
+          { model: "opencodex/ollama-cloud/deepseek-v4.1-flash", reasoning },
         ],
       });
     },
   );
 
+  test("never substitutes another version or variant for an unserved rung", () => {
+    // Given rungs whose exact models opencodex does not publish.
+    const result = quick(
+      [
+        { providers: ["anthropic"], model: "claude-opus-4-6", variant: "max" },
+        { providers: ["zai-coding-plan", "opencode-go"], model: "glm-5.3", variant: "max" },
+        { providers: ["openai"], model: "luna", variant: "low" },
+      ],
+      ["anthropic/claude-opus-5-5", "opencode-go/glm-5.3-flash", "luna"],
+    );
+    // Then newer or Flash siblings are not chosen in their place.
+    expect(result.groups.categories["quick"]).toEqual({
+      models: [{ model: "opencodex/luna", reasoning: "low" }],
+    });
+    expect(result.skipped).toEqual([
+      "categories.quick: claude-opus-4-6",
+      "categories.quick: glm-5.3",
+    ]);
+  });
+
+  test("follows an xAI rung with the same model on Cursor, and only there", () => {
+    // Given a Grok rung and a K3 rung while opencodex also hosts both elsewhere.
+    const result = quick(
+      [
+        { providers: ["xai", "github-copilot"], model: "grok-4.7", variant: "xhigh" },
+        { providers: ["kimi-coding"], model: "kimi-k3", variant: "max" },
+      ],
+      ["xai/grok-4.7", "cursor/grok-4.7", "kimi/k3[1m]", "ollama-cloud/kimi-k3"],
+    );
+    // Then Cursor is the next Grok lane, while K3 never spills onto Ollama Cloud's quota.
+    expect(result.groups.categories["quick"]).toEqual({
+      models: [
+        { model: "opencodex/xai/grok-4.7", reasoning: "xhigh" },
+        { model: "opencodex/cursor/grok-4.7", reasoning: "xhigh" },
+        { model: "opencodex/kimi/k3[1m]", reasoning: "max" },
+      ],
+    });
+  });
+
   test("maps available exact identities in upstream order with reasoning", () => {
-    // Given an upstream preference that the proxy does not serve.
+    // Given an upstream preference that opencodex does not serve.
     // When the policy is mapped, only explicit upstream alternatives are eligible.
     const result = planRouting(policy, available, empty);
     // Then duplicate provider lanes collapse without inventing model alternatives.
     expect(result.groups.categories["quick"]).toEqual({
       models: [
-        { model: "cliproxyapi/luna", reasoning: "low" },
-        { model: "cliproxyapi/sol", reasoning: "medium" },
+        { model: "opencodex/luna", reasoning: "low" },
+        { model: "opencodex/sol", reasoning: "medium" },
       ],
     });
     expect(result.skipped).toContain("categories.quick: unavailable");
@@ -108,7 +174,7 @@ describe("upstream proxy routing", () => {
   test("retains manual changes while updating untouched managed routes", () => {
     const first = planRouting(policy, available, empty);
     const edited: RoutingGroups = {
-      categories: { quick: { models: ["cliproxyapi/opus"], description: "Custom" } },
+      categories: { quick: { models: ["opencodex/opus"], description: "Custom" } },
       agents: first.groups.agents,
     };
     const result = planRouting(policy, available, edited, first.managed);
@@ -120,7 +186,7 @@ describe("upstream proxy routing", () => {
   test("removes migration overrides from agents inheriting upstream categories", () => {
     const current: RoutingGroups = {
       categories: {},
-      agents: { reviewer: { models: ["cliproxyapi/opus"], disable: false } },
+      agents: { reviewer: { models: ["opencodex/opus"], disable: false } },
     };
     const result = planRouting(policy, available, current);
     expect(result.groups.agents["reviewer"]).toEqual({ disable: false });
@@ -130,7 +196,7 @@ describe("upstream proxy routing", () => {
   test("retires removed managed routes but preserves unrelated user configuration", () => {
     const first = planRouting(policy, available, empty);
     const current: RoutingGroups = {
-      categories: { ...first.groups.categories, custom: { models: ["cliproxyapi/opus"] } },
+      categories: { ...first.groups.categories, custom: { models: ["opencodex/opus"] } },
       agents: first.groups.agents,
     };
     const result = planRouting(
@@ -144,7 +210,12 @@ describe("upstream proxy routing", () => {
     expect(result.groups.agents["explore"]).toBeUndefined();
   });
 
-  test("rejects a policy with no available upstream alternative instead of guessing", () => {
-    expect(() => planRouting(policy, new Set(["opus"]), empty)).toThrow("categories.quick");
+  test("keeps other routes updating when one route loses every candidate", () => {
+    // Given a catalog that serves none of quick's upstream choices.
+    const result = planRouting(policy, new Set(["opus"]), empty);
+    // Then quick is emptied and reported instead of failing the whole plan.
+    expect(result.unroutable).toEqual(["categories.quick", "agents.explore"]);
+    expect(result.groups.categories["quick"]).toEqual({});
+    expect(result.managed.categories["quick"]).toEqual({});
   });
 });

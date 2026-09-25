@@ -27,8 +27,6 @@ async function snapshot(extra: readonly string[]) {
       "--no-context-files",
       "--no-model-fallback",
       "--no-extensions",
-      "-e",
-      join(root, "dist/proxy/index.js"),
       ...extra,
     ],
     { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
@@ -94,16 +92,16 @@ const { mode } = scopePreferenceSchema.parse(preference ? JSON.parse(preference)
 const current = await snapshot([]);
 if (mode === "referenced") {
   assert.deepEqual(current.scoped, expected);
-  assert.ok(!current.scoped.includes("cliproxyapi/mimo-v2.6-flash"));
+  assert.ok(!current.scoped.includes("opencodex/mimo/mimo-v2.6-flash"));
 } else {
   const currentScope = current.scoped.length ? current.scoped : current.available;
   assert.ok(currentScope.length > expected.length);
-  assert.ok(currentScope.includes("cliproxyapi/mimo-v2.6-flash"));
+  assert.ok(currentScope.includes("opencodex/mimo/mimo-v2.6-flash"));
 }
-const full = await snapshot(["--models", "cliproxyapi/*"]);
+const full = await snapshot(["--models", "opencodex/**"]);
 const fullScope = full.scoped.length ? full.scoped : full.available;
 assert.ok(fullScope.length > expected.length);
-assert.ok(fullScope.includes("cliproxyapi/mimo-v2.6-flash"));
+assert.ok(fullScope.includes("opencodex/mimo/mimo-v2.6-flash"));
 assert.deepEqual(full.available, current.available, "Scope must not delete callable models");
 const evidence = {
   result: "MODEL_SCOPE_LIVE_OK",

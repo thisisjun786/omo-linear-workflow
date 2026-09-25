@@ -5,6 +5,11 @@ import { z } from "zod";
 import { QaError, startQaRpc } from "./qa-rpc";
 
 const root = resolve(import.meta.dir, "..");
+const mode = z
+  .enum(["direct", "discovery", "discovery-reload", "discovery-host", "discovery-host-reload"])
+  .parse(process.argv[2] ?? "direct");
+const discovery = mode !== "direct";
+const hosted = mode === "discovery-host" || mode === "discovery-host-reload";
 const scratch = await mkdtemp(join(tmpdir(), "omo-linear-workflow-linear-"));
 const agentDir = join(scratch, "agent");
 const requestSchema = z.object({
@@ -70,7 +75,11 @@ const server = Bun.serve({
         result = {
           tools: names.map((name) => ({
             name,
-            description: `Read one fixture ${name.slice(4)} by its stable ID.`,
+            description: {
+              get_initiative: "Read fixture initiative portfolio scope by stable ID.",
+              get_project: "Read fixture project milestones resources by stable ID.",
+              get_issue: "Read fixture issue defect acceptance by stable ID.",
+            }[name],
             inputSchema: {
               type: "object",
               properties: { id: { type: "string" } },
@@ -120,6 +129,7 @@ try {
           url: `http://127.0.0.1:${server.port}/mcp`,
           auth: false,
           lifecycle: "eager",
+          exposure: discovery ? "search" : "direct",
           startupTimeoutMs: 10000,
         },
       },
@@ -128,9 +138,10 @@ try {
   );
   rpc = startQaRpc(
     [
-      "omo",
+      join(root, "node_modules/.bin/omo"),
       "--mode",
       "rpc",
+      ...(hosted ? ["--multi-session", "--session-runtime", "in-process"] : []),
       "--no-session",
       "--no-approve",
       "--no-extensions",
@@ -148,16 +159,67 @@ try {
       ...process.env,
       HERDR_ENV: "0",
       OMO_CODING_AGENT_DIR: agentDir,
+      SENPI_CODING_AGENT_DIR: agentDir,
+      PI_CODING_AGENT_DIR: agentDir,
       OMO_INITIATIVE_ROOT: root,
+      OMO_INITIATIVE_HOST: undefined,
+      OMO_RPC_SOCKET: undefined,
+      OMO_ENABLE_SHARED_HOST: "0",
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(scratch, "bun-cache"),
+      XDG_CACHE_HOME: join(scratch, "xdg-cache"),
     },
   );
-  await rpc.request({ type: "prompt", message: "/mcp test linear" });
+  const nativeRpc = rpc;
+  if (hosted) {
+    const opened = z
+      .object({ sessionId: z.string() })
+      .parse(await rpc.request({ type: "open_session", cwd: scratch }));
+    const unscoped = rpc.request;
+    rpc = {
+      ...rpc,
+      request: (command, timeoutMs) =>
+        unscoped({ ...command, sessionId: opened.sessionId }, timeoutMs),
+    };
+  }
+  z.object({ disposition: z.literal("handled") }).parse(
+    await rpc.request({ type: "prompt", message: "/mcp status" }),
+  );
+  if (mode === "discovery-reload" || mode === "discovery-host-reload") {
+    await rpc.request({ type: "reload" });
+    z.object({ disposition: z.literal("handled") }).parse(
+      await rpc.request({ type: "prompt", message: "/mcp status" }),
+    );
+  }
   console.log("MCP_STATUS", JSON.stringify(await rpc.request({ type: "get_loaded_surfaces" })));
   const tools = z
     .array(z.string())
     .parse(await rpc.request({ type: "extension_request", name: "oi.qa.linear.tools" }));
+  if (discovery) {
+    const active = z
+      .array(z.string())
+      .parse(await rpc.request({ type: "extension_request", name: "oi.qa.linear.active" }));
+    console.log("MCP_BEFORE_DISCOVERY", JSON.stringify({ registered: tools, active }));
+    if (names.some((name) => active.includes(`mcp_linear_${name}`)))
+      throw new QaError("Search fixture tools must start inactive");
+  }
   for (const name of names) {
     const tool = `mcp_linear_${name}`;
+    if (discovery) {
+      const search = await rpc.request({
+        type: "extension_request",
+        name: "oi.qa.linear.search",
+        data:
+          name === "get_project"
+            ? { query: "project milestones resources", source: "mcp" }
+            : { query: tool, ...(name === "get_initiative" ? { source: "mcp" } : {}) },
+      });
+      const matches = z
+        .object({ details: z.object({ matched: z.array(z.string()) }) })
+        .parse(search);
+      console.log("MCP_DISCOVERY", tool, JSON.stringify(matches));
+      if (!matches.details.matched.includes(tool))
+        throw new QaError(`Search did not discover ${tool}`);
+    }
     if (!tools.includes(tool)) throw new QaError(`Missing actual MCP tool ${tool}`);
     const returned = await rpc.request({
       type: "extension_request",
@@ -171,7 +233,62 @@ try {
     if (!text) throw new QaError(`MCP result had no JSON text for ${name}`);
     const returnedRecord = z.object({ id: z.literal(records[name].id) }).parse(JSON.parse(text));
     if (returnedRecord.id !== records[name].id) throw new QaError(`Wrong ${name} identity`);
+    if (discovery) {
+      const active = z
+        .array(z.string())
+        .parse(await rpc.request({ type: "extension_request", name: "oi.qa.linear.active" }));
+      if (!active.includes(tool)) throw new QaError(`First call did not activate ${tool}`);
+    }
     console.log(`MCP_READ_PASS ${name} ${records[name].id}`);
+  }
+  if (hosted) {
+    const siblingCwd = join(scratch, "sibling");
+    await mkdir(siblingCwd);
+    const sibling = z
+      .object({ sessionId: z.string() })
+      .parse(await nativeRpc.request({ type: "open_session", cwd: siblingCwd }));
+    z.object({ disposition: z.literal("handled") }).parse(
+      await nativeRpc.request({
+        type: "prompt",
+        message: "/mcp status",
+        sessionId: sibling.sessionId,
+      }),
+    );
+    const before = z.array(z.string()).parse(
+      await nativeRpc.request({
+        type: "extension_request",
+        name: "oi.qa.linear.active",
+        sessionId: sibling.sessionId,
+      }),
+    );
+    if (names.some((name) => before.includes(`mcp_linear_${name}`)))
+      throw new QaError("MCP activation leaked into sibling session");
+    const result = await nativeRpc.request({
+      type: "extension_request",
+      name: "oi.qa.linear.eval",
+      sessionId: sibling.sessionId,
+      data: { tool: "mcp_linear_get_issue", arguments: { id: records.get_issue.id } },
+    });
+    z.object({
+      details: z.object({
+        toolCallCount: z.literal(1),
+        toolCalls: z
+          .array(z.object({ name: z.literal("mcp_linear_get_issue"), ok: z.literal(true) }))
+          .length(1),
+        cells: z.array(z.object({ status: z.literal("complete") })).length(1),
+      }),
+    }).parse(result);
+    console.log("MCP_EVAL_RESULT", JSON.stringify(result));
+    const after = z.array(z.string()).parse(
+      await nativeRpc.request({
+        type: "extension_request",
+        name: "oi.qa.linear.active",
+        sessionId: sibling.sessionId,
+      }),
+    );
+    if (!after.includes("mcp_linear_get_issue") || after.includes("mcp_linear_get_project"))
+      throw new QaError("eval did not activate only its requested MCP tool");
+    console.log("MCP_EVAL_PASS", sibling.sessionId);
   }
   const commands = z
     .object({ commands: z.array(z.object({ name: z.string() })) })
@@ -181,8 +298,9 @@ try {
       throw new QaError(`Ported skill not loaded by actual OMO: ${name}`);
     }
   }
-  if (calls.join(",") !== names.join(",")) throw new QaError("Unexpected MCP wire calls");
-  console.log("LINEAR_QA_PASS: three real MCP read calls and four loaded ported skills");
+  const expectedCalls = hosted ? [...names, "get_issue"] : names;
+  if (calls.join(",") !== expectedCalls.join(",")) throw new QaError("Unexpected MCP wire calls");
+  console.log(`LINEAR_QA_PASS: ${calls.length} real MCP read calls and four loaded ported skills`);
   console.log("LIVE_LINEAR: not contacted; this was an explicit local MCP fixture");
 } finally {
   if (rpc) {

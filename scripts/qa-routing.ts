@@ -14,7 +14,7 @@ const launchSchema = z.object({
     status: z.literal("running"),
     task_id: z.string(),
     resolved_model: z.object({
-      provider: z.literal("cliproxyapi"),
+      provider: z.literal("opencodex"),
       model_id: z.string(),
       source: z.enum(["category", "agent"]),
       variant: z.string().optional(),
@@ -55,7 +55,7 @@ const child = Bun.spawn(
     "--tools",
     "task",
     "--model",
-    "cliproxyapi/gpt-6-luna",
+    "opencodex/gpt-6-luna",
     "--thinking",
     "low",
     "--no-model-fallback",
@@ -155,8 +155,8 @@ try {
     )
       throw new Error("Runtime completion did not contain the unread file's value");
   }
-  if (providers.size !== 1 || !providers.has("cliproxyapi"))
-    throw new Error("Parent escaped the proxy");
+  if (providers.size !== 1 || !providers.has("opencodex"))
+    throw new Error("Parent escaped opencodex");
   const evidence = { result: "ROUTING_LIVE_OK", launched, completions, providers: [...providers] };
   await atomicText(
     join(root, ".omo/evidence/routing-live.json"),

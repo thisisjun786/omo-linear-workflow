@@ -24,7 +24,7 @@ While the major version is `0`:
 
 - A **minor** bump may break documented contracts: CLI flags, exit codes, the
   SQLite schema, stored state layout, the scope snapshot format, the readiness
-  and receipt protocol, or the proxy extension's configuration files. Any such
+  and receipt protocol, or the routing state files. Any such
   break must ship with migration instructions in the changelog entry.
 - A **patch** bump is backwards-compatible. Existing state, bindings and
   configuration keep working without user action.

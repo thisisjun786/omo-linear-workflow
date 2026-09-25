@@ -3,7 +3,16 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import type { Binding, Designation, Envelope, Result, ScopeSnapshot } from "../src/core/contracts";
+import type {
+  Binding,
+  Designation,
+  Envelope,
+  NativeReceipt,
+  Result,
+  ScopeSnapshot,
+} from "../src/core/contracts";
+import { modelForRole } from "../src/core/policy";
+import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import {
   type RuntimePort,
@@ -83,9 +92,9 @@ async function fixture(run: (fixture: Fixture) => Promise<void>): Promise<void> 
     Binding["assignment"]["role"],
     { readonly provider: string; readonly modelId: string; readonly thinking: string }
   > = {
-    supervisor: { provider: "cliproxyapi", modelId: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
-    child: { provider: "cliproxyapi", modelId: "claude-opus-5-5", thinking: "xhigh" },
+    supervisor: modelForRole("supervisor"),
+    parent: modelForRole("parent"),
+    child: modelForRole("child"),
   };
   const activate = (binding: Binding) => {
     value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
@@ -155,6 +164,8 @@ class Harness implements RuntimePort {
   }> = [];
   readonly reports: Array<readonly [string, string, string]> = [];
   executeCount = 0;
+  readonly nativeInputs: unknown[] = [];
+  afterNative: (() => Promise<void>) | undefined;
   currentContext: SessionContextPort | undefined;
   receipt: unknown = {
     kind: "ok",
@@ -167,6 +178,8 @@ class Harness implements RuntimePort {
   onSessionStart(handler: (ctx: SessionContextPort) => Promise<void>): void {
     this.sessionStart = handler;
   }
+  onTurnEnd(): void {}
+  notifyOperational(): void {}
   onResourcesDiscover(handler: () => { readonly skillPaths: readonly string[] }): void {
     this.resources = handler;
   }
@@ -213,6 +226,8 @@ class Harness implements RuntimePort {
     );
     if (decision?.block) throw new Error(decision.reason);
     this.executeCount += 1;
+    this.nativeInputs.push(input);
+    await this.afterNative?.();
     return { details: { result: this.receipt } };
   }
   async reportSession(socket: string, pane: string, path: string): Promise<void> {
@@ -239,23 +254,17 @@ class Harness implements RuntimePort {
 }
 
 function context(binding: Binding, mode: SessionContextPort["mode"] = "rpc"): SessionContextPort {
-  const role = binding.assignment.role;
-  const models: Record<
-    Binding["assignment"]["role"],
-    { readonly provider: string; readonly id: string; readonly thinking: string }
-  > = {
-    supervisor: { provider: "cliproxyapi", id: "gpt-6-astra", thinking: "high" },
-    parent: { provider: "cliproxyapi", id: "claude-opus-5-5", thinking: "xhigh" },
-    child: { provider: "cliproxyapi", id: "claude-opus-5-5", thinking: "xhigh" },
-  };
+  const { provider, modelId, thinking } = modelForRole(binding.assignment.role);
   return {
     cwd: binding.cwd,
     mode,
-    model: models[role],
-    thinkingLevel: models[role].thinking,
+    model: { provider, id: modelId },
+    thinkingLevel: thinking,
+    disableModelFallbackForSession: () => undefined,
     sessionManager: {
       getSessionId: () => binding.durableSessionId,
       getSessionFile: () => binding.sessionPath ?? undefined,
+      getBranch: () => [],
     },
   };
 }
@@ -288,6 +297,41 @@ function resultState(value: unknown): string {
 }
 
 describe("native delivery extension", () => {
+  test("only bound host roles disable model fallback for their own session", async () => {
+    await fixture(async ({ root, supervisor, parent, child }) => {
+      for (const binding of [supervisor, parent, child]) {
+        const harness = new Harness();
+        let disabled = 0;
+        const ctx = Object.assign(context(binding), {
+          disableModelFallbackForSession: () => {
+            disabled += 1;
+          },
+        });
+        registerInitiativeRuntime(harness, { root, hostRuntime: true });
+        await harness.start()(ctx);
+        expect(disabled).toBe(1);
+        registerInitiativeRuntime(harness, { root, hostRuntime: true });
+        await harness.start()(ctx);
+        expect(disabled).toBe(2);
+      }
+      for (const [hostRuntime, binding] of [
+        [false, parent],
+        [true, { ...parent, durableSessionId: "internal-workflow-worker" }],
+      ] as const) {
+        const harness = new Harness();
+        let disabled = 0;
+        registerInitiativeRuntime(harness, { root, hostRuntime });
+        await harness.start()(
+          Object.assign(context(binding), {
+            disableModelFallbackForSession: () => {
+              disabled += 1;
+            },
+          }),
+        );
+        expect(disabled).toBe(0);
+      }
+    });
+  });
   test("describes a live role when RPC arrives before session_start after reload", async () => {
     await fixture(async ({ root, parent }) => {
       const harness = new Harness();
@@ -304,9 +348,7 @@ describe("native delivery extension", () => {
           durableSessionId: parent.durableSessionId,
           sessionPath: parent.sessionPath,
           cwd: parent.cwd,
-          provider: "cliproxyapi",
-          modelId: "claude-opus-5-5",
-          thinking: "xhigh",
+          ...modelForRole("parent"),
           extensionProtocol: 1,
         },
       });
@@ -347,6 +389,69 @@ describe("native delivery extension", () => {
       expect(harness.executeCount).toBe(1);
       expect(resultState(await send(message))).toBe("accepted");
       expect(harness.executeCount).toBe(1);
+    });
+  });
+
+  test("same-ID recovery crosses the real worker boundary with one new native key", async () => {
+    await fixture(async ({ root, supervisor, parent, digest }) => {
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: false });
+      await harness.start()(context(supervisor));
+      const message = envelope(supervisor, parent, digest, "recovery");
+      const send = harness.rpc("omo.initiative.send");
+      const rejected: NativeReceipt = {
+        kind: "error",
+        error: { code: "turn_conflict_before_delivery", message: "fixture", next_action: "retry" },
+      };
+      harness.receipt = rejected;
+      const first = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+      expect(first.state).toBe("rejected");
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      harness.afterNative = () => {
+        entered.resolve();
+        return release.promise;
+      };
+      harness.receipt = {
+        kind: "ok",
+        thread_id: parent.durableSessionId,
+        message_seq: 2,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "work" },
+      };
+      const sending = send(message);
+      try {
+        await entered.promise;
+        expect(await send(message)).toMatchObject({
+          ok: false,
+          error: { code: "delivery_in_progress" },
+        });
+        expect(harness.executeCount).toBe(2);
+      } finally {
+        release.resolve();
+      }
+      const recovered = value(resultSchema(deliveryRecordSchema).parse(await sending));
+      expect(recovered.state).toBe("accepted");
+      expect(recovered.attempts).toMatchObject([
+        { number: 1, receipt: rejected },
+        { number: 2, state: "accepted" },
+      ]);
+      const inputs = harness.nativeInputs.map((input) =>
+        z.object({ message: z.string(), idempotency_key: z.string() }).parse(input),
+      );
+      expect(inputs[0]?.message).toBe(inputs[1]?.message);
+      expect(inputs[0]?.idempotency_key).toBe(message.id);
+      expect(inputs[1]?.idempotency_key).not.toBe(message.id);
+      expect(value(resultSchema(deliveryRecordSchema).parse(await send(message)))).toEqual(
+        recovered,
+      );
+      expect(harness.executeCount).toBe(2);
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        expect(registry.delivery(message.id)).toEqual({ ok: true, value: recovered });
+      } finally {
+        registry.close();
+      }
     });
   });
 

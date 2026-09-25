@@ -8,12 +8,14 @@ second Linear client, no bundled OAuth flow and no fixed tool schema copied into
 
 1. Run `/mcp` to see the configured servers and their state. `/mcp status` prints the same
    summary as text. A Linear server that shows as needing authentication is not usable yet.
-2. Authenticate with `/mcp auth <server>`. Authentication is the user's step. It can't be
-   done for them, and the current live OAuth is not authorized in this environment; report
-   that plainly instead of substituting a fixture and calling it live data.
-3. Once connected, the server's tools appear in the ordinary tool list under that server's
-   name. Read each tool's description and input schema before calling it. Tool names differ by
-   connector version, so this document names none; discover them each time.
+2. Reuse the existing authenticated connection. If authentication is required, the user runs
+   `/mcp auth <server>`; never copy credentials or substitute a fixture and call it live data.
+3. Connected tools may be registered but inactive when the server uses search exposure.
+   Discover them through `tool_search` by name, description or MCP source, then read the
+   returned input schema. Search does not activate tools; the permitted first by-name call
+   activates that tool through the native execution path. Do not activate the whole catalog
+   or bypass an explicit activation restriction. Tool names differ by connector version, so
+   this document names none; discover them each time.
 4. If the server publishes MCP resources, the native `mcp_list_resources` and
    `mcp_read_resource` tools are registered and can read them. Those two tools exist only when
    at least one connected server lists resources.
@@ -67,6 +69,10 @@ Prepare the snapshot accordingly:
 - `source` is `linear-export` when every ref came from an authenticated Linear read in this
   session, or `fixture` when it was hand-written for QA. Never mix the two in one file, and a
   fixture import needs the explicit `--fixture` flag.
+- A project without an initiative uses `"initiative": null`. It still needs its real project
+  ref and approved issue refs. Do not invent an initiative or create a management session to
+  satisfy the schema. A supervisor designation, unlike a standalone parent, requires a real
+  initiative ref.
 - Every `revision` is the value the connector actually returned. Don't backfill or guess.
 - No issue appears under two projects, and no ID repeats.
 - Only projects and issues the approved definition covers are included. Leaving something out
@@ -80,7 +86,7 @@ bun "$OMO_INITIATIVE_ROOT/dist/cli.js" scope import --file ./scope.json --json
 
 A successful import returns the snapshot digest. Exit 2 means the snapshot was rejected;
 fix the file from a fresh Linear read rather than editing values until it parses. Import
-creates no supervisor and no ownership; see
+creates no parent, supervisor or ownership; see
 [Definition is not execution approval](roles.md#definition-is-not-execution-approval).
 
 ## Writes
@@ -92,4 +98,6 @@ unrelated content and history, and read the result back by ID afterwards. After 
 write, look up the existing result before retrying. Deletion, archival, closing issues and
 messaging other people need authorization that names that action.
 
-QA never mutates real Linear objects or approves OAuth on the user's behalf.
+QA uses isolated fixtures by default. A live write/readback check requires explicit approval
+for its named target, action and cleanup; existing authenticated read access is not that
+approval. QA never approves OAuth on the user's behalf.

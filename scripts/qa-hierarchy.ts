@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding } from "../src/core/contracts";
+import { modelForRole } from "../src/core/policy";
 import { bindingSchema, resultSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { createHerdrClient } from "../src/herdr";
 import { QaError } from "./qa-rpc";
@@ -17,7 +18,7 @@ const createdSchema = z.object({
   execution: z.literal("brief_accepted"),
 });
 
-async function attach(binding: Binding): Promise<RpcClient> {
+export async function attach(binding: Binding): Promise<RpcClient> {
   if (!binding.sessionPath) throw new QaError("No role session path");
   const client = new RpcClient({ socketPath: binding.omoSocket });
   await client.start();
@@ -34,7 +35,7 @@ async function attach(binding: Binding): Promise<RpcClient> {
   }
 }
 
-async function idle(client: RpcClient): Promise<void> {
+export async function idle(client: RpcClient): Promise<void> {
   const settled = Promise.withResolvers<void>();
   const timer = setTimeout(() => settled.reject(new QaError("Role did not settle")), 120000);
   const stop = client.onEvent((event) => {
@@ -124,16 +125,11 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
       const client = await attach(binding);
       clients.push(client);
       const state = await client.getState();
-      const expected = {
-        supervisor: ["cliproxyapi", "gpt-6-astra", "high"],
-        parent: ["cliproxyapi", "claude-opus-5-5", "xhigh"],
-        child: ["cliproxyapi", "claude-opus-5-5", "xhigh"],
-      } as const;
-      const tuple = expected[binding.assignment.role];
+      const expected = modelForRole(binding.assignment.role);
       if (
-        state.model?.provider !== tuple[0] ||
-        state.model.id !== tuple[1] ||
-        state.thinkingLevel !== tuple[2]
+        state.model?.provider !== expected.provider ||
+        state.model.id !== expected.modelId ||
+        state.thinkingLevel !== expected.thinking
       ) {
         throw new QaError(`Wrong actual model tuple for ${binding.assignment.role}`);
       }
@@ -148,9 +144,9 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
         described.value.durableSessionId !== binding.durableSessionId ||
         described.value.sessionPath !== binding.sessionPath ||
         described.value.cwd !== binding.cwd ||
-        described.value.provider !== tuple[0] ||
-        described.value.modelId !== tuple[1] ||
-        described.value.thinking !== tuple[2]
+        described.value.provider !== expected.provider ||
+        described.value.modelId !== expected.modelId ||
+        described.value.thinking !== expected.thinking
       ) {
         throw new QaError(`Wrong runtime identity after ${binding.assignment.role} reload`);
       }
@@ -161,7 +157,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
           role: binding.assignment.role,
           workspace: binding.workspaceId,
           cwd: binding.cwd,
-          model: tuple.join("/"),
+          model: [expected.provider, expected.modelId, expected.thinking].join("/"),
         }),
       );
     }
@@ -209,6 +205,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
         try {
           const receipt = z
             .object({ state: z.literal("accepted") })
+            .passthrough()
             .parse(
               await invoke([
                 "report",
@@ -224,6 +221,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
                 textPath,
               ]),
             );
+          console.log("REPORT_ACCEPTED", id, JSON.stringify(receipt));
           await response.promise;
           await idle(receiver);
           const replay = await invoke([
@@ -399,6 +397,23 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
           console.error(
             "QA_DESCRIBE",
             JSON.stringify(await debugClient.requestExtension("omo.initiative.describe")),
+          );
+          console.error("QA_STREAMING", observed.isStreaming);
+          console.error(
+            "QA_LAST_ASSISTANT",
+            JSON.stringify(
+              (await debugClient.getMessages())
+                .filter((message) => message.role === "assistant")
+                .slice(-3)
+                .map((message) => ({
+                  stopReason: message.stopReason,
+                  errorMessage: message.errorMessage,
+                  text: message.content
+                    .filter((part) => part.type === "text")
+                    .map((part) => part.text)
+                    .join(""),
+                })),
+            ),
           );
         }
       }

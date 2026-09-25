@@ -1,0 +1,132 @@
+{
+  "digest": "legacy-digest",
+  "snapshot": {
+    "version": 1,
+    "source": "fixture",
+    "initiative": {
+      "id": "legacy-initiative",
+      "url": "linear://legacy-initiative",
+      "revision": "r1"
+    },
+    "projects": [
+      {
+        "project": { "id": "legacy-project", "url": "linear://legacy-project", "revision": "r1" },
+        "issues": []
+      }
+    ],
+    "decisionRefs": []
+  },
+  "designation": {
+    "id": "legacy-approval",
+    "snapshotDigest": "legacy-digest",
+    "designatedBy": "user",
+    "designatedAt": "2026-09-22",
+    "execute": true,
+    "create": true,
+    "contact": true
+  },
+  "bindings": [
+    {
+      "id": "legacy-manager",
+      "designationId": "legacy-approval",
+      "assignment": { "role": "supervisor", "initiativeId": "legacy-initiative" },
+      "durableSessionId": "legacy-manager-session",
+      "cwd": "/legacy/control",
+      "checkout": null,
+      "herdrSocket": "/legacy/herdr.sock",
+      "omoSocket": "/legacy/omo.sock",
+      "workspaceId": "legacy-manager-workspace",
+      "paneId": "legacy-manager-pane",
+      "sessionPath": "/legacy/manager.jsonl",
+      "launchState": "ready",
+      "contactState": "paused",
+      "initialization": { "state": "accepted", "text": "legacy manager brief" }
+    },
+    {
+      "id": "legacy-parent",
+      "designationId": "legacy-approval",
+      "assignment": {
+        "role": "parent",
+        "initiativeId": "legacy-initiative",
+        "projectId": "legacy-project",
+        "ownerBindingId": "legacy-manager"
+      },
+      "durableSessionId": "legacy-parent-session",
+      "cwd": "/legacy/worktree",
+      "checkout": {
+        "originalRepoRoot": "/legacy/repo",
+        "path": "/legacy/worktree",
+        "branch": "omo/legacy/projects/project-parent",
+        "baseBranch": "main",
+        "baseCommit": "legacy-commit"
+      },
+      "herdrSocket": "/legacy/herdr.sock",
+      "omoSocket": "/legacy/omo.sock",
+      "workspaceId": "legacy-parent-workspace",
+      "paneId": "legacy-parent-pane",
+      "sessionPath": "/legacy/parent.jsonl",
+      "launchState": "ready",
+      "contactState": "paused",
+      "initialization": { "state": "accepted", "text": "legacy parent brief" }
+    }
+  ],
+  "deliveries": [
+    {
+      "envelope": {
+        "version": 1,
+        "id": "legacy-accepted",
+        "fromBindingId": "legacy-manager",
+        "toBindingId": "legacy-parent",
+        "designationId": "legacy-approval",
+        "snapshotDigest": "legacy-digest",
+        "kind": "instruction",
+        "text": "accepted payload",
+        "outcome": null,
+        "evidence": []
+      },
+      "state": "accepted",
+      "receipt": {
+        "kind": "ok",
+        "thread_id": "legacy-parent-session",
+        "message_seq": 1,
+        "deduplicated": false,
+        "delivery": { "kind": "started", "turn_id": "legacy-turn" }
+      }
+    },
+    {
+      "envelope": {
+        "version": 1,
+        "id": "legacy-rejected",
+        "fromBindingId": "legacy-parent",
+        "toBindingId": "legacy-manager",
+        "designationId": "legacy-approval",
+        "snapshotDigest": "legacy-digest",
+        "kind": "report",
+        "text": "rejected payload",
+        "outcome": "blocked",
+        "evidence": []
+      },
+      "state": "rejected",
+      "receipt": {
+        "kind": "error",
+        "error": { "code": "turn_conflict", "message": "conflict", "next_action": "inspect" }
+      }
+    },
+    {
+      "envelope": {
+        "version": 1,
+        "id": "legacy-uncertain",
+        "fromBindingId": "legacy-parent",
+        "toBindingId": "legacy-manager",
+        "designationId": "legacy-approval",
+        "snapshotDigest": "legacy-digest",
+        "kind": "report",
+        "text": "uncertain payload",
+        "outcome": "failed",
+        "evidence": []
+      },
+      "state": "uncertain",
+      "receipt": null
+    }
+  ]
+}

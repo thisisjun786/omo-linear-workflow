@@ -30,6 +30,7 @@ async function build(entrypoint: string, outfile: string, target: "bun" | "node"
 await build("src/cli.ts", "dist/cli.js", "bun");
 await build("src/core/worker.ts", "dist/core/worker.js", "bun");
 await build("src/extension/index.ts", "dist/extension/index.js", "node");
+await build("src/extension/model-catalog.ts", "dist/extension/model-catalog.js", "node");
 await build("scripts/proxy-routing.ts", "dist/proxy/routing.js", "bun");
 await build("scripts/omo.ts", "dist/omo.js", "bun");
 process.stdout.write(

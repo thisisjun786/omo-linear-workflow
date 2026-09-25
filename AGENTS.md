@@ -37,6 +37,14 @@ and the user's existing workspaces are read-only unless explicitly assigned.
   `modelOverrides` to it. OLW routing reads it; it does not own availability.
 - The user's opencodex enable/disable choices are authoritative. Do not
   re-enable a disabled model to satisfy an upstream chain.
+- opencodex publishes new-model metadata late or wrong (every model at a 32000
+  `maxTokens` stand-in, lidge-jun/opencodex#5828). The user owns overrides in
+  `MODEL_CATALOG` (`src/proxy/model-catalog.ts`): context, output, input
+  modalities and reasoning per ocx model id. A set field always wins over ocx.
+  The `dist/extension/model-catalog.js` extension, loaded by the managed
+  launcher and role panes, re-registers corrected opencodex models at session
+  start. `bun run proxy:routing catalog` lists changes, redundant fields and
+  stale entries to prune.
 - Keep OMO picker scope at `all` unless the user explicitly requests a local
   restriction again.
 - Back up configuration before an authorized change, preserve unrelated user

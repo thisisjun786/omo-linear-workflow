@@ -1,6 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readChainReport, summarizeChains } from "../src/proxy/chain-check";
+import { exportedModels, planCatalog } from "../src/proxy/model-catalog";
 import { readReferencedModels, scopePreferenceSchema } from "../src/proxy/model-scope";
 import { atomicText, digest, optionalText, receiptSchema } from "../src/proxy/routing-config";
 import { globalOmo } from "../src/proxy/routing-launch";
@@ -10,9 +11,9 @@ import { syncRouting } from "../src/proxy/routing-sync";
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   const command = args[0] ?? "status";
-  if (!["status", "check", "sync", "scope", "chains"].includes(command))
+  if (!["status", "check", "sync", "scope", "chains", "catalog"].includes(command))
     throw new RoutingError(
-      "Usage: proxy:routing status|check|sync [--adopt] [--force] [--upstream PATH] [--catalog PATH] | chains | scope [referenced|all]",
+      "Usage: proxy:routing status|check|sync [--adopt] [--force] [--upstream PATH] [--catalog PATH] | chains | catalog | scope [referenced|all]",
     );
   const value = (name: string, fallback: string): string => {
     const index = args.indexOf(name);
@@ -30,6 +31,14 @@ async function main(): Promise<number> {
   };
   if (command === "chains") {
     const report = await readChainReport(chainPaths);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return 0;
+  }
+  if (command === "catalog") {
+    const plan = planCatalog(
+      exportedModels(JSON.parse(await readFile(chainPaths.catalogPath, "utf8"))),
+    );
+    const { models: _models, ...report } = plan;
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return 0;
   }

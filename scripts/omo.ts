@@ -1,4 +1,4 @@
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { modelScopeArguments } from "../src/proxy/model-scope";
 import { ensureRouting, globalOmo } from "../src/proxy/routing-launch";
 
@@ -10,9 +10,11 @@ const inspection =
   flags.some((arg) => ["--version", "-v", "--help", "-h"].includes(arg)) ||
   ["install", "remove", "list", "config", "auth", "setup", "update"].includes(args[0] ?? "");
 try {
-  if (!inspection) await ensureRouting(resolve(dirname(process.argv[1] ?? ""), ".."), upstream);
+  const root = resolve(dirname(process.argv[1] ?? ""), "..");
+  if (!inspection) await ensureRouting(root, upstream);
   const scopeArgs = inspection ? [] : await modelScopeArguments(process.env["HOME"] ?? "", flags);
-  const child = Bun.spawn([upstream, ...scopeArgs, ...args], {
+  const limitArgs = inspection ? [] : ["-e", join(root, "dist/extension/model-catalog.js")];
+  const child = Bun.spawn([upstream, ...limitArgs, ...scopeArgs, ...args], {
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",

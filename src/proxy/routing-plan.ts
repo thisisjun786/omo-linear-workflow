@@ -49,18 +49,31 @@ const CONTEXT_MARKER = /\[1m\]$/i;
 // opencodex's priority-tier row; Senpi spells the same selector with a single hyphen.
 const FAST_SELECTOR = "-fast";
 const OPENCODEX_FAST_ROW = "--fast";
+// User decision (2026-09-25): Cursor serves the same xAI model as the next lane after xAI.
+// Other same-model hosts are deliberately not mirrored (for example K3 on Ollama Cloud
+// exhausts that quota), so this is an explicit per-namespace list.
+const SECONDARY_HOSTS: Readonly<Record<string, readonly string[]>> = { xai: ["cursor"] };
 export class RoutingError extends Error {}
 
+/** The same model on the configured secondary hosts of a resolved namespaced ID. */
+function secondaryIds(modelId: string, byName: ReadonlyMap<string, string>): string[] {
+  const slash = modelId.indexOf("/");
+  if (slash < 0) return [];
+  const name = modelId.slice(slash + 1).replace(CONTEXT_MARKER, "");
+  return (SECONDARY_HOSTS[modelId.slice(0, slash)] ?? [])
+    .map((host) => byName.get(`${host}/${name}`))
+    .filter((id): id is string => id !== undefined);
+}
+
 /** Resolve a rung to its own provider's opencodex service, else the exact ID on another host. */
-function opencodexResolver(
-  available: ReadonlySet<string>,
-): (rung: RouteRung) => string | undefined {
+function opencodexResolver(available: ReadonlySet<string>): (rung: RouteRung) => string[] {
   const byName = new Map<string, string>();
   for (const id of available) {
     const name = id.replace(CONTEXT_MARKER, "");
     if (!byName.has(name)) byName.set(name, id);
   }
   const hosted = [...byName.keys()].filter((name) => name.includes("/")).sort();
+  const withSecondaries = (id: string) => [id, ...secondaryIds(id, byName)];
   return (rung) => {
     const names = [rung.model, ROLLING_MODEL_IDS[rung.model]].filter(
       (name): name is string => name !== undefined,
@@ -77,16 +90,16 @@ function opencodexResolver(
             : [model];
         for (const candidate of candidates) {
           const id = byName.get(candidate);
-          if (id) return id;
+          if (id) return withSecondaries(id);
         }
       }
     }
     for (const name of names) {
       const host = hosted.find((entry) => entry.slice(entry.indexOf("/") + 1) === name);
       const id = byName.get(name) ?? (host === undefined ? undefined : byName.get(host));
-      if (id) return id;
+      if (id) return [id];
     }
-    return undefined;
+    return [];
   };
 }
 
@@ -121,18 +134,20 @@ export function planRouting(
     const models: { model: string; reasoning?: string }[] = [];
     const seen = new Set<string>();
     for (const rung of chain) {
-      const modelId = resolve(rung);
-      if (modelId === undefined) {
+      const modelIds = resolve(rung);
+      if (modelIds.length === 0) {
         skipped.push(`${path}: ${rung.model}`);
         continue;
       }
-      const entry = {
-        model: `${ROUTING_PROVIDER}/${modelId}`,
-        ...(rung.variant ? { reasoning: rung.variant } : {}),
-      };
-      const key = JSON.stringify(entry);
-      if (!seen.has(key)) models.push(entry);
-      seen.add(key);
+      for (const modelId of modelIds) {
+        const entry = {
+          model: `${ROUTING_PROVIDER}/${modelId}`,
+          ...(rung.variant ? { reasoning: rung.variant } : {}),
+        };
+        const key = JSON.stringify(entry);
+        if (!seen.has(key)) models.push(entry);
+        seen.add(key);
+      }
     }
     if (models.length === 0)
       throw new RoutingError(`${path}: no ${ROUTING_PROVIDER} model in the upstream chain`);

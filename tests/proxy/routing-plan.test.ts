@@ -138,6 +138,25 @@ describe("upstream opencodex routing", () => {
     ]);
   });
 
+  test("follows an xAI rung with the same model on Cursor, and only there", () => {
+    // Given a Grok rung and a K3 rung while opencodex also hosts both elsewhere.
+    const result = quick(
+      [
+        { providers: ["xai", "github-copilot"], model: "grok-4.7", variant: "xhigh" },
+        { providers: ["kimi-coding"], model: "kimi-k3", variant: "max" },
+      ],
+      ["xai/grok-4.7", "cursor/grok-4.7", "kimi/k3[1m]", "ollama-cloud/kimi-k3"],
+    );
+    // Then Cursor is the next Grok lane, while K3 never spills onto Ollama Cloud's quota.
+    expect(result.groups.categories["quick"]).toEqual({
+      models: [
+        { model: "opencodex/xai/grok-4.7", reasoning: "xhigh" },
+        { model: "opencodex/cursor/grok-4.7", reasoning: "xhigh" },
+        { model: "opencodex/kimi/k3[1m]", reasoning: "max" },
+      ],
+    });
+  });
+
   test("maps available exact identities in upstream order with reasoning", () => {
     // Given an upstream preference that opencodex does not serve.
     // When the policy is mapped, only explicit upstream alternatives are eligible.

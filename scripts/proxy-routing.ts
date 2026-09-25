@@ -1,7 +1,8 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readChainReport, summarizeChains } from "../src/proxy/chain-check";
 import { readReferencedModels, scopePreferenceSchema } from "../src/proxy/model-scope";
-import { atomicText, optionalText, receiptSchema } from "../src/proxy/routing-config";
+import { atomicText, digest, optionalText, receiptSchema } from "../src/proxy/routing-config";
 import { globalOmo } from "../src/proxy/routing-launch";
 import { RoutingError } from "../src/proxy/routing-plan";
 import { syncRouting } from "../src/proxy/routing-sync";
@@ -9,9 +10,9 @@ import { syncRouting } from "../src/proxy/routing-sync";
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   const command = args[0] ?? "status";
-  if (!["status", "check", "sync", "scope"].includes(command))
+  if (!["status", "check", "sync", "scope", "chains"].includes(command))
     throw new RoutingError(
-      "Usage: proxy:routing status|check|sync [--adopt] [--force] [--upstream PATH] [--catalog PATH] | scope [referenced|all]",
+      "Usage: proxy:routing status|check|sync [--adopt] [--force] [--upstream PATH] [--catalog PATH] | chains | scope [referenced|all]",
     );
   const value = (name: string, fallback: string): string => {
     const index = args.indexOf(name);
@@ -22,6 +23,16 @@ async function main(): Promise<number> {
   };
   const home = process.env["HOME"] ?? "";
   const stateDir = value("--state-dir", join(home, ".omo/proxy-routing"));
+  const chainPaths = {
+    configPath: value("--config", join(home, ".omo/omo.jsonc")),
+    catalogPath: value("--catalog", join(home, ".omo/agent/models.json")),
+    stateDir,
+  };
+  if (command === "chains") {
+    const report = await readChainReport(chainPaths);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return 0;
+  }
   if (command === "scope") {
     const path = join(stateDir, "model-scope.json");
     const previous = await optionalText(path);
@@ -72,14 +83,31 @@ async function main(): Promise<number> {
   }
   const result = await syncRouting({
     upstream: args.includes("--upstream") ? value("--upstream", "") : globalOmo(),
-    configPath: value("--config", join(home, ".omo/omo.jsonc")),
+    configPath: chainPaths.configPath,
     stateDir,
-    catalogPath: value("--catalog", join(home, ".omo/agent/models.json")),
+    catalogPath: chainPaths.catalogPath,
     adopt: args.includes("--adopt"),
     check: command === "check",
     force: args.includes("--force"),
   });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  let report: Awaited<ReturnType<typeof readChainReport>>;
+  try {
+    report = await readChainReport(chainPaths);
+  } catch (error) {
+    // Like an unchanged routing start, an unreadable input must not block OMO by itself.
+    process.stderr.write(
+      `Proxy routing: fallback chain check skipped: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 0;
+  }
+  const summary = summarizeChains(report);
+  // Known warnings are shown once per change, not on every start.
+  const seenPath = join(stateDir, "chain-warnings.digest");
+  const seen = digest(summary ?? "");
+  const previous = await optionalText(seenPath);
+  if (summary && previous !== seen) process.stderr.write(`Proxy routing: ${summary}\n`);
+  if (command === "sync" && previous !== seen) await atomicText(seenPath, seen);
   return 0;
 }
 

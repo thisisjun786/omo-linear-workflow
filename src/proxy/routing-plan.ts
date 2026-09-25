@@ -9,6 +9,7 @@ export interface RoutingPlan {
   readonly managed: RoutingGroups;
   readonly overrides: readonly string[];
   readonly skipped: readonly string[];
+  readonly unroutable: readonly string[];
   readonly changes: readonly string[];
 }
 
@@ -128,6 +129,7 @@ export function planRouting(
   };
   const overrides: string[] = [],
     skipped: string[] = [],
+    unroutable: string[] = [],
     changes: string[] = [];
   const resolve = opencodexResolver(available);
   const mapChain = (chain: readonly RouteRung[], path: string): RoutingFields => {
@@ -149,9 +151,9 @@ export function planRouting(
         seen.add(key);
       }
     }
-    if (models.length === 0)
-      throw new RoutingError(`${path}: no ${ROUTING_PROVIDER} model in the upstream chain`);
-    return { models };
+    // No served candidate: the route keeps no model rather than blocking every start.
+    if (models.length === 0) unroutable.push(path);
+    return models.length ? { models } : {};
   };
   for (const scope of ["categories", "agents"] as const) {
     const names = new Set([...Object.keys(policy[scope]), ...Object.keys(previous?.[scope] ?? {})]);
@@ -196,5 +198,5 @@ export function planRouting(
       if (JSON.stringify(actual) !== JSON.stringify(groups[scope][name])) changes.push(path);
     }
   }
-  return { groups, managed, overrides, skipped, changes };
+  return { groups, managed, overrides, skipped, unroutable, changes };
 }

@@ -112,6 +112,7 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
     available,
     overrides: [...plan.overrides],
     skipped: [...new Set(plan.skipped)],
+    unroutable: [...plan.unroutable],
     changes: [...plan.changes],
     backup,
   };

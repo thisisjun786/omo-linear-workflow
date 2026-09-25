@@ -210,7 +210,12 @@ describe("upstream opencodex routing", () => {
     expect(result.groups.agents["explore"]).toBeUndefined();
   });
 
-  test("rejects a policy with no available upstream alternative instead of guessing", () => {
-    expect(() => planRouting(policy, new Set(["opus"]), empty)).toThrow("categories.quick");
+  test("keeps other routes updating when one route loses every candidate", () => {
+    // Given a catalog that serves none of quick's upstream choices.
+    const result = planRouting(policy, new Set(["opus"]), empty);
+    // Then quick is emptied and reported instead of failing the whole plan.
+    expect(result.unroutable).toEqual(["categories.quick", "agents.explore"]);
+    expect(result.groups.categories["quick"]).toEqual({});
+    expect(result.managed.categories["quick"]).toEqual({});
   });
 });

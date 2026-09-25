@@ -21,6 +21,8 @@ export const receiptSchema = z.object({
   available: z.array(z.string()),
   overrides: z.array(z.string()),
   skipped: z.array(z.string()),
+  // Managed routes with no served candidate; absent in receipts written before this field.
+  unroutable: z.array(z.string()).default([]),
   changes: z.array(z.string()),
   backup: z.string().nullable(),
 });

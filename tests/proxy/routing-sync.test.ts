@@ -196,6 +196,7 @@ describe("routing synchronization real filesystem boundary", () => {
 
   test("two actual CLI starts serialize publication under the same lock", async () => {
     const world = await fixture();
+    await world.setCatalog(["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "anthropic/claude-opus-5-5"]);
     const args = [
       process.execPath,
       resolve(import.meta.dir, "../../scripts/proxy-routing.ts"),
@@ -227,12 +228,15 @@ describe("routing synchronization real filesystem boundary", () => {
           new Response(child.stdout).text(),
           new Response(child.stderr).text(),
         ]);
-        expect(stderr).toBe("");
         expect(code).toBe(0);
-        return receiptSchema.parse(JSON.parse(stdout));
+        return { stderr, receipt: receiptSchema.parse(JSON.parse(stdout)) };
       }),
     );
-    expect(new Set(results.map((result) => result.generation)).size).toBe(1);
+    expect(new Set(results.map((result) => result.receipt.generation)).size).toBe(1);
+    // The fixture's one-model routes warn once; the serialized second start stays quiet.
+    expect(results.map((result) => result.stderr).join("")).toMatch(
+      /^Proxy routing: Model chain warnings: categories\.visual-engineering \(no fallback: only gpt-6-luna is available\);[^\n]*\n$/,
+    );
   }, 15000);
 
   test("recovers receipt publication after a process died after replacing configuration", async () => {

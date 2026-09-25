@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { access, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Result, ScopeFilter } from "./core/contracts";
@@ -7,6 +8,7 @@ import { canRetryDelivery } from "./core/policy";
 import { deliveryRecordSchema } from "./core/schema";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator } from "./orchestrator";
+import { readChainReport } from "./proxy/chain-check";
 
 type Options = Readonly<Record<string, string | true | readonly string[]>>;
 const valueFlags = new Set([
@@ -159,7 +161,10 @@ function scopeFilter(options: Options, required: boolean): Result<ScopeFilter> {
   return required ? invalid("--initiative or --project is required") : { ok: true, value: {} };
 }
 
-async function doctor(root: string, herdrSocket?: string): Promise<Result<unknown>> {
+async function doctor(
+  root: string,
+  herdrSocket?: string,
+): Promise<Result<{ sideEffects: false; paths: unknown; checks: unknown }>> {
   const paths = new Orchestrator(root, herdrSocket).paths();
   const herdr = await resolveHerdrArtifact(root);
   const checks = {
@@ -192,6 +197,31 @@ async function doctor(root: string, herdrSocket?: string): Promise<Result<unknow
     };
   }
   return { ok: true, value: { sideEffects: false, paths, checks } };
+}
+
+async function doctorWithChains(root: string, herdrSocket?: string): Promise<Result<unknown>> {
+  const result = await doctor(root, herdrSocket);
+  if (!result.ok) return result;
+  const home = process.env["HOME"] ?? homedir();
+  const value = { ...result.value, chains: {} as unknown };
+  try {
+    const chains = await readChainReport({
+      configPath: join(home, ".omo/omo.jsonc"),
+      catalogPath: join(home, ".omo/agent/models.json"),
+      stateDir: join(home, ".omo/proxy-routing"),
+    });
+    value.chains = chains;
+    return { ok: true, value };
+  } catch (cause) {
+    return {
+      ok: false,
+      error: {
+        code: "runtime_unavailable",
+        message: `OMO model chains are unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+        details: value,
+      },
+    };
+  }
 }
 
 export async function runCli(argv: readonly string[]): Promise<number> {
@@ -259,7 +289,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   const command = words.join(" ");
   try {
     if (command === "doctor") {
-      result = await doctor(root, stringOption(options, "herdr-socket"));
+      result = await doctorWithChains(root, stringOption(options, "herdr-socket"));
     } else if (command === "scope import") {
       const values = requireOptions(options, ["file"]);
       result = values.ok

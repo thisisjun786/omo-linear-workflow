@@ -51,6 +51,10 @@ each choice to an opencodex model ID:
   another opencodex host is used, with hosts tried in alphabetical order (for
   example `ollama-cloud/deepseek-v4.1-flash`). Another version, a Flash or lite
   sibling, or another model family is never substituted.
+- An xAI choice is followed by the same model on Cursor (`xai/grok-4.7`, then
+  `cursor/grok-4.7`) when opencodex publishes it. This is a user decision; no
+  other same-model host is added as a second lane. For example, Kimi K3 stays on
+  `kimi/`, because routing it through Ollama Cloud exhausts that quota.
 
 Unserved choices are recorded under `skipped`. Repeated provider lanes for the
 same model and reasoning level collapse. Reasoning levels are copied unchanged.
@@ -88,7 +92,35 @@ Run these from the OLW repository:
 bun run proxy:routing status          # Last applied policy, overrides and omissions
 bun run proxy:routing check --force   # Read-only diff against the current opencodex catalog
 bun run proxy:routing sync --force    # Re-plan now instead of at the next start
+bun run proxy:routing chains          # Fallback chain report against the opencodex catalog
 ```
+
+## Model chain warnings
+
+Nothing in the chain check blocks a start. OLW repairs category and named-agent
+routes itself: when opencodex stops publishing a model, the next start re-plans
+those routes from the upstream policy and drops that candidate. OMO itself skips
+an unknown retry-chain candidate and clamps an unsupported reasoning level at
+runtime. Chain length and provider mix follow the upstream policy as-is.
+
+After every `check`/`sync` (so every managed `omo` start) and in `olw doctor`,
+OLW warns only about:
+
+- a category or agent with **no working model**: none of its models is in the
+  opencodex catalog. A managed route in that state is published without models
+  (listed as `unroutable` in `status`), so OMO falls back to its default for it
+  and the other routes still update;
+- a category or agent with **no fallback**: only one distinct model is left;
+- an OLW role model that opencodex no longer publishes.
+
+The main model is not checked: each session chooses its own.
+
+The launcher prints one stderr line only when that warning set changes (its
+digest is kept in `chain-warnings.digest`). `bun run proxy:routing chains`
+prints the JSON report; `olw doctor` includes it under `chains` and stays `ok`.
+Agents without their own models inherit a category and are reported through it.
+An unreadable config or catalog file skips the check during a launch;
+`olw doctor` reports it as a failure.
 
 ## Optional local model-picker scope (disabled)
 
@@ -182,8 +214,8 @@ disabled opencodex catalog during an update leaves the last valid configuration
 intact and fails the preflight with an actionable error. It does not enable native
 providers or substitute an arbitrary model. Fix the reported problem and run
 `sync --force`.
-If even one managed route has no surviving model candidate, the entire update
-is rejected rather than publishing a partial configuration.
+A managed route with no surviving model candidate no longer rejects the update:
+it is published without models, listed under `unroutable`, and warned about.
 If a pending journal reports a conflicting edit, inspect it and the backup before
 choosing which configuration to retain.
 

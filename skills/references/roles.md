@@ -10,13 +10,19 @@ here is itself an enforcement, and Linear permissions aren't enforced by these s
 
 | Role | Bound to | Model / reasoning | Workspace | Instructs | Reports to |
 |---|---|---|---|---|---|
+| Manager (the session the user directs, `olw manage`) | nothing fixed; linked parents | the user's default model from `~/.omo/agent/settings.json` (fallback `opencodex/anthropic/claude-opus-5-5` / `medium`) | Herdr workspace at the control root, no implementation branch | its linked parents only | the user, directly in its own TUI |
 | Supervisor (optional management session) | one initiative ID | `opencodex/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
-| Parent | one project ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | linked supervisor or local user inbox |
-| Child | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
+| Parent | one project ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | linked manager/supervisor or local user inbox |
+| Child, `direct` stage | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
+| Child, `plan` stage (`--mode planned`) | one issue ID | `opencodex/anthropic/claude-fable-5-1` / `xhigh` | the same issue worktree, its own Herdr tab | nobody; ulw-plan only | its parent (plan approval as a question, then `stage complete`) |
+| Child, `execute` stage (`--mode planned`) | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `medium` | the same issue worktree, a second Herdr tab | internal mass-ulw workers through ulw-execute | its parent (the packet sent to this binding) |
+| Child, `research` stage | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
 
 A project parent is the execution unit; it needs neither an initiative nor a supervisor.
 No hidden supervisor is created. Parents and children remain linked Git worktrees, not
-clones; management links do not change their branches or ancestry.
+clones; management links do not change their branches or ancestry. A planned child's
+stages share one worktree and one branch; each stage is its own binding and durable
+session, and only one stage is live at a time.
 
 A task holds exactly one live scope in exactly one role. A parent doesn't also supervise, and a
 supervisor holds no checkout and merges nothing. Peer parents sharing an approved designation
@@ -27,13 +33,19 @@ Identity is the stable ID: the Linear initiative, project or issue ID plus the d
 session ID recorded in the registry. A title, folder, branch, pane, chat link or display name
 makes no role and moves no ownership. Don't route by the focused pane or a working directory.
 
-A child starts in mass-ulw mode but waits for an explicit issue packet. Its native workflow
+A child starts in the stage its mode selects (`child create --mode direct|planned|research`,
+default `direct`) but waits for an explicit issue packet. Its native workflow
 nodes are implementation workers, not another hierarchy level or registry owner. They use
 category routing rather than the child role's fixed model assignment. The child owns their
 scope, phase runs, verification and final report; the parent still owns acceptance and
 integration. The [child execution contract](../run/SKILL.md#child) defines the goal, keys,
 worker limits, evidence and recovery. These are execution instructions, not a filesystem
 sandbox or new permission enforcement in the native DAG engine.
+
+The manager is a scope-free management role. `olw manage` creates it once and reattaches
+afterwards; it holds a fixed designation, not an initiative or project. A parent created
+while the manager is ready links to it unless `--no-manager` is passed. The link grants
+contact, never approval, exactly like `parent link`.
 
 ## Definition is not execution approval
 
@@ -81,6 +93,20 @@ and establishes neither native acceptance nor that the user read it.
 A supervisor never addresses a child, even about one issue: it returns a project's finding to
 that project's parent. A child reports to its parent, and the parent decides whether that
 report satisfies the criteria. Report content is the child's claim, not the parent's verdict.
+
+Questions go up and answers come back down the same path, by question ID:
+
+| Kind | Route | Meaning |
+|---|---|---|
+| `question` | child -> parent; parent -> manager/supervisor, or the user inbox when none is ready or with `--to-user` | one blocking question (up to 4 sub-questions with options); the sender ends its turn and waits |
+| `answer` | parent -> child; manager/supervisor -> parent; the user -> a posted inbox question (`answer --as-user`) | the answer to exactly one question ID, id `answer:<question-id>`, deduplicated like a report |
+
+A child asks through the `olw_ask` tool, which the OLW extension registers in bound child
+and parent sessions; native `ask_user_question` is blocked there. The parent decides first
+and escalates only what needs the manager's or the user's authority. By policy the manager
+is the role that asks the user directly; the runtime blocks native asks in bound children
+and parents only. A plan stage's approval request and its `stage complete`
+hand-off are a question and a completed report on this same path.
 
 Five states stay distinct and are never collapsed into one word:
 
@@ -134,22 +160,35 @@ Commands and flags below follow the frozen implementation contract; confirm agai
 
 | Purpose | Command |
 |---|---|
+| Check the installation | `doctor` |
+| Open or reattach the manager session (user operation) | `manage` |
 | Import a validated scope snapshot | `scope import --file <scope.json>` |
 | Designate a supervisor (explicit) | `supervisor create --initiative ID --scope-digest SHA256 --designation ID --execute` |
-| Create a standalone project parent | `parent create --scope-digest SHA256 --designation ID --execute --project ID --repo ABS_ROOT --base REF` |
+| Create a standalone project parent | `parent create --scope-digest SHA256 --designation ID --execute --project ID --repo ABS_ROOT --base REF [--no-manager]` |
 | Create under an existing supervisor | `parent create --supervisor BINDING --project ID --repo ABS_ROOT --base REF` |
 | Explicit management link (user operation) | `parent link --parent BINDING --supervisor BINDING`, `parent unlink --parent BINDING` |
-| Create an issue child | `child create --parent BINDING --issue ID` |
+| Create an issue child | `child create --parent BINDING --issue ID [--mode direct\|planned\|research]` |
+| Hand off an approved plan (plan stage) | `stage complete --from PLAN_BINDING --plan ABS_PATH --head SHA --id MESSAGE_ID --text-file handoff.txt` |
+| Start the execute stage (parent) | `stage start --from PLAN_BINDING --parent PARENT_BINDING --stage execute --id MESSAGE_ID` |
 | Instruct the level below | `send --from BINDING --to BINDING --id MESSAGE_ID --kind instruction --text-file brief.txt` |
 | Report to the level above | `report --from BINDING --id MESSAGE_ID --outcome completed\|blocked\|failed --evidence ABS_PATH --text-file result.txt` |
 | Post explicitly to the user (parent only) | `report --from BINDING --id MESSAGE_ID --outcome blocked\|failed\|completed --text-file result.txt --to-user` |
-| Read without waking | `status --project ID`, `reports --project ID`, `notices --project ID` |
+| Ask the level above | `ask --from BINDING --id ID --text-file question.txt [--questions-file JSON] [--to-user]` |
+| Answer one question | `answer --from BINDING --question QUESTION_ID --text-file answer.txt [--answers-file JSON]`, or `answer --as-user ...` for a posted inbox question |
+| Read without waking | `status --project ID`, `reports --project ID`, `questions --project ID`, `notices --project ID` |
 | Pause / resume contact | `pause --binding BINDING`, `resume --binding BINDING` |
+| Close a role | `close --binding BINDING [--confirm-absent]` |
 | One explicit observation | `reconcile --project ID` (or `--initiative ID`) |
+| Check for OMO/Senpi updates (never installs) | `update check [--json] [--tag pkg=tag]` |
+| Prepare an update PR in a separate worktree (never merges) | `update prepare [--remote NAME\|URL] [--json]` |
 
 `--fixture` is mandatory when standalone approval uses a fixture snapshot. Do not combine
 standalone approval flags with `--supervisor`. Project/initiative filters follow each role's
 own approved scope, not a later manager link; use `--project` for a project-only parent.
+`status` shows a child's `mode`, current `stage`, `stageBindings` and `openQuestions`. Both
+are generation-scoped: each re-creation of an issue starts a new lineage generation, an old
+row keeps reporting its own generation, and `close` on a stage binding closes every stage of
+that generation and its workspace once, leaving a newer generation live.
 
 A paused manager blocks new native reports to itself, not child work or explicit user posts.
 A paused parent blocks new contact and user posts. Closing a manager preserves its links for

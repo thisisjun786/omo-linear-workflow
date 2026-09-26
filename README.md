@@ -115,17 +115,52 @@ For `--scope-digest`, use `value.digest` from the import response. It isn't a ha
 ```sh
 bun run cli -- --root "$PWD" scope import --file approved-scope.json
 bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID --repo /abs/repo --base main
-bun run cli -- --root "$PWD" child create --parent BINDING --issue ID
+bun run cli -- --root "$PWD" child create --parent BINDING --issue ID --mode planned
 bun run cli -- --root "$PWD" send --from BINDING --to BINDING --id MSG --kind instruction --text-file brief.txt
+bun run cli -- --root "$PWD" ask --from BINDING --id MSG --text-file question.txt
+bun run cli -- --root "$PWD" answer --from BINDING --question QUESTION_ID --text-file answer.txt
+bun run cli -- --root "$PWD" answer --as-user --question QUESTION_ID --text-file answer.txt
+bun run cli -- --root "$PWD" stage complete --from PLAN_BINDING --plan /abs/worktree/.omo/plans/ISSUE.md --head SHA --id MSG --text-file handoff.txt
+bun run cli -- --root "$PWD" stage start --from PLAN_BINDING --parent PARENT --stage execute --id MSG
 bun run cli -- --root "$PWD" report --from BINDING --id MSG --outcome completed --evidence /abs/path --text-file result.txt
 bun run cli -- --root "$PWD" reports --project ID --json
+bun run cli -- --root "$PWD" questions --project ID --json
 bun run cli -- --root "$PWD" notices --project ID --json
 bun run cli -- --root "$PWD" status --project ID --json
 bun run cli -- --root "$PWD" pause --binding BINDING
 bun run cli -- --root "$PWD" resume --binding BINDING
 bun run cli -- --root "$PWD" reconcile --project ID
 bun run cli -- --root "$PWD" close --binding BINDING
+bun run cli -- --root "$PWD" doctor
 ```
+
+`--mode` picks how a child works, one of `direct`, `planned` or `research`: `direct` (default, one session, mass-ulw), `planned`
+(a plan stage on Fable 5.1 with ulw-plan, then an execute stage on Opus 5.5 medium with
+ulw-execute; both stages share one worktree, each in its own Herdr tab) or `research`
+(ulw-research). A child asks its parent with the `olw_ask` tool; the parent answers with
+`answer`, and escalates with `ask` to the manager or, without one, to the user inbox that
+`questions` lists and `answer --as-user` answers. After approving a plan the plan stage runs
+`stage complete` and the parent runs `stage start`, which stops the plan session and opens
+the execute stage under a new binding ID. Then send the issue packet to that binding; its
+envelope ID is the packet ID the execute stage reports under.
+
+The management session is the session you direct. `manage` opens it inside the OLW host
+with your default model, or reattaches to the existing one; parents created while it's
+ready link to it unless `parent create --no-manager` is passed. `manage` also runs an
+update check and puts the result in the manager's brief:
+
+```sh
+bun run cli -- --root "$PWD" manage --json
+bun run cli -- --root "$PWD" update check --json          # pinned versions vs npm dist-tags; never installs
+bun run cli -- --root "$PWD" update prepare --json        # update branch + PR to dev in a separate worktree; never merges
+```
+
+`update check` compares the pinned `omo-ai` (`beta`) and `@code-yeongyu/senpi` (`latest`)
+versions with npm; `--tag pkg=tag` overrides a dist-tag. `update prepare` creates
+`olw/update-omo-<v>-senpi-<v>` from the remote's `dev` in a separate worktree (`--remote NAME|URL`
+picks the remote to fetch `dev` from and push to; default `origin`), runs install,
+typecheck, test and build there and opens a PR to `dev` (a draft if anything failed). It
+never touches the live host.
 
 A project parent is the execution unit. It can start without any supervisor or initiative;
 use `"initiative": null` in a project-only snapshot. Standalone creation requires an explicit
@@ -144,8 +179,8 @@ Do not mix `--supervisor` with standalone approval flags. Linking an initialized
 cross designations if the manager's approved snapshot includes the project and both approvals
 permit execution/contact. It changes only the optional management link, never the parent's
 approval, issue set, worktree, pause state or identity. No hidden role or automatic replay is
-created. `status`, `reports`, `notices`, and `reconcile` accept `--project` or `--initiative`; filters use
-approved scope provenance, not later manager membership. `reports` and `notices` also allow no filter.
+created. `status`, `reports`, `questions`, `notices`, and `reconcile` accept `--project` or `--initiative`; filters use
+approved scope provenance, not later manager membership. `reports`, `questions` and `notices` also allow no filter.
 
 `--root` is this tool's control root, and `$PWD` in the examples above is this repository. The actual target repository is given separately through `--repo` on `parent create`.
 
@@ -155,16 +190,21 @@ The default Herdr socket comes from the current pane's `HERDR_SOCKET_PATH`. Pass
 
 | Role | Model / reasoning | Workspace |
 | --- | --- | --- |
+| Manager (`olw manage`) | your default model from `~/.omo/agent/settings.json` (fallback `opencodex/anthropic/claude-opus-5-5` / `medium`) | control root Herdr workspace |
 | Supervisor (optional) | `opencodex/gpt-6-astra` / `high` | control root Herdr workspace |
 | Parent | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | project integration branch worktree |
-| Child | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
+| Child, `direct` or `research` | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
+| Child, `plan` stage | `opencodex/anthropic/claude-fable-5-1` / `xhigh` | the same issue worktree, its own tab |
+| Child, `execute` stage | `opencodex/anthropic/claude-opus-5-5` / `medium` | the same issue worktree, a second tab |
 
-These assignments apply to new bindings. Existing bindings keep the model,
-provider and thinking level recorded at their initial session as the verification
-baseline, and reconcile doesn't automatically switch running sessions to the new
-policy.
+These assignments apply to new bindings. Existing supervisor, parent and child bindings
+keep the model, provider and thinking level recorded at their initial session as the
+verification baseline, and reconcile doesn't automatically switch running sessions to the
+new policy. The manager is the exception: it starts on your OMO default model, its identity
+check doesn't pin provider, model or thinking, and activation doesn't configure its model,
+so you can change models in it freely.
 
-New issue children start in **mass-ulw mode**, but wait for the parent's explicit
+New issue children in `direct` mode start in **mass-ulw mode**, but wait for the parent's explicit
 issue packet before creating a goal or workflow. The child uses native DAG workers
 inside that issue, verifies their artifacts and reports once to its parent. Those
 workers are category-routed tasks, not extra OLW/Linear roles; the parent still
@@ -179,7 +219,7 @@ Herdr creates the workspace and the parent and child worktrees. The parent branc
 
 Each new parent is an explicit top-level Herdr group head; its children join by the actual parent workspace ID. Two projects in one Git repository stay separate. Manager links and pause/resume do not move groups. Existing legacy parents keep their existing layout, and unrelated workspaces/focus are not changed. An older server must support the managed grouped-worktree RPC before creating new parent groups; no fallback silently changes the layout.
 
-The controller subscribes to file events first, then launches OMO. When the TUI's `session_start` atomically writes a readiness record under `.omo/state/ready/`, the controller connects to that exact session through the public OMO RPC, sets and verifies the model and reasoning, and then sends the first instruction. It doesn't rely on Herdr's OMO detection or on unsupported session-path reports.
+The controller subscribes to file events first, then launches OMO. When the TUI's `session_start` atomically writes a readiness record under `.omo/state/ready/`, the controller connects to that exact session through the public OMO RPC, sets and verifies the model and reasoning (skipped for the manager), and then sends the first instruction. It doesn't rely on Herdr's OMO detection or on unsupported session-path reports.
 
 The initial instruction leaves a persistent claim before it's sent. The role stays `initializing` until actual acceptance is confirmed, and becomes `ready` only after that. If the ACK is lost, acceptance is confirmed from the exact user message or delivery receipt already stored. Without evidence, nothing is resent.
 

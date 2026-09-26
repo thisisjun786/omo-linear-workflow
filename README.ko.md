@@ -106,17 +106,51 @@ bun run cli -- scope import --file tests/fixtures/scope.json --fixture --json
 ```sh
 bun run cli -- --root "$PWD" scope import --file approved-scope.json
 bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID --repo /abs/repo --base main
-bun run cli -- --root "$PWD" child create --parent BINDING --issue ID
+bun run cli -- --root "$PWD" child create --parent BINDING --issue ID --mode planned
 bun run cli -- --root "$PWD" send --from BINDING --to BINDING --id MSG --kind instruction --text-file brief.txt
+bun run cli -- --root "$PWD" ask --from BINDING --id MSG --text-file question.txt
+bun run cli -- --root "$PWD" answer --from BINDING --question QUESTION_ID --text-file answer.txt
+bun run cli -- --root "$PWD" answer --as-user --question QUESTION_ID --text-file answer.txt
+bun run cli -- --root "$PWD" stage complete --from PLAN_BINDING --plan /abs/worktree/.omo/plans/ISSUE.md --head SHA --id MSG --text-file handoff.txt
+bun run cli -- --root "$PWD" stage start --from PLAN_BINDING --parent PARENT --stage execute --id MSG
 bun run cli -- --root "$PWD" report --from BINDING --id MSG --outcome completed --evidence /abs/path --text-file result.txt
 bun run cli -- --root "$PWD" reports --project ID --json
+bun run cli -- --root "$PWD" questions --project ID --json
 bun run cli -- --root "$PWD" notices --project ID --json
 bun run cli -- --root "$PWD" status --project ID --json
 bun run cli -- --root "$PWD" pause --binding BINDING
 bun run cli -- --root "$PWD" resume --binding BINDING
 bun run cli -- --root "$PWD" reconcile --project ID
 bun run cli -- --root "$PWD" close --binding BINDING
+bun run cli -- --root "$PWD" doctor
 ```
+
+`--mode`는 자식의 작업 방식을 정하며 `direct`, `planned`, `research` 중 하나입니다. `direct`(기본값, 세션 하나, mass-ulw), `planned`
+(Fable 5.1의 plan 단계가 ulw-plan으로 계획을 쓰고, Opus 5.5 medium의 execute 단계가
+ulw-execute로 구현. 두 단계는 worktree 하나를 공유하며 각각 자기 Herdr 탭을 가집니다),
+`research`(ulw-research) 중 하나입니다. 자식은 `olw_ask` 도구로 부모에게 질문하고, 부모는
+`answer`로 답합니다. 부모가 결정할 수 없는 질문은 `ask`로 관리자에게 올리고, 관리자가 없으면
+사용자 inbox에 기록됩니다. inbox의 질문은 `questions`로 읽고 `answer --as-user`로 답합니다.
+계획이 승인되면 plan 단계가 `stage complete`를 실행하고, 부모가 `stage start`를 실행합니다.
+이 명령은 plan 세션을 멈추고 새 binding ID로 execute 단계를 엽니다. 그 다음 그 binding에
+이슈 작업 지시를 보냅니다. 그 지시의 envelope ID가 execute 단계가 보고할 때 쓰는 packet ID입니다.
+
+관리 세션은 사용자가 직접 지시하는 세션입니다. `manage`는 이 세션을 OLW host 안에서 사용자의
+기본 모델로 열거나, 이미 있으면 다시 연결합니다. 관리자가 준비된 상태에서 만든 부모는
+`parent create --no-manager`를 붙이지 않는 한 자동으로 연결됩니다. `manage`는 시작할 때
+업데이트 확인도 실행해 결과를 관리자 brief에 넣습니다.
+
+```sh
+bun run cli -- --root "$PWD" manage --json
+bun run cli -- --root "$PWD" update check --json          # 고정 버전과 npm dist-tag 비교. 설치하지 않음
+bun run cli -- --root "$PWD" update prepare --json        # 별도 worktree에서 업데이트 브랜치와 dev PR 준비. 병합하지 않음
+```
+
+`update check`는 고정된 `omo-ai`(`beta`)와 `@code-yeongyu/senpi`(`latest`) 버전을 npm과
+비교합니다. `--tag pkg=tag`로 dist-tag를 바꿀 수 있습니다. `update prepare`는 remote의 `dev`에서(`--remote NAME|URL`로 `dev`를 가져오고 push할 remote 선택, 기본값 `origin`)
+`olw/update-omo-<v>-senpi-<v>` 브랜치를 별도 worktree에 만들고, 거기서 install, typecheck,
+test, build를 실행한 뒤 `dev`로 PR을 엽니다(하나라도 실패하면 draft). 실행 중인 host는 건드리지
+않습니다.
 
 프로젝트 부모가 실행의 기본 단위입니다. 감독이나 initiative 없이 시작할 수 있으며,
 initiative가 없는 snapshot은 `"initiative": null`을 사용합니다. 독립 부모 생성에는 명시적
@@ -134,9 +168,9 @@ bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo 
 `--supervisor`와 독립 승인 옵션을 섞지 않습니다. 초기 지시가 수락된 부모는 다른 designation의
 감독에도 명시적으로 연결할 수 있지만, 감독의 승인 snapshot에 해당 프로젝트가 포함되고 양쪽의
 실행·연락 권한이 있어야 합니다. 연결은 부모의 승인 범위·이슈 목록·worktree·일시정지 상태·ID를
-변경하지 않습니다. 숨겨진 역할 생성이나 작업 재전송도 없습니다. `status`, `reports`, `notices`, `reconcile`은
+변경하지 않습니다. 숨겨진 역할 생성이나 작업 재전송도 없습니다. `status`, `reports`, `questions`, `notices`, `reconcile`은
 `--project` 또는 `--initiative`로 필터링합니다. 나중에 연결한 감독이 아니라 각 역할의 원래 승인
-범위를 기준으로 하므로 initiative 없는 프로젝트에는 `--project`를 사용합니다. `reports`와 `notices`는 필터 없이도 읽을 수 있습니다.
+범위를 기준으로 하므로 initiative 없는 프로젝트에는 `--project`를 사용합니다. `reports`, `questions`, `notices`는 필터 없이도 읽을 수 있습니다.
 
 `--root`는 이 도구의 control root이며 위 예제의 `$PWD`는 이 저장소입니다. 실제 작업 대상 저장소는 parent create의 `--repo`로 별도 지정합니다.
 
@@ -146,15 +180,20 @@ bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo 
 
 | 역할 | 모델 / reasoning | 작업 공간 |
 | --- | --- | --- |
+| Manager (`olw manage`) | `~/.omo/agent/settings.json`의 기본 모델 (없으면 `opencodex/anthropic/claude-opus-5-5` / `medium`) | control root Herdr workspace |
 | Supervisor (선택 사항) | `opencodex/gpt-6-astra` / `high` | control root Herdr workspace |
 | Parent | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | project integration branch worktree |
-| Child | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | parent branch 기반 issue worktree |
+| Child, `direct` 또는 `research` | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | parent branch 기반 issue worktree |
+| Child, `plan` 단계 | `opencodex/anthropic/claude-fable-5-1` / `xhigh` | 같은 issue worktree, 자기 탭 |
+| Child, `execute` 단계 | `opencodex/anthropic/claude-opus-5-5` / `medium` | 같은 issue worktree, 두 번째 탭 |
 
-이 배정은 새 binding에 적용됩니다. 기존 binding은 초기 세션 기록의 모델·제공자·
-사고 수준을 검증 기준으로 유지하며, reconcile이 실행 중 세션을 새 정책으로
-자동 전환하지 않습니다.
+이 배정은 새 binding에 적용됩니다. 기존 supervisor·parent·child binding은 초기 세션 기록의
+모델·제공자·사고 수준을 검증 기준으로 유지하며, reconcile이 실행 중 세션을 새 정책으로
+자동 전환하지 않습니다. 관리자는 예외입니다. 사용자의 OMO 기본 모델로 시작하고, identity
+검사에서 제공자·모델·사고 수준을 고정하지 않으며, 활성화 시 모델을 설정하지 않으므로
+관리자 세션에서는 모델을 자유롭게 바꿀 수 있습니다.
 
-새 이슈 자식은 **mass-ulw 모드**로 시작하지만, 부모의 명시적 이슈 작업 지시가
+`direct` 모드의 새 이슈 자식은 **mass-ulw 모드**로 시작하지만, 부모의 명시적 이슈 작업 지시가
 오기 전에는 goal이나 workflow를 만들지 않습니다. 자식이 해당 이슈 안에서
 네이티브 DAG 작업자를 실행하고 산출물을 검증한 뒤 부모에게 한 번 보고합니다.
 내부 작업자는 카테고리 라우팅을 쓰는 task이며 추가 OLW/Linear 역할이 아닙니다.
@@ -169,7 +208,7 @@ Herdr가 workspace와 부모·자식 worktree를 만듭니다. 부모 브랜치�
 
 새 부모는 Herdr의 명시적인 최상위 그룹 대표가 되고 자식은 실제 부모 workspace ID로 소속을 정합니다. 같은 Git 저장소의 프로젝트도 서로 섞이지 않습니다. 감독 연결·일시정지·재개는 그룹을 이동하지 않습니다. 기존 legacy 부모의 배치와 무관한 workspace·포커스는 보존합니다. 새 부모 그룹에는 관리형 grouped-worktree RPC를 지원하는 서버가 필요하며, 구형 서버에서 다른 배치로 조용히 대체하지 않습니다.
 
-컨트롤러가 파일 이벤트를 먼저 구독한 뒤 OMO를 실행합니다. TUI의 `session_start`가 `.omo/state/ready/`에 원자적으로 준비 기록을 남기면, 공개 OMO RPC로 정확한 세션에 연결해 모델과 reasoning을 설정·검증한 후 첫 지시를 보냅니다. Herdr의 OMO 탐지나 미지원 session-path 보고에 의존하지 않습니다.
+컨트롤러가 파일 이벤트를 먼저 구독한 뒤 OMO를 실행합니다. TUI의 `session_start`가 `.omo/state/ready/`에 원자적으로 준비 기록을 남기면, 공개 OMO RPC로 정확한 세션에 연결해 모델과 reasoning을 설정·검증한 후(관리자는 제외) 첫 지시를 보냅니다. Herdr의 OMO 탐지나 미지원 session-path 보고에 의존하지 않습니다.
 
 초기 지시는 보내기 전에 영속 claim을 남깁니다. 실제 수락이 확인되기 전에는 `initializing`이며, 수락 후에만 `ready`가 됩니다. ACK가 유실되면 이미 저장된 정확한 user message 또는 delivery receipt로 확인하고, 증거가 없으면 재전송하지 않습니다.
 

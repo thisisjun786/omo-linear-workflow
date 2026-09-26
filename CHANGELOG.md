@@ -22,6 +22,32 @@ published.
 - Scope projects can declare a target Git remote and default branch. OLW maintains one locked,
   fetch-only mirror per remote and exposes mirror status and explicit fetching through `olw doctor`
   and `olw repo list|fetch`.
+- Child modes: `child create --mode direct|planned|research`. A `planned` child runs
+  a plan stage (`opencodex/anthropic/claude-fable-5-1` xhigh, ulw-plan) and then an
+  execute stage (`opencodex/anthropic/claude-opus-5-5` medium, ulw-execute driving
+  mass-ulw) in the same worktree, each in its own Herdr tab and binding. `stage
+  complete` records the plan hand-off (path, sha256, head) and `stage start
+  --stage execute` stops the plan session and opens the execute stage. `status`
+  shows `mode`, `stage`, `stageBindings` and `openQuestions` per lineage generation;
+  `close` on any stage closes that generation and its workspace once. The parent
+  sends the issue packet to the execute binding; nothing transfers automatically.
+- Questions and answers: `question` and `answer` message kinds, the `olw_ask` tool
+  in bound child and parent sessions (native `ask_user_question` is blocked there),
+  and the `ask`, `answer` and read-only `questions` commands. A parent's question
+  goes to its ready manager or, without one or with `--to-user`, to the user inbox;
+  `answer --as-user` answers an inbox question.
+- The manager: `olw manage` opens or reattaches the scope-free management session
+  inside the OLW host with the user's default model (fallback Opus 5.5 medium).
+  Parents created while it's ready link to it automatically; `parent create
+  --no-manager` opts out. `manage` runs an update check at start and puts the
+  result in the manager brief.
+- Update automation: `olw update check` reports the pinned OMO and Senpi versions
+  against the npm dist-tags (`omo-ai` `beta`, `@code-yeongyu/senpi` `latest`) and
+  never installs; `olw update prepare` builds an `olw/update-omo-<v>-senpi-<v>`
+  branch from the selected remote's `dev` (default `origin`) in a separate worktree, runs install, typecheck, test and
+  build there and opens a PR to `dev` (draft if anything failed). Neither touches
+  the live host.
+- `medium` is an accepted thinking level for role models.
 - User-managed opencodex model metadata catalog (`MODEL_CATALOG` in
   `src/proxy/model-catalog.ts`). It overrides the context window, output limit,
   input modalities and reasoning flag that ocx exports late or wrong, for example

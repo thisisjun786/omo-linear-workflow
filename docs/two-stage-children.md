@@ -1,6 +1,6 @@
 # Two-stage issue children and question escalation
 
-Status: design agreed with the user on 2026-09-26. Not implemented.
+Status: design agreed with the user on 2026-09-26. Implemented; see "Implemented data model" below for where the shipped code differs from the first draft. The `olw-run` skill and [roles.md](../skills/references/roles.md) carry the current guidance.
 
 ## What the user asked for
 
@@ -12,6 +12,8 @@ Status: design agreed with the user on 2026-09-26. Not implemented.
 4. A child's questions go to its parent. The parent answers when it can. What the parent cannot decide goes up to the management session (supervisor), or to the user inbox when there is no manager.
 
 ## Current behavior this changes (with code references)
+
+This table describes the code before the change. Every row was addressed; the shipped shapes are in "Implemented data model".
 
 | Area | Today | Why it blocks the request |
 |---|---|---|
@@ -38,11 +40,11 @@ child workspace "JUN-274 ..."            one worktree, one branch, one owner
 - The ownership key and its UNIQUE index stay on the owner, so there is still one owner per issue.
 - Only the current stage is addressable. The parent always addresses the owner, and the registry routes to the current stage session.
 - A finished stage's tab stays open for inspection, with contact closed. Both tabs close with the child.
-- The final report comes from the execute stage (or the single stage) under the original packet's `report:<packet-id>`.
+- The final report comes from the execute stage (or the single stage) under `report:<packet-id>` of the packet sent to that stage's binding.
 
 ### Mode selection
 
-The parent picks the mode per issue packet with a new required field `execution_mode`. The parent already reads the full criteria, so it has the context for the choice:
+The parent picks the mode per issue at creation with `child create --mode direct|planned|research` (default `direct`). The parent already reads the full criteria, so it has the context for the choice:
 
 | Mode | When | Stages |
 |---|---|---|
@@ -50,15 +52,16 @@ The parent picks the mode per issue packet with a new required field `execution_
 | `planned` | Large or ambiguous development work: several components, open design decisions, cross-module changes. | plan tab (Fable 5.1 xhigh, ulw-plan), then execute tab (Opus 5.5 medium, ulw-execute + mass-ulw) |
 | `research` | The deliverable is findings, not code. | one tab: Opus 5.5 xhigh, ulw-research. Its collection can run as mass-ulw DAG waves (ulw-research Phase 1 "mass research" path) inside the same tab. |
 
-The child may push back: if the plan stage finds the work smaller than expected, it reports "no plan needed" and the parent resends as `direct`. The child never switches its own mode.
+The child may push back: if the plan stage finds the work smaller than expected, it says so. The parent closes that generation (`close --binding <plan or execute binding>`) and creates a new child with `--mode direct`; one live owner per issue. The child never switches its own mode. A packet whose mode disagrees with the child's stage yields a `blocked` report without work.
 
 ### Stage hand-off
 
 1. The plan stage runs ulw-plan in the issue worktree. It writes `.omo/plans/<issue-key>.md` and the plan-reviewer loop runs as usual.
 2. ulw-plan's "wait for the user's okay" step becomes a **question to the parent** (see below). The parent approves the plan itself (user decision), requests changes, or escalates only a real scope or product question.
-3. On approval, the plan stage records a `stage_complete` hand-off: plan path, plan digest, head commit. Then it ends its turn.
-4. OLW (not the agent) opens the execute tab in the same worktree. It launches Opus 5.5 medium with `/ulw-execute <plan>` as the first prompt, and the brief carries the original packet ID and the evidence directory.
-5. ulw-execute runs its phases with mass-ulw. At the end the execute stage reports to the parent once, exactly as today's child does.
+3. On approval, the plan stage runs `stage complete --from <plan> --plan <abs path> --head <sha> --id <id> --text-file <file>`. OLW checks the plan is inside the worktree and the head matches, records the hand-off (plan path, plan sha256, head) and sends it as a completed report to the parent. Then the stage ends its turn.
+4. The parent runs `stage start --from <plan> --parent <parent> --stage execute --id <id>`. OLW (not the agent) stops the plan session (TUI quit, then engine terminate), opens the execute tab in the same worktree, and launches Opus 5.5 medium with only `plan_path` and `plan_head` in its brief. The result is a new binding ID for the execute stage. Nothing from the plan stage's packet transfers.
+5. The parent sends the issue packet to the execute binding with `send` (criteria, limits, evidence directory, plan path). Only that packet starts work; its envelope ID is the packet ID the execute stage reports under.
+6. ulw-execute runs its phases with mass-ulw. At the end the execute stage reports to the parent once, `report:<packet-id>`, exactly as today's child does.
 
 ### Question and answer escalation
 
@@ -71,10 +74,10 @@ Add two message kinds and routes:
 
 Rules:
 
-- **Children never ask the user.** In a bound child session, the OLW extension intercepts `ask_user_question` in `onToolCall`, the same hook that already guards `thread_create`. It converts the call into a `question` to the parent and returns "sent to parent, end your turn and wait". The answer arrives by native delivery and wakes the child. This also covers ulw-plan's approval step and ulw-execute's plan-selection question.
+- **Children never ask the user.** In bound child and parent sessions, the OLW extension registers an `olw_ask` tool (up to 4 questions per call, options, a recommended default) and blocks native `ask_user_question` and `request_user_input` in `onToolCall`, the same hook that already guards `thread_create`. `olw_ask` sends a `question` to the owner and returns "end your turn and wait". The answer arrives by native delivery and wakes the child. This also covers ulw-plan's approval step and ulw-execute's plan-selection question. The CLI equivalent is `ask --from <binding> --id <id> --text-file <file> [--questions-file <json>]`.
 - **The parent decides first.** It answers from the criteria, the Linear decisions and repository evidence. It escalates only what it cannot decide: scope changes, contradictions in the criteria, product choices, anything that needs the user's authority.
-- **Escalation goes up one level to the management session.** A management session always exists (user decision): it is the session the user is directing. Parents are linked to it when they are created, and the `question` goes there. The management session answers what it can decide and asks the user the rest in its own TUI. It is the only role allowed to use `ask_user_question`.
-- **Answers go back down the same path, by question ID.** When the user replies in the parent session, the parent turns it into an `answer` to the child. One question ID gets one answer, and replays are deduplicated like reports.
+- **Escalation goes up one level to the management session.** A management session normally exists (user decision): it is the session the user is directing. Parents created while it's ready are linked to it (unless `parent create --no-manager`), and the `question` goes there. When no manager is ready, or with `ask --to-user`, the question is posted to the user inbox; `questions --project <id>` lists it and `answer --as-user --question <id>` answers it without a binding. The management session answers what it can decide and asks the user the rest in its own TUI. By policy it is the role that asks the user directly; the runtime blocks native asks only in bound children and parents.
+- **Answers go back down the same path, by question ID.** `answer --from <binding> --question <question-id> --text-file <file>` sends `answer:<question-id>` to the asker. One question ID gets one answer, and replays are deduplicated like reports.
 - **No waiting loops.** A role that asked ends its turn. It is woken by the `answer` delivery, which is the same event-driven model as today.
 
 ### The OLW shared host
@@ -102,7 +105,20 @@ User decisions: the session the user directs is the management session. It is **
 - **Existing initiative supervisors** remain valid, and existing bindings are not migrated. A manager is a new, more general form of the same role.
 - An arbitrary running `omo` session cannot be adopted as the manager without restarting it inside the OLW host. Relaying through `herdr agent prompt` into a foreign session was considered and rejected: it has no delivery receipt and no deduplication.
 
+## Implemented data model
+
+The draft above talks about one issue owner record with stage sessions under it. The shipped registry does it the other way round, which keeps the existing UNIQUE ownership index untouched:
+
+- **One binding per stage.** Each stage (`direct`, `plan`, `execute`, `research`) is a normal child binding with its own ID, durable session and Herdr tab. Stages of a planned child share the checkout (worktree and branch); the execute binding is created with the plan binding's checkout instead of a new one.
+- **Lineage.** The `stage_lineage` table links a binding to its issue, stage, ordinal, previous binding and hand-off record (`planPath`, `planSha256`, `head`, `completedAt`). `stage start` requires the previous stage's hand-off and the next ordinal.
+- **Generations.** A lineage carries a generation number. A fresh `direct` or `plan` stage for an issue whose earlier stages are all closed starts a new generation, so an issue can be re-run without touching the old chain. `status` is generation-scoped: each row's `stageBindings` lists the stages of that row's own generation, so an old row keeps showing the old chain next to the new one.
+- **One live owner per issue.** The ownership key stays `issue:<id>` on live bindings. `stage start` stops the plan session before the execute binding becomes live, so the index never sees two.
+- **Close.** `close --binding` on any lineage member closes the live stage session, marks every member of that generation closed and closes the child workspace once. Closing an old generation leaves a newer one live. Legacy children (no lineage row) close as before.
+- **Manager.** The manager is a child-free binding with role `manager`, a fixed designation and a fixed synthetic snapshot. `olw manage` creates it once and reattaches later; the launch model comes from the user's `~/.omo/agent/settings.json` defaults, with `opencodex/anthropic/claude-opus-5-5` `medium` as the fallback. Its identity check doesn't pin provider, model or thinking, and activation doesn't configure its model, so the user may change models in it. Its brief always carries an `update_check` line from the check `manage` ran at start (`unavailable; run olw update check` when the check couldn't run).
+
 ## Implementation units (in dependency order)
+
+This list is the original plan, kept as history. Where it differs from the shipped code, "Implemented data model" above and the `olw-run` skill are correct. In particular, unit 5 shipped as a block plus a separate tool: native `ask_user_question`/`request_user_input` calls in bound child and parent sessions are rejected with a reason pointing at `olw_ask`, not converted; only `olw_ask` delivers a question. Unit 7's `execution_mode` packet field became `child create --mode`.
 
 1. **Model policy:** add `medium` to `RoleModel.thinking` and the seed schema. Make the model depend on role and stage: parent Opus 5.5 xhigh, plan Fable 5.1 xhigh, execute Opus 5.5 medium, direct Opus 5.5 xhigh, research Opus 5.5 xhigh.
 2. **Registry:** add stage sessions to the child owner: a stage list, the live stage, and hand-off records. Route delivery to the live stage session and keep the ownership key.
@@ -113,7 +129,7 @@ User decisions: the session the user directs is the management session. It is **
 7. **Brief and skills:** add `execution_mode` to the packet. Add mode-specific child briefs and update `olw-run` for the parent's mode choice, answering duties and escalation.
 8. **Tests** for each unit, plus one real run: a `planned` issue whose plan stage asks one question the parent must escalate.
 
-This is a HEAVY change: a registry schema change, new message routes and new launch paths. I recommend running it through ulw-plan (plan, review, then execute) rather than as a bare implementation.
+This was a HEAVY change: a registry schema change, new message routes and new launch paths. It ran through ulw-plan (plan, review, then execute); the plan is `.omo/plans/olw-two-stage-children.md`.
 
 ## Model availability
 

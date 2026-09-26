@@ -1,12 +1,12 @@
 ---
 name: olw-run
-description: "Execute approved Linear scope as one of three roles: an optional supervisor over one initiative's linked parents, an independently approved parent over one project's issue children, or a child over one issue. Uses the omo-linear-workflow CLI for designation, creation, instructions and reports; issue children execute with mass-ulw, while parents and supervisors wait on native delivery without goal loops or polling. Use olw-plan for planning and olw-check for drift."
+description: "Execute approved Linear scope as one of four roles: an optional manager or supervisor over linked parents, an independently approved parent over one project's issue children, or a child over one issue in direct, planned or research mode. Uses the omo-linear-workflow CLI for designation, creation, instructions, questions, stage hand-offs and reports; issue children execute with mass-ulw, planned children first plan with ulw-plan, and parents and managers wait on native delivery without goal loops or polling. Use olw-plan for planning and olw-check for drift."
 ---
 
 # OLW Run
 
 Carry approved scope through delivery at exactly one level. Read
-[Supervisor, parent and child](../references/roles.md) first: it fixes the three roles, their
+[Supervisor, parent and child](../references/roles.md) first: it fixes the roles, their
 models, who instructs whom, and the CLI. This skill never widens the role the current session
 holds. Find that role with:
 
@@ -45,10 +45,13 @@ The user-authorized control session creates the project parent explicitly:
 bun "$OMO_INITIATIVE_ROOT/dist/cli.js" parent create --scope-digest <SHA256> --designation <ID> --execute --project <ID> --repo <ABS_ROOT> --base <REF> --json
 ```
 
-Add `--fixture` only for a fixture snapshot. The parent receives its initial brief by direct
+Add `--fixture` only for a fixture snapshot. When a ready manager exists (see
+[Manager](#manager)), the new parent is linked to it automatically; pass `--no-manager` to
+stay unlinked. The parent receives its initial brief by direct
 prompt and waits for explicit instructions in that same durable session. Its project/issue
 approval remains its own. A user can later link an initialized parent to a ready management
-session whose snapshot includes the project, even under a different designation:
+session, even under a different designation. For a supervisor, its snapshot must include the
+project; the scope-free manager has no such membership check:
 
 ```sh
 bun "$OMO_INITIATIVE_ROOT/dist/cli.js" parent link --parent <PARENT> --supervisor <SUPERVISOR> --json
@@ -82,19 +85,70 @@ never addresses a child, and returns a project's finding to that project's paren
 ## Parent
 
 Own one project on its integration worktree. Read the project's issues and full criteria from
-Linear, pick the ready batch by dependency order, and create one child per independent issue:
+Linear, pick the ready batch by dependency order, and create one child per independent issue.
+Choose the child's mode at creation; the child never switches it:
 
 ```sh
-bun "$OMO_INITIATIVE_ROOT/dist/cli.js" child create --parent <BINDING> --issue <ID> --json
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" child create --parent <BINDING> --issue <ID> --mode planned --json
 bun "$OMO_INITIATIVE_ROOT/dist/cli.js" send --from <PARENT> --to <CHILD> --id <MESSAGE_ID> --kind instruction --text-file packet.txt --json
 ```
+
+- `direct` (default): small, well-specified development work. One session, mass-ulw.
+- `planned`: large or ambiguous development work with open design decisions or cross-module
+  changes. A plan stage (Fable 5.1, ulw-plan) writes and gets one plan approved, then an
+  execute stage (Opus 5.5 medium, ulw-execute driving mass-ulw) implements it.
+- `research`: the deliverable is findings, not code. One session, ulw-research.
+
+A packet whose mode disagrees with the child's mode yields a `blocked` report without work.
+If a plan stage finds the work smaller than expected, it says so. Close that generation
+first (`close --binding <plan or execute binding>`), then create a new child with
+`--mode direct`; the registry allows one live owner per issue.
 
 The child's base branch comes from the registry, not the packet. The packet carries the issue
 ID, the criteria verbatim, the integration branch, allowed write scope, delivery limits, an
 absolute evidence directory, and what evidence to return. Its envelope ID identifies this
-packet; the child uses `report:<packet-id>` for its single final report. Creation selects
-mass-ulw mode but returns readiness separately from execution: a created child has done
+packet; the child uses `report:<packet-id>` for its single final report. Creation of a
+`direct` child selects mass-ulw mode (plan, execute and research stages select their own
+skills) but returns readiness separately from execution: a created child has done
 nothing yet. Only an explicit issue packet starts work.
+
+### Answering questions and approving plans
+
+A child's `question` delivery wakes the parent. Decide first, from the criteria, accepted
+Linear decisions and repository evidence, then answer the exact question ID:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" answer --from <PARENT> --question <QUESTION_ID> --text-file answer.txt [--answers-file answers.json] --json
+```
+
+One question gets one answer; `answer:<question-id>` is deduplicated like a report. The
+plan stage's approval request arrives as a question too. Review the plan at the reported
+head against the criteria and approve it yourself, or answer with the changes you need.
+Escalate only what you can't decide (scope changes, contradictions in the criteria, product
+choices, anything needing the user's authority):
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" ask --from <PARENT> --id <MESSAGE_ID> --text-file question.txt [--questions-file questions.json] --json
+```
+
+The question goes to the ready linked manager, or to the local user inbox when there is
+none (`--to-user` selects the inbox explicitly). End the turn; the answer arrives as a
+delivery. Relay the answer down to the child with `answer`; never widen it.
+
+After approving a plan, the plan stage runs `stage complete` and reports. Then start the
+execute stage in the same worktree:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" stage start --from <PLAN_BINDING> --parent <PARENT> --stage execute --id <MESSAGE_ID> --json
+```
+
+This stops the plan session, opens the execute tab in the child workspace and returns a
+new binding ID for the execute stage. Address that binding from now on; the issue keeps one
+live owner. Nothing from the original packet transfers: the execute brief carries only
+`plan_path` and `plan_head`. Send the issue packet again to the execute binding with `send`
+(criteria, limits, evidence directory, plan path). That packet's envelope ID is the packet
+ID the execute stage reports under (`report:<packet-id>`). Only an explicit packet starts
+work.
 
 When a child's report arrives, verify before integrating: compare the reported head and
 evidence against the criteria at that head, re-read the base, and merge into the project
@@ -129,7 +183,39 @@ user notice must identify that attempt and its unresolved state, not claim it wa
 
 ## Child
 
-Own one issue on a worktree forked from the parent's branch. Startup selects `mass-ulw` mode
+Own one issue on a worktree forked from the parent's branch. The brief names your stage:
+`direct`, `plan`, `execute` or `research`. Every stage shares these rules:
+
+- Your user is the parent. Prose in the pane reaches nobody. Ask with the `olw_ask` tool
+  (up to 4 questions per call, with options and a recommended default), then end the turn;
+  the answer arrives as a delivery and wakes you. Native `ask_user_question` is blocked in
+  bound roles and points you to `olw_ask`.
+- A packet whose mode disagrees with your stage is a `blocked` report without work.
+- Never merge, touch the parent branch or write Linear records.
+
+**plan stage** (Fable 5.1, ulw-plan): run the ulw-plan procedure in the issue worktree and
+write the plan at the `plan_path` in your brief. Run plan-reviewer rounds as ulw-plan
+requires. Where ulw-plan waits for the user's okay, ask the parent with `olw_ask` instead.
+On approval, commit the plan and hand off:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" stage complete --from <PLAN_BINDING> --plan <ABS_PLAN_PATH> --head <SHA> --id <MESSAGE_ID> --text-file handoff.txt --json
+```
+
+The plan must be inside the worktree and `--head` must equal the worktree HEAD. The command
+records the hand-off (path, digest, head) and sends it as a completed report. End the turn;
+the parent starts the execute stage. Do not implement.
+
+**execute stage** (Opus 5.5 medium, ulw-execute + mass-ulw): the brief carries `plan_path`
+and `plan_head`, nothing from the plan stage's packet. Wait for the parent's issue packet to
+this binding; it names the criteria, limits and evidence directory. Run ulw-execute on the
+plan; its phases drive mass-ulw under the contract below. Report once with
+`report:<packet-id>`, where the packet ID is that packet's envelope ID.
+
+**research stage** (Opus 5.5 xhigh, ulw-research): the deliverable is findings. Collection
+may run as mass-ulw waves inside the same session.
+
+**direct stage** (Opus 5.5 xhigh, mass-ulw): startup selects `mass-ulw` mode
 and the `olw-run` and `mass-ulw` execution skills; it does not create a goal, run or worker.
 Wait for the parent's explicit issue packet. Check its issue ID against the binding and read
 its full criteria and limits. If they disagree, report `blocked` without launching work.
@@ -179,10 +265,58 @@ unverified, and anything left running or on disk. Blocked on a decision only a p
 make is `blocked` with the exact question; a check that failed and can't be fixed in scope is
 `failed`. Ending the turn is not a report.
 
+## Manager
+
+The manager is the session the user directs. It isn't bound to an initiative or project and
+may manage several parents. Open it (or reattach to the existing one) with:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" manage --json
+```
+
+It runs inside the OLW host in a Herdr workspace with the user's default model. Parents
+created while it's ready link to it automatically (`parent create` without `--no-manager`),
+and their questions and reports arrive there natively. A manager link grants contact only;
+each parent's approval stays on its own designation.
+
+On a parent's question: answer what the criteria and accepted decisions settle, and ask the
+user the rest in this session. By policy the manager is the role that asks the user
+directly (the runtime blocks native asks only in bound children and parents). Reply by
+question ID:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" answer --from <MANAGER> --question <QUESTION_ID> --text-file answer.txt --json
+```
+
+Questions that reached the user inbox instead (no ready manager, or `ask --to-user`) are
+listed with `questions --project <ID> --json`, which wakes nobody. The user answers them
+without a binding:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" answer --as-user --question <QUESTION_ID> --text-file answer.txt --json
+```
+
+Instruct linked parents with `send --kind instruction`; never address a child. Close with
+`close --binding <MANAGER>`; parents keep working and keep their links for inspection.
+
+### Updates
+
+`manage` runs an update check at start and puts the result in the manager brief as an
+`update_check` line (or `unavailable; run olw update check` when the check couldn't run).
+`olw update check [--json] [--tag pkg=tag]` reports the pinned OMO and
+Senpi versions against the npm dist-tags (`omo-ai` `beta`, `@code-yeongyu/senpi` `latest`)
+and never installs anything. When newer versions exist, `olw update prepare [--remote NAME|URL] [--json]`
+creates an update branch `olw/update-omo-<v>-senpi-<v>` from the selected remote's `dev`
+(`--remote` picks the remote to fetch from and push to; default `origin`) in a separate
+worktree, runs install, typecheck, test and build there, and opens a PR to `dev` (a draft
+if anything failed). It never merges and never touches the live host. Merging and
+reinstalling remain the user's decision.
+
 ## Waiting and recovery
 
-After sending instructions, end the turn when only waiting remains. A child's `report`
-wakes its parent through native delivery; a parent's native report wakes its linked supervisor.
+After sending instructions, end the turn when only waiting remains. A child's `report` or
+`question` wakes its parent through native delivery; a parent's native report or question
+wakes its linked manager or supervisor, and an `answer` wakes the role that asked.
 Local user posts wake nobody. Parents and supervisors must not poll `status`, hold a goal
 or re-prompt themselves. A child's packet-bound execution goal is the sole exception: native
 workflow notifications resume its active phase, without polling or starting unrelated work.

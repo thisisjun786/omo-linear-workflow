@@ -77,6 +77,15 @@ export function modelForRole(role: Assignment["role"]): RoleModel {
   return modelForLaunch(role, null);
 }
 
+/** Static opencodex model references whose catalog health affects OLW role launches. */
+export const OLW_ROLE_MODELS: Readonly<Record<string, string>> = {
+  supervisor: "gpt-6-astra",
+  parent: "anthropic/claude-opus-5-5",
+  "child.plan": "anthropic/claude-fable-5-1",
+  "child.execute": "anthropic/claude-opus-5-5",
+  child: "anthropic/claude-opus-5-5",
+};
+
 const seedEntrySchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("model_change"),

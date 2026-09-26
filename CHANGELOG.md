@@ -15,6 +15,9 @@ published.
 
 ### Added
 
+- Pinned-by-default OMO model routing with accepted baselines, route-level upstream advice,
+  selective `apply`/`dismiss`, optional `follow` mode, launcher and manager notices, and catalog
+  health review for removed or degraded models. Advice is read-only until explicit acceptance.
 - Issue deliverables (`pr`, `report`, `document`) on bindings, briefs, packets and status. Owned-clone
   children publish one PR into their parent's integration branch; `pr open` reuses open PRs and
   `pr merge` checks the reported head and merges with a merge commit. PR-less results require a

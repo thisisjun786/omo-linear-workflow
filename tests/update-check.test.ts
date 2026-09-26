@@ -1,7 +1,8 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm, watch } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, watch, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { syncRouting } from "../src/proxy/routing-sync";
 import {
   type CommandRunner,
   checkUpdates,
@@ -65,6 +66,61 @@ test("reports newer versions and preserves the exact pinned manifest string", as
   });
   const state = JSON.parse(await readFile(join(root, ".omo/state/update-check.json"), "utf8"));
   expect(state).toEqual(result);
+});
+
+test("update check performs a fresh read-only routing comparison", async () => {
+  const root = await fixture();
+  const routingRoot = join(root, "routing");
+  const packageRoot = join(routingRoot, "upstream");
+  const upstream = join(packageRoot, "bin/omo.js");
+  const bundle = join(packageRoot, "plugin/extensions/omo-task.js");
+  const configPath = join(routingRoot, "omo.jsonc");
+  const catalogPath = join(routingRoot, "models.json");
+  const stateDir = join(routingRoot, "state");
+  await mkdir(join(packageRoot, "bin"), { recursive: true });
+  await mkdir(join(packageRoot, "plugin/extensions"), { recursive: true });
+  const source = (model: string) =>
+    `const categories={"visual-engineering":[{providers:["openai"],model:"${model}",variant:"low"}],"deep-low":[{providers:["openai"],model:"${model}",variant:"low"}],quick:[{providers:["openai"],model:"${model}",variant:"low"}]};const agents={explore:[{providers:["openai"],model:"${model}",variant:"low"}],librarian:[{providers:["openai"],model:"${model}",variant:"low"}],"plan-consultant":[{providers:["openai"],model:"${model}",variant:"low"}],"plan-reviewer":[{providers:["openai"],model:"${model}",variant:"low"}]};const reviewer={name:"omo-native-test",mode:"subagent",categories:["quick"]};`;
+  await Promise.all([
+    writeFile(upstream, ""),
+    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "omo-ai", version: "1" })),
+    writeFile(bundle, source("gpt-6-luna")),
+    writeFile(configPath, '{"categories":{},"agents":{}}'),
+    writeFile(
+      catalogPath,
+      JSON.stringify({
+        providers: {
+          opencodex: {
+            models: ["gpt-6-luna", "gpt-6-sol"].map((id) => ({
+              id,
+              contextWindow: 1000000,
+              maxTokens: 128000,
+              input: ["text", "image"],
+              reasoning: true,
+            })),
+          },
+        },
+      }),
+    ),
+  ]);
+  const routing = {
+    upstream,
+    configPath,
+    stateDir,
+    catalogPath,
+    adopt: true,
+    check: false,
+    force: false,
+  } as const;
+  await syncRouting(routing);
+  await writeFile(bundle, source("gpt-6-sol"));
+  const result = await checkUpdates(root, {
+    run: runner(),
+    routing: { ...routing, adopt: false, check: true },
+  });
+  expect(result.routingAdvice?.routes).toContainEqual(
+    expect.objectContaining({ path: "categories.quick" }),
+  );
 });
 
 test("equal versions are current", async () => {

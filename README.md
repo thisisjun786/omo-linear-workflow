@@ -74,22 +74,22 @@ disable a model there, not in OLW. Do not add `modelOverrides` inside
 `providers.opencodex`, because opencodex treats foreign edits to its block as a
 conflict and stops refreshing it.
 
-### Automatic upstream routing tracking
+### Pinned upstream routing review
 
 Before a regular `omo` or `omon` start and before OLW prepares its shared host,
-the installed global OMO's version and the actual policy bundle hash are checked.
-When they change, or when the models opencodex publishes to OMO change, the
-category and agent model order and thinking levels are mapped onto that opencodex
-list (`providers.opencodex` in `models.json`, kept current by
-`ocx integration client enable --client omo`). Routing the user changed by hand
-afterwards is protected. If a chain can't be mapped or the bundle format is new, the previous
-settings are kept and an error is reported. The current session isn't restarted,
-and OLW's Parent and Child model assignments aren't changed.
+the installed global OMO policy and opencodex catalog are checked. Routing is
+pinned by default: upstream route and catalog changes are reported, never applied
+automatically. The launcher stays quiet when unchanged and prints a non-blocking
+review command when findings exist. Selective apply keeps backups and a recovery
+journal; `--follow` retains the former automatic mode. OLW role assignments are
+reviewed for catalog health but are never silently changed.
 
 ```sh
 bun run proxy:routing status
 bun run proxy:routing check --force
-bun run proxy:routing sync --force
+bun run proxy:routing apply categories.deep-low
+bun run proxy:routing dismiss categories.deep-low
+bun run proxy:routing baseline save
 ```
 
 Initial activation, ownership boundaries, recovery and the execution path are

@@ -38,7 +38,7 @@ import {
   runtimeCacheEnvironment,
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
-import { ensureRouting } from "./proxy/routing-launch";
+import { ensureRouting, globalOmo } from "./proxy/routing-launch";
 import { type Readiness, removeReadiness, subscribeReadiness } from "./readiness";
 import {
   checkoutGit,
@@ -145,6 +145,7 @@ export interface ManageResult {
   readonly action: "created" | "focused" | "reattached" | "reattaching";
   readonly binding: Binding;
   readonly updateCheck: UpdateCheck;
+  readonly routingAdvice: NonNullable<UpdateCheck["routingAdvice"]>;
 }
 export type ChildCreateMode = "direct" | "planned" | "research";
 export interface CreateChildInput {
@@ -663,7 +664,22 @@ export class Orchestrator {
     tags: Partial<Record<"omo-ai" | "@code-yeongyu/senpi", string>> = {},
   ): Promise<Result<UpdateCheck>> {
     try {
-      return ok(await checkUpdates(this.#root, { tags }));
+      const home = process.env["HOME"] ?? "";
+      return ok(
+        await checkUpdates(this.#root, {
+          tags,
+          routing: {
+            upstream: globalOmo(),
+            configPath: join(home, ".omo/omo.jsonc"),
+            stateDir: join(home, ".omo/proxy-routing"),
+            catalogPath: join(home, ".omo/agent/models.json"),
+            managerSettingsPath: join(home, ".omo/agent/settings.json"),
+            adopt: false,
+            check: true,
+            force: true,
+          },
+        }),
+      );
     } catch (cause) {
       return ok({
         checkedAt: this.#deps.now(),
@@ -683,6 +699,7 @@ export class Orchestrator {
           },
         },
         globalOmo: null,
+        routingAdvice: { count: 0, line: "none", routes: [], catalog: [] },
         reason: messageOf(cause),
       });
     }
@@ -722,8 +739,23 @@ export class Orchestrator {
       null,
     );
     return created.ok
-      ? ok({ action: "created", binding: created.value.binding, updateCheck })
+      ? ok({
+          action: "created",
+          binding: created.value.binding,
+          updateCheck,
+          routingAdvice: updateCheck.routingAdvice ?? {
+            count: 0,
+            line: "none",
+            routes: [],
+            catalog: [],
+          },
+        })
       : created;
+  }
+
+  #managerRoutingLine(): string {
+    if (!this.#currentUpdateCheck) return "unavailable; run olw update check";
+    return this.#currentUpdateCheck.routingAdvice?.line ?? "none";
   }
 
   #managerUpdateLine(): string {
@@ -759,13 +791,28 @@ export class Orchestrator {
         },
       },
       globalOmo: null,
+      routingAdvice: { count: 0, line: "none", routes: [], catalog: [] },
       reason,
     });
     try {
       const result = await Promise.race([
         (
           this.#deps.updateCheck ??
-          (() => checkUpdates(this.#root, { timer, signal: deadlineController.signal }))
+          (() =>
+            checkUpdates(this.#root, {
+              timer,
+              signal: deadlineController.signal,
+              routing: {
+                upstream: globalOmo(),
+                configPath: join(process.env["HOME"] ?? "", ".omo/omo.jsonc"),
+                stateDir: join(process.env["HOME"] ?? "", ".omo/proxy-routing"),
+                catalogPath: join(process.env["HOME"] ?? "", ".omo/agent/models.json"),
+                managerSettingsPath: join(process.env["HOME"] ?? "", ".omo/agent/settings.json"),
+                adopt: false,
+                check: true,
+                force: true,
+              },
+            }))
         )(),
         new Promise<UpdateCheck>((resolve) => {
           deadlineTimer = timer.setTimeout(
@@ -793,6 +840,7 @@ export class Orchestrator {
           },
         },
         globalOmo: null,
+        routingAdvice: { count: 0, line: "none", routes: [], catalog: [] },
         reason: messageOf(cause),
       };
     } finally {
@@ -844,7 +892,17 @@ export class Orchestrator {
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
         await herdr.focusWorkspace(workspaceId);
-        return ok({ action: "focused", binding, updateCheck });
+        return ok({
+          action: "focused",
+          binding,
+          updateCheck,
+          routingAdvice: updateCheck.routingAdvice ?? {
+            count: 0,
+            line: "none",
+            routes: [],
+            catalog: [],
+          },
+        });
       }
       const now = this.#deps.now();
       const claim = this.#withRegistry((registry) =>
@@ -858,7 +916,17 @@ export class Orchestrator {
       if (!claim.ok) return claim;
       if (!claim.value.claimed) {
         await herdr.focusWorkspace(workspaceId);
-        return ok({ action: "reattaching", binding: claim.value.binding, updateCheck });
+        return ok({
+          action: "reattaching",
+          binding: claim.value.binding,
+          updateCheck,
+          routingAdvice: updateCheck.routingAdvice ?? {
+            count: 0,
+            line: "none",
+            routes: [],
+            catalog: [],
+          },
+        });
       }
       const owner = claim.value.token;
       token = owner;
@@ -883,7 +951,17 @@ export class Orchestrator {
         token = undefined;
         if (!finished.value) return leaseLost();
         await herdr.focusWorkspace(workspaceId);
-        return ok({ action: "focused", binding, updateCheck });
+        return ok({
+          action: "focused",
+          binding,
+          updateCheck,
+          routingAdvice: updateCheck.routingAdvice ?? {
+            count: 0,
+            line: "none",
+            routes: [],
+            catalog: [],
+          },
+        });
       }
       const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
       const managedPath = managedHerdrPath(artifact.artifactDir);
@@ -936,7 +1014,17 @@ export class Orchestrator {
       token = undefined;
       if (!finished.value) return leaseLost();
       await herdr.focusWorkspace(workspaceId);
-      return ok({ action: "reattached", binding: moved.value, updateCheck });
+      return ok({
+        action: "reattached",
+        binding: moved.value,
+        updateCheck,
+        routingAdvice: updateCheck.routingAdvice ?? {
+          count: 0,
+          line: "none",
+          routes: [],
+          catalog: [],
+        },
+      });
     } catch (cause) {
       return failure(
         "runtime_unavailable",
@@ -2739,6 +2827,7 @@ export class Orchestrator {
           ? {
               includeManagerGuidance: true,
               updateCheckLine: `update_check: ${this.#managerUpdateLine()}`,
+              routingAdviceLine: `routing_advice: ${this.#managerRoutingLine()}`,
             }
           : {}),
         ...(planPath === undefined ? {} : { planPath }),

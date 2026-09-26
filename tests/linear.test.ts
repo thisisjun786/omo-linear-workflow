@@ -324,6 +324,7 @@ describe("buildRoleBrief", () => {
     const brief = buildRoleBrief(makeBinding("manager"), snapshot, {
       includeManagerGuidance: true,
       updateCheckLine: "update_check: pinned 1.0 available 2.0",
+      routingAdviceLine: "routing_advice: none",
     });
     const parsed = z.record(z.string(), z.unknown()).parse(Bun.YAML.parse(brief));
     expect(parsed).toMatchObject({
@@ -331,6 +332,7 @@ describe("buildRoleBrief", () => {
       scope: "unbound",
       ask_user_directly: true,
       update_check: "pinned 1.0 available 2.0",
+      routing_advice: "none",
       qa_standby: true,
     });
   });

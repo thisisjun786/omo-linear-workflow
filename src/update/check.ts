@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { checkRoutingAdvice, readRoutingAdvice, type SyncOptions } from "../proxy/routing-sync";
 
 const packageNames = ["omo-ai", "@code-yeongyu/senpi"] as const;
 type PackageName = (typeof packageNames)[number];
@@ -17,6 +18,7 @@ export interface UpdateCheck {
   readonly state: "available" | "current" | "unknown" | "unavailable";
   readonly packages: Readonly<Record<PackageName, PackageCheck>>;
   readonly globalOmo: string | null;
+  readonly routingAdvice?: Awaited<ReturnType<typeof readRoutingAdvice>>;
   readonly reason?: string;
 }
 export interface UpdateTimer {
@@ -124,6 +126,8 @@ export async function checkUpdates(
     readonly now?: () => string;
     readonly timer?: UpdateTimer;
     readonly signal?: AbortSignal;
+    readonly routingStateDir?: string;
+    readonly routing?: SyncOptions;
   } = {},
 ): Promise<UpdateCheck> {
   const rawRun = options.run ?? runCommand;
@@ -327,6 +331,11 @@ export async function checkUpdates(
     outputs.every((item) => item.available === undefined && item.offline === true) &&
     outputs.every((item) => item.timedOut !== true);
   const hasUpdate = Object.values(packages).some((item) => item.state === "update_available");
+  const routingAdvice = options.routing
+    ? await checkRoutingAdvice(options.routing)
+    : await readRoutingAdvice(
+        options.routingStateDir ?? join(process.env["HOME"] ?? "", ".omo/proxy-routing"),
+      );
   const overall: UpdateCheck = {
     checkedAt: (options.now ?? (() => new Date().toISOString()))(),
     state:
@@ -341,6 +350,7 @@ export async function checkUpdates(
               : "current",
     packages,
     globalOmo,
+    routingAdvice,
     ...(reasonList.length ? { reason: reasonList.join("; ") } : {}),
   };
   try {

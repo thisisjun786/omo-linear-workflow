@@ -370,6 +370,9 @@ test("manager create passes real-shaped update versions once into its brief", as
   expect(updateLines[0]).toContain("omo-ai pinned 5.0.0-beta.84, beta 5.0.0-beta.90");
   expect(updateLines[0]).toContain("@code-yeongyu/senpi pinned 2026.9.22-4, latest 2026.9.25-1");
   expect(updateLines[0]).not.toContain("undefined");
+  expect(managerBrief.split("\n").filter((line) => line.startsWith("routing_advice: "))).toEqual([
+    "routing_advice: none",
+  ]);
 });
 
 test("first manage creates one manager labeled manager; second focuses it and launches nothing", async () => {

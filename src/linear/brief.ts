@@ -73,6 +73,7 @@ export interface RoleBriefOptions {
   readonly planPath?: string;
   readonly planHead?: string;
   readonly updateCheckLine?: string;
+  readonly routingAdviceLine?: string;
   readonly includeParentGuidance?: boolean;
   readonly includeManagerGuidance?: boolean;
 }
@@ -153,6 +154,7 @@ export function buildRoleBrief(
       "scope: unbound",
       "ask_user_directly: true",
       ...(options.updateCheckLine === undefined ? [] : [options.updateCheckLine]),
+      ...(options.routingAdviceLine === undefined ? [] : [options.routingAdviceLine]),
     );
   }
 

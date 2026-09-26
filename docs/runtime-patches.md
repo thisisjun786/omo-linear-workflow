@@ -1,14 +1,15 @@
 # Maintained runtime repairs
 
-OLW pins OMO `5.0.0-0.beta.84` and Senpi `2026.9.22-4`. The runtime repairs
-below are carried by pnpm's `patchedDependencies` entry in `package.json`, with
-the generated integrity in `pnpm-lock.yaml`. They do not modify the global OMO
+OLW pins OMO `5.0.0` and Senpi `2026.9.26`. The runtime repairs below are
+carried by pnpm's `patchedDependencies` entry in `package.json`, with the
+generated integrity in `pnpm-lock.yaml`. They do not modify the global OMO
 installation, reset authentication, erase user caches, or restart a running host.
 
-The Senpi patch is `patches/@code-yeongyu__senpi@2026.9.22-4.patch`. It includes
-the earlier optional MCP/OAuth declaration corrections as well as executable
-repairs. `patches/senpi-mcp-optional-types.patch` is the superseded declaration-only
-artifact; it is no longer selected by the manifest.
+The Senpi patch is `patches/@code-yeongyu__senpi@2026.9.26.patch`. The
+persistent-monitor timeout repair is fixed upstream in 2026.9.26. The earlier
+MCP/OAuth and gaxios exact-optional declaration corrections remain patched.
+The declaration-only `patches/senpi-mcp-optional-types.patch` remains a
+superseded, unselected artifact.
 
 ## Ownership and behavior
 
@@ -21,7 +22,8 @@ Modifying only the raw JavaScript would leave bundled execution unchanged.
 | --- | --- | --- |
 | LINA-143 | `core/extensions/builtin/tool-search/service` | Associate the catalog with the existing provider scope through a weak map. An installer's async continuation cannot serve as session ownership: sibling callbacks otherwise lose the catalog or borrow another session's service. |
 | LINA-143 | `core/agent-session`, `_bindExtensionCore` | Give each extension runner its own lazy-activator array. Reload must not retain callbacks whose extension generation has been invalidated. |
-| LINA-146 | `core/extensions/builtin/terminal/monitor-registry` | Persistent file watches ignore the ordinary live timeout, while retaining their recorded durability expiry. Ephemeral deadlines, admission bounds, cancellation and native file events remain separate. |
+| LINA-146 | `core/extensions/builtin/terminal/monitor-registry` | Partly fixed upstream in Senpi 2026.9.26: persistent watches no longer use the ordinary five-minute live timeout, but upstream also omits the timer for their recorded `expiresAt`. The retained raw and bundled hunk restores only durability expiry; ephemeral timeout, cancellation and native file events remain separate. |
+| Optional declarations | MCP `client/auth.d.ts`, gaxios `gaxios.d.ts` | Still needed in Senpi 2026.9.26: under exact optional types, `clientMetadataUrl?: string` does not admit an explicit `undefined`, and gaxios still declares `FetchCompliance.fetch` as `typeof fetch`. Both declaration-only corrections are ported. |
 
 Tool search discovers names and parameter schemas; it deliberately does not
 activate them. A permitted first by-name invocation performs lazy activation.
@@ -153,8 +155,8 @@ prevent the shared host from selecting another model. The patch adds
 `ctx.sessionSettings.setModelFallbackForSession(enabled)`: an instance-owned
 SettingsManager override, separate from the existing persistent settings setter.
 It survives settings reload and never writes the user's settings file or changes
-another SettingsManager instance. Raw modules, declarations, `chunk-GY5DVR65.js`,
-`chunk-V5YRHJCK.js`, and `session-worker.js` carry the same contract.
+another SettingsManager instance. Raw modules, declarations, `chunk-WM5FVFAP.js`,
+`chunk-QGC46CGK.js`, and `session-worker.js` carry the same contract.
 
 OLW applies the override only after finding the exact durable binding in a native
 host session. Unbound sessions, internal workflow workers and frontend contexts
@@ -174,12 +176,14 @@ settings test alone is not that evidence.
 
 ## Native delivery provenance (LINA-142)
 
-`patches/omo-ai@5.0.0-0.beta.84.patch` repairs OMO's native mailbox contract.
-A rejected snapshot check before invoking the target emits
-`turn_conflict_before_delivery`. A non-pushback exception after invoking either
-steer or start emits `idempotency_uncertain`, because acceptance may precede a
-lost acknowledgment. An old unqualified `turn_conflict` is never upgraded into
-proof of non-delivery.
+`patches/omo-ai@5.0.0.patch` repairs OMO's native mailbox contract. OMO 5.0.0
+already retains uncertain idempotency state, but its executable factory still
+reports the pre-invocation snapshot race as `turn_conflict` and reports generic
+post-invocation steer/start exceptions as `turn_conflict`/`internal_error`.
+The retained patch makes the rejected snapshot check emit
+`turn_conflict_before_delivery` and both post-invocation paths emit
+`idempotency_uncertain`, because acceptance may precede a lost acknowledgment.
+An old unqualified `turn_conflict` is never upgraded into proof of non-delivery.
 
 The bundle marker retains normal body-integrity validation. Its source digest
 identifies the recorded downstream transformation, not an upstream source build.
@@ -211,6 +215,19 @@ The `report` mode of the same QA checks the reverse parent-to-manager route,
 including its front-end replay guard: a proven pre-delivery report rejection
 re-enters the same claimed delivery path, but never migrates to a new recipient.
 An unlinked original route is denied rather than rerouted.
+
+## Per-hunk status for the pinned releases
+
+| Hunk / behavior | Status in OMO 5.0.0 / Senpi 2026.9.26 | Upstream evidence |
+| --- | --- | --- |
+| Tool-search catalog ownership by provider scope | Ported; still needed in raw service, CLI/host chunk and worker bundle. | Senpi still constructs `scopedService = new AsyncLocalStorage()` and calls `enterWith`, so sibling callbacks can lose or borrow the installer's continuation. |
+| Per-runner lazy activator generation | Ported; still needed in raw agent session, CLI/host chunk and worker bundle. | Senpi still registers into the long-lived `this._lazyToolActivators`; `_bindExtensionCore` does not reset it on runner replacement. |
+| Session-only model fallback | Ported; still needed in raw modules, declarations, CLI/host chunks and worker bundle. | Senpi exposes only persistent `setModelFallbackEnabled`, whose implementation updates global settings and saves them; no `setModelFallbackForSession` is shipped. |
+| Persistent file-watch live timeout and durability expiry | Partly upstream; reduced hunk ported. | Senpi derives `persistent`, stores `deadlineMs: null`, and avoids the ordinary timeout, matching its 2026.9.26 changelog. It also leaves `deadline: undefined` when `expiresAt` exists, so the retained hunk schedules only the recorded durability expiry and reports it as timeout. |
+| MCP OAuth optional `clientMetadataUrl` declaration | Ported; still needed. | The 2026.9.26 package still declares `clientMetadataUrl?: string`; the patch retains `string | undefined` for explicit undefined under exact optional types. |
+| gaxios fetch declaration | Ported; still needed. | The 2026.9.26 package still declares `FetchCompliance.fetch: typeof fetch`; the patch retains its parameter/return projection to avoid the incompatible generic overload. |
+| Native pre-invocation conflict provenance | Ported; still needed in the OMO executable bundle. | OMO 5.0.0 still emits `turn_conflict` at the snapshot mismatch and omits `turn_conflict_before_delivery` from its receipt-code set. |
+| Native post-invocation uncertainty | Ported; still needed in the OMO executable bundle. | OMO 5.0.0 retains uncertain idempotency rows, but the steer catch and start catch still emit `turn_conflict` and `internal_error`; the patch preserves the acceptance-boundary distinction. |
 
 ## Updating the dependency
 

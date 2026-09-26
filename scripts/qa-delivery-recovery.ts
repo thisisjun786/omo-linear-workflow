@@ -206,7 +206,7 @@ async function main() {
           const failure = notice.envelope.operational?.failure;
           assert.ok(failure);
           assert.equal(failure.durableSessionId, parent.durableSessionId);
-          assert.equal(failure.modelId, "claude-opus-5-5");
+          assert.equal(failure.modelId, "anthropic/claude-opus-5-5");
           const entries = SessionManager.open(failure.sessionPath).getBranch();
           const entry = z
             .object({
@@ -260,7 +260,7 @@ async function main() {
           assert.ok(continuation.every((message) => message.stopReason !== "error"));
           const after = await receiver.getState();
           assert.equal(after.sessionId, before.sessionId);
-          assert.equal(after.model?.id, "claude-opus-5-5");
+          assert.equal(after.model?.id, "anthropic/claude-opus-5-5");
           assert.equal(after.thinkingLevel, "xhigh");
           return {
             status,

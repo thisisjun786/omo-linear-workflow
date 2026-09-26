@@ -63,10 +63,10 @@ async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "olw-native-delivery-"));
   roots.push(directory);
   const source = await readFile(join(root, "node_modules/omo-ai/plugin/extensions/omo.js"), "utf8");
-  const atomicStart = source.indexOf("import{closeSync as Zm");
-  const atomicEnd = source.indexOf("import{closeSync as cg");
-  const threadsStart = source.indexOf("import{Type as I7");
-  const threadsEnd = source.indexOf("import{createConnection as Qee");
+  const atomicStart = source.indexOf("import{closeSync as oy");
+  const atomicEnd = source.indexOf("import{closeSync as yy");
+  const threadsStart = source.indexOf("import{Type as gte");
+  const threadsEnd = source.indexOf("import{createConnection as Une");
   if (atomicStart < 0 || atomicEnd <= atomicStart || threadsStart < 0 || threadsEnd <= threadsStart)
     throw new Error("Pinned native thread factory extraction boundary changed");
   const resolver = join(root, "node_modules/@code-yeongyu/senpi");
@@ -80,7 +80,7 @@ async function fixture() {
       `from ${JSON.stringify(pathToFileURL(Bun.resolveSync("typebox/value", resolver)).href)}`,
     );
   const modulePath = join(directory, "native.mjs");
-  await writeFile(modulePath, `${executable}\nexport { Zee as createTools };\n`);
+  await writeFile(modulePath, `${executable}\nexport { Bne as createTools };\n`);
   const imported: unknown = await import(pathToFileURL(modulePath).href);
   const native = z.object({ createTools: callable }).parse(imported);
   const snapshotEntered = Promise.withResolvers<void>();

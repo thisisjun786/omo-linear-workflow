@@ -38,6 +38,7 @@ published.
 - Repository policies follow `docs/policy/`: PRs target `dev` and merge with a merge
   commit, `main` only advances to released commits, and issue and PR text is in
   English. Issue forms are now `bug` and `proposal`.
+- Pinned the official `omo-ai` 5.0.0 and `@code-yeongyu/senpi` 2026.9.26 releases, retaining only runtime-repair hunks that remain necessary.
 - Models route through opencodex. The routing synchronizer reads the
   opencodex-owned catalog in `models.json`, and OLW role pins use `opencodex`.
 - Child fixture standby permits internal workers only after explicit instruction;

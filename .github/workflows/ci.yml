@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Push runs are release evidence for their exact commit: never cancel them.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  # Push runs are release evidence for their exact commit: a group of their own, never cancelled.
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

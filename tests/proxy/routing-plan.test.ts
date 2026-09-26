@@ -97,6 +97,23 @@ describe("upstream opencodex routing", () => {
     expect(withoutFast.skipped).toContain("categories.quick: gpt-6-luna-fast");
   });
 
+  test("serves an upstream Sol fast selector at standard tier by user choice", () => {
+    // Given Sol Fast followed by standard Sol, and Luna Fast, with every Fast row published.
+    const chain = [
+      { providers: ["openai"], model: "gpt-6-sol-fast", variant: "medium" },
+      { providers: ["openai"], model: "gpt-6-sol", variant: "medium" },
+      { providers: ["openai"], model: "gpt-6-luna-fast", variant: "low" },
+    ];
+    const result = quick(chain, ["gpt-6-sol", "gpt-6-sol--fast", "gpt-6-luna--fast"]);
+    // Then Sol never uses its priority tier, the duplicate collapses, and Luna keeps Fast.
+    expect(result.groups.categories["quick"]).toEqual({
+      models: [
+        { model: "opencodex/gpt-6-sol", reasoning: "medium" },
+        { model: "opencodex/gpt-6-luna--fast", reasoning: "low" },
+      ],
+    });
+  });
+
   test.each(["off", "max"])(
     "serves the current DeepSeek Flash identity from another opencodex host with %s reasoning",
     (reasoning) => {

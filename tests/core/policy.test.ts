@@ -60,6 +60,41 @@ describe("launch models by role and child stage", () => {
     });
   }
 
+  test("manager reads valid settings and falls back for missing, malformed and incomplete settings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "olw-manager-settings-"));
+    roots.push(root);
+    const path = join(root, "settings.json");
+    const fallback: RoleModel = {
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
+      thinking: "medium",
+    };
+    expect(modelForLaunch("manager", null, path)).toEqual(fallback);
+    await Bun.write(path, "{invalid");
+    expect(modelForLaunch("manager", null, path)).toEqual(fallback);
+    await Bun.write(path, JSON.stringify({ defaultModel: "incomplete" }));
+    expect(modelForLaunch("manager", null, path)).toEqual(fallback);
+    await Bun.write(
+      path,
+      JSON.stringify({
+        defaultProvider: "custom",
+        defaultModel: "model",
+        defaultThinkingLevel: "high",
+      }),
+    );
+    expect(modelForLaunch("manager", null, path)).toEqual({
+      provider: "custom",
+      modelId: "model",
+      thinking: "high",
+    });
+    // Non-manager models never consult the supplied path, even when it is absent.
+    expect(modelForLaunch("parent", null, join(root, "absent"))).toEqual({
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
+      thinking: "xhigh",
+    });
+  });
+
   test("parses medium thinking level from a seeded session", async () => {
     const root = await mkdtemp(join(tmpdir(), "olw-policy-"));
     roots.push(root);

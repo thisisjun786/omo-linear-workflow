@@ -92,6 +92,7 @@ async function fixture(run: (fixture: Fixture) => Promise<void>): Promise<void> 
     Binding["assignment"]["role"],
     { readonly provider: string; readonly modelId: string; readonly thinking: string }
   > = {
+    manager: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" },
     supervisor: modelForRole("supervisor"),
     parent: modelForRole("parent"),
     child: modelForRole("child"),

@@ -16,7 +16,7 @@ function scopeRefs(binding: Binding, snapshot: ScopeSnapshot): string {
       lines.push(`  project_id: ${entry.project.id}`);
       lines.push(`  issue_ids: ${JSON.stringify(entry.issues.map((issue) => issue.id))}`);
     }
-  } else {
+  } else if (assignment.role === "child") {
     const entry = snapshot.projects.find((p) => p.project.id === assignment.projectId);
     const issue = entry?.issues.find((i) => i.id === assignment.issueId);
     if (entry !== undefined) {
@@ -33,7 +33,11 @@ function scopeRefs(binding: Binding, snapshot: ScopeSnapshot): string {
 function roleBehavior(role: Binding["assignment"]["role"]): string {
   const lines: string[] = [];
   lines.push("behavior:");
-  if (role === "supervisor") {
+  if (role === "manager") {
+    lines.push("  scope: unbound");
+    lines.push("  ask_user_directly: true");
+    lines.push("  manage_linked_parents: true");
+  } else if (role === "supervisor") {
     lines.push("  scope: one explicitly designated initiative");
     lines.push("  instruct_parents: true");
     lines.push("  accept_reports_from_parents: true");

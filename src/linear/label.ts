@@ -27,6 +27,8 @@ function slugWords(ref: Ref, kind: "initiative" | "project" | "issue"): string |
 
 function scopeName(assignment: Assignment, snapshot: ScopeSnapshot): string | null {
   switch (assignment.role) {
+    case "manager":
+      return null;
     case "supervisor":
       return snapshot.initiative === null ? null : slugWords(snapshot.initiative, "initiative");
     case "parent": {
@@ -48,6 +50,7 @@ export function roleLabel(
   snapshot: ScopeSnapshot,
   bindingId: string,
 ): string {
+  if (assignment.role === "manager") return "manager";
   const name = scopeName(assignment, snapshot)?.trim();
   if (name === undefined || name.length === 0) return `${assignment.role} ${bindingId.slice(0, 8)}`;
   return name.length > MAX_LABEL ? `${name.slice(0, MAX_LABEL - 1).trimEnd()}…` : name;

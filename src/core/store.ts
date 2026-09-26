@@ -86,6 +86,7 @@ function validateSnapshot(value: unknown): Result<ScopeSnapshot> {
 }
 
 function ownershipKey(assignment: Assignment): string {
+  if (assignment.role === "manager") return "manager";
   if (assignment.role === "supervisor") return `initiative:${assignment.initiativeId}`;
   if (assignment.role === "parent") return `project:${assignment.projectId}`;
   return `issue:${assignment.issueId}`;
@@ -108,6 +109,13 @@ function parseDesignation(row: JsonRow | null): Result<Designation> {
 }
 
 function assignmentAllowed(snapshot: ScopeSnapshot, assignment: Assignment): Result<true> {
+  if (assignment.role === "manager")
+    return snapshot.source === "linear-export" &&
+      snapshot.initiative === null &&
+      snapshot.projects.length === 0 &&
+      snapshot.decisionRefs.length === 0
+      ? ok(true)
+      : error("scope_violation", "Manager requires an empty scope-free snapshot");
   if (assignment.initiativeId !== (snapshot.initiative?.id ?? null))
     return error("scope_violation", "Initiative is outside the designated snapshot");
   if (assignment.role === "supervisor") return ok(true);
@@ -244,7 +252,16 @@ export function openRegistry(
       return error("digest_mismatch", "Designation does not match the snapshot");
     const membership = assignmentAllowed(validScope.value, input.assignment);
     if (!membership.ok) return membership;
-    if (input.assignment.role !== "supervisor" && !input.designation.create) {
+    if (
+      input.assignment.role === "manager" &&
+      (!input.designation.execute || !input.designation.create || !input.designation.contact)
+    )
+      return error("scope_violation", "Manager designation requires execute, create and contact");
+    if (
+      input.assignment.role !== "supervisor" &&
+      input.assignment.role !== "manager" &&
+      !input.designation.create
+    ) {
       return error("create_denied", "Designation does not permit role creation");
     }
     if (
@@ -282,7 +299,11 @@ export function openRegistry(
         return error("designation_conflict", "Designation ID is immutable");
     }
 
-    if (input.assignment.role !== "supervisor" && input.assignment.ownerBindingId !== null) {
+    if (
+      input.assignment.role !== "supervisor" &&
+      input.assignment.role !== "manager" &&
+      input.assignment.ownerBindingId !== null
+    ) {
       const owner = get(input.assignment.ownerBindingId);
       if (!owner.ok) return error("owner_mismatch", "Owner binding does not exist");
       if (
@@ -292,14 +313,25 @@ export function openRegistry(
       ) {
         return error("owner_unavailable", "Owner is closing or cancelled");
       }
-      const expectedRole = input.assignment.role === "parent" ? "supervisor" : "parent";
+      const managerOwner =
+        input.assignment.role === "parent" && owner.value.assignment.role === "manager";
+      if (managerOwner) {
+        const approval = designationFor(owner.value.designationId);
+        if (!approval.ok) return approval;
+        if (!approval.value.contact || !input.designation.contact)
+          return error("contact_denied", "Both approvals must permit contact");
+        if (!input.designation.execute)
+          return error("execute_denied", "Parent approval must permit execution");
+      }
       if (
-        owner.value.assignment.role !== expectedRole ||
-        owner.value.designationId !== input.designation.id ||
-        owner.value.assignment.initiativeId !== input.assignment.initiativeId ||
-        (input.assignment.role === "child" &&
-          owner.value.assignment.role === "parent" &&
-          owner.value.assignment.projectId !== input.assignment.projectId)
+        !managerOwner &&
+        (owner.value.assignment.role !==
+          (input.assignment.role === "parent" ? "supervisor" : "parent") ||
+          owner.value.designationId !== input.designation.id ||
+          owner.value.assignment.initiativeId !== input.assignment.initiativeId ||
+          (input.assignment.role === "child" &&
+            owner.value.assignment.role === "parent" &&
+            owner.value.assignment.projectId !== input.assignment.projectId))
       ) {
         return error("owner_mismatch", "Owner edge does not match the assignment");
       }
@@ -609,8 +641,25 @@ export function openRegistry(
   }
 
   function managerApproval(parent: Binding, supervisor: Binding): Result<true> {
-    if (parent.assignment.role !== "parent" || supervisor.assignment.role !== "supervisor")
-      return error("owner_mismatch", "Management links require a parent and a supervisor");
+    if (
+      parent.assignment.role !== "parent" ||
+      (supervisor.assignment.role !== "supervisor" && supervisor.assignment.role !== "manager")
+    )
+      return error(
+        "owner_mismatch",
+        "Management links require a parent and a manager or supervisor",
+      );
+    if (supervisor.assignment.role === "manager") {
+      const parentApproval = designationFor(parent.designationId);
+      if (!parentApproval.ok) return parentApproval;
+      const managerDesignation = designationFor(supervisor.designationId);
+      if (!managerDesignation.ok) return managerDesignation;
+      if (!parentApproval.value.contact || !managerDesignation.value.contact)
+        return error("contact_denied", "Both approvals must permit contact");
+      return parentApproval.value.execute
+        ? ok(true)
+        : error("execute_denied", "Parent approval must permit execution");
+    }
     const approval = designationFor(supervisor.designationId);
     if (!approval.ok) return approval;
     const row = scopeByDigest.get(approval.value.snapshotDigest);
@@ -652,7 +701,11 @@ export function openRegistry(
           if (!approval.ok) return approval;
           if (!approval.value.contact)
             return error("contact_denied", "Both approvals must permit contact");
-          if (!approval.value.execute)
+          if (
+            !approval.value.execute &&
+            (binding.assignment.role !== "manager" ||
+              supervisor.value.assignment.role !== "manager")
+          )
             return error("execute_denied", "Both approvals must permit execution");
         }
       }
@@ -747,7 +800,7 @@ export function openRegistry(
 
   function operationalTarget(sender: Binding): Result<Binding> {
     const from = sender.assignment;
-    if (from.role === "supervisor" || from.ownerBindingId === null)
+    if (from.role === "supervisor" || from.role === "manager" || from.ownerBindingId === null)
       return error("no_owner", "No linked owner; operational notice is for the user");
     if (
       sender.contactState !== "active" ||
@@ -837,7 +890,8 @@ export function openRegistry(
         failure,
         binding: sender.value,
         ownerBindingId:
-          sender.value.assignment.role === "supervisor"
+          sender.value.assignment.role === "supervisor" ||
+          sender.value.assignment.role === "manager"
             ? null
             : sender.value.assignment.ownerBindingId,
         localReason: target.ok ? null : `${target.error.code}: ${target.error.message}`,
@@ -901,7 +955,25 @@ export function openRegistry(
       return error("contact_paused", "A route endpoint is not accepting contact");
     const from = sender.value.assignment;
     const to = target.value.assignment;
+    if (from.role === "child" && to.role === "manager")
+      return error("route_denied", "Children cannot address the manager directly");
     const managerRoute =
+      (envelope.kind === "question" &&
+        from.role === "parent" &&
+        to.role === "manager" &&
+        from.ownerBindingId === target.value.id) ||
+      (envelope.kind === "answer" &&
+        from.role === "manager" &&
+        to.role === "parent" &&
+        to.ownerBindingId === sender.value.id) ||
+      (envelope.kind === "instruction" &&
+        from.role === "manager" &&
+        to.role === "parent" &&
+        to.ownerBindingId === sender.value.id) ||
+      (envelope.kind === "report" &&
+        from.role === "parent" &&
+        to.role === "manager" &&
+        from.ownerBindingId === target.value.id) ||
       (envelope.kind === "question" &&
         from.role === "parent" &&
         to.role === "supervisor" &&
@@ -946,7 +1018,7 @@ export function openRegistry(
       return error("execute_denied", "Target designation does not permit execution");
     if (managerRoute) {
       const membership =
-        from.role === "supervisor"
+        from.role === "supervisor" || from.role === "manager"
           ? managerApproval(target.value, sender.value)
           : managerApproval(sender.value, target.value);
       if (!membership.ok) return membership;
@@ -960,7 +1032,7 @@ export function openRegistry(
 
     const instruction =
       envelope.kind === "instruction" &&
-      ((from.role === "supervisor" &&
+      (((from.role === "supervisor" || from.role === "manager") &&
         to.role === "parent" &&
         to.ownerBindingId === sender.value.id) ||
         (from.role === "parent" && to.role === "child" && to.ownerBindingId === sender.value.id));
@@ -968,7 +1040,7 @@ export function openRegistry(
       envelope.kind === "report" &&
       ((from.role === "child" && to.role === "parent" && from.ownerBindingId === target.value.id) ||
         (from.role === "parent" &&
-          to.role === "supervisor" &&
+          (to.role === "supervisor" || to.role === "manager") &&
           from.ownerBindingId === target.value.id));
     const coordination =
       envelope.kind === "coordination" &&
@@ -981,12 +1053,12 @@ export function openRegistry(
       envelope.kind === "question" &&
       ((from.role === "child" && to.role === "parent" && from.ownerBindingId === target.value.id) ||
         (from.role === "parent" &&
-          to.role === "supervisor" &&
+          (to.role === "supervisor" || to.role === "manager") &&
           from.ownerBindingId === target.value.id));
     const answer =
       envelope.kind === "answer" &&
       ((from.role === "parent" && to.role === "child" && to.ownerBindingId === sender.value.id) ||
-        (from.role === "supervisor" &&
+        ((from.role === "supervisor" || from.role === "manager") &&
           to.role === "parent" &&
           to.ownerBindingId === sender.value.id));
     if (!instruction && !report && !coordination && !question && !answer)

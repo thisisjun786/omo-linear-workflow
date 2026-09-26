@@ -35,6 +35,7 @@ export interface Designation {
   readonly contact: boolean;
 }
 export type Assignment =
+  | { readonly role: "manager" }
   | { readonly role: "supervisor"; readonly initiativeId: string }
   | {
       readonly role: "parent";

@@ -102,6 +102,7 @@ function activate(registry: ReturnType<typeof openRegistry>, binding: Binding): 
   value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
   value(registry.observeSession(binding.id, `/sessions/${binding.id}.jsonl`));
   const roles = {
+    manager: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" },
     supervisor: modelForRole("supervisor"),
     parent: modelForRole("parent"),
     child: modelForRole("child"),

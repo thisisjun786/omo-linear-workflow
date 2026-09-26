@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 import type { Assignment, Binding, ChildStage, DeliveryRecord, RuntimeIdentity } from "./contracts";
 
@@ -21,7 +23,45 @@ export interface RoleModel {
   readonly thinking: "medium" | "high" | "max" | "xhigh";
 }
 
-export function modelForLaunch(role: Assignment["role"], stage: ChildStage | null): RoleModel {
+const managerSettingsSchema = z.object({
+  defaultProvider: z.string().min(1),
+  defaultModel: z.string().min(1),
+  defaultThinkingLevel: z.enum(["medium", "high", "max", "xhigh"]),
+});
+
+export function modelForLaunch(
+  role: Assignment["role"],
+  stage: ChildStage | null,
+  settingsPath = join(homedir(), ".omo/agent/settings.json"),
+): RoleModel {
+  if (role === "manager") {
+    const fallback: RoleModel = {
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
+      thinking: "medium",
+    };
+    let settingsText: string;
+    try {
+      settingsText = readFileSync(settingsPath, "utf8");
+    } catch {
+      return fallback;
+    }
+    let settingsValue: unknown;
+    try {
+      settingsValue = JSON.parse(settingsText);
+    } catch (cause) {
+      if (!(cause instanceof SyntaxError)) throw cause;
+      return fallback;
+    }
+    const settings = managerSettingsSchema.safeParse(settingsValue);
+    return settings.success
+      ? {
+          provider: settings.data.defaultProvider,
+          modelId: settings.data.defaultModel,
+          thinking: settings.data.defaultThinkingLevel,
+        }
+      : fallback;
+  }
   if (role === "supervisor")
     return { provider: "opencodex", modelId: "gpt-6-astra", thinking: "high" };
   if (role === "parent")
@@ -80,6 +120,12 @@ export function modelForBinding(binding: Binding): RoleModel {
 }
 
 export function matchesRuntime(binding: Binding, identity: RuntimeIdentity): boolean {
+  if (binding.assignment.role === "manager")
+    return (
+      identity.durableSessionId === binding.durableSessionId &&
+      identity.sessionPath === binding.sessionPath &&
+      identity.cwd === binding.cwd
+    );
   const expected = modelForBinding(binding);
   return (
     identity.durableSessionId === binding.durableSessionId &&

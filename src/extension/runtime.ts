@@ -176,7 +176,8 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   port.onSessionStart(async (ctx) => {
     if (config.hostRuntime) {
       const binding = await lookup(ctx.sessionManager.getSessionId());
-      if (binding.ok) ctx.disableModelFallbackForSession();
+      if (binding.ok && binding.value.assignment.role !== "manager")
+        ctx.disableModelFallbackForSession();
     }
     currentContext = ctx;
     sessionStarted.resolve();

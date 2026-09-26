@@ -229,6 +229,77 @@ test("owner routes, accepted question prerequisite, replay and conflicting answe
     ).toMatchObject({ ok: true });
   }));
 
+test("manager-linked parent asks and receives an answer; child cannot ask manager", async () =>
+  fixture((r, { parent, child }, digest) => {
+    const snapshot: ScopeSnapshot = {
+      version: 1,
+      source: "linear-export",
+      initiative: null,
+      projects: [],
+      decisionRefs: [],
+    };
+    const managerDigest = value(r.importScope(snapshot)).digest;
+    const manager = value(
+      r.reserve({
+        bindingId: "manager",
+        durableSessionId: "session-manager",
+        designation: {
+          id: "manager-designation",
+          snapshotDigest: managerDigest,
+          designatedBy: "user",
+          designatedAt: "today",
+          execute: true,
+          create: true,
+          contact: true,
+        },
+        snapshot,
+        assignment: { role: "manager" },
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/herdr",
+        omoSocket: "/omo",
+      }),
+    );
+    value(r.provision(manager.id, "workspace-manager", "pane-manager"));
+    value(r.observeSession(manager.id, "/sessions/manager"));
+    value(
+      r.activate(manager.id, {
+        durableSessionId: manager.durableSessionId,
+        sessionPath: "/sessions/manager",
+        cwd: "/repo",
+        provider: "opencodex",
+        modelId: "anthropic/claude-opus-5-5",
+        thinking: "medium",
+        extensionProtocol: 2,
+      }),
+    );
+    value(r.beginInitialization(manager.id, "brief"));
+    value(r.finishInitialization(manager.id, "accepted"));
+    value(r.setOwner(parent.id, manager.id));
+    const q = question(parent, manager, digest);
+    expect(value(r.claim(parent.durableSessionId, q)).target?.id).toBe(manager.id);
+    value(r.finish(q.id, receipt(manager)));
+    const a = {
+      ...answer(manager, parent, q, managerDigest),
+      designationId: manager.designationId,
+    };
+    expect(value(r.claim(manager.durableSessionId, a)).target?.id).toBe(parent.id);
+    value(r.finish(a.id, receipt(parent)));
+    expect(r.claim(child.durableSessionId, question(child, manager, digest))).toMatchObject({
+      ok: false,
+      error: { code: "route_denied" },
+    });
+    value(r.setContactState(manager.id, "paused"));
+    expect(
+      value(
+        r.post(parent.durableSessionId, {
+          ...question(parent, null, digest),
+          id: `question:${parent.id}:paused`,
+        }),
+      ).state,
+    ).toBe("posted");
+  }));
+
 test("role-valid answers cannot use another recipient's accepted question", async () =>
   fixture((r, { supervisor, parent, child }, digest, _path, make) => {
     const otherChild = make("child-b", {

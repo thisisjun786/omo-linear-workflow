@@ -20,6 +20,7 @@ export const designationSchema = z.strictObject({
   contact: z.boolean(),
 });
 export const assignmentSchema = z.discriminatedUnion("role", [
+  z.strictObject({ role: z.literal("manager") }),
   z.strictObject({ role: z.literal("supervisor"), initiativeId: text }),
   z.strictObject({
     role: z.literal("parent"),

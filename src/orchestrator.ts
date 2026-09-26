@@ -543,8 +543,8 @@ export class Orchestrator {
     if (!sender.ok) return sender;
     const host = await this.#checkHostProtocol(sender.value);
     if (host !== undefined) return host;
-    if (sender.value.assignment.role === "supervisor")
-      return failure("route_denied", "Supervisor has no owner to report to");
+    if (sender.value.assignment.role === "supervisor" || sender.value.assignment.role === "manager")
+      return failure("route_denied", "Management role has no owner to report to");
     const context = await this.#context(sender.value);
     if (!context.ok) return context;
     if (input.toUser && sender.value.assignment.role !== "parent")
@@ -663,9 +663,11 @@ export class Orchestrator {
       return ok(
         listed.value.filter(
           ({ assignment }) =>
-            (scope.initiativeId === undefined || assignment.initiativeId === scope.initiativeId) &&
+            (scope.initiativeId === undefined ||
+              (assignment.role !== "manager" && assignment.initiativeId === scope.initiativeId)) &&
             (scope.projectId === undefined ||
-              (assignment.role !== "supervisor" && assignment.projectId === scope.projectId)),
+              ((assignment.role === "parent" || assignment.role === "child") &&
+                assignment.projectId === scope.projectId)),
         ),
       );
     });
@@ -1031,8 +1033,9 @@ export class Orchestrator {
           `${model.provider}/${model.modelId}`,
           "--thinking",
           model.thinking,
-          "--no-model-fallback",
-          "--no-recommended-models",
+          ...(assignment.role === "manager"
+            ? []
+            : ["--no-model-fallback", "--no-recommended-models"]),
         ],
         { PATH: managedPath, ...runtimeCacheEnvironment(this.#root) },
       );
@@ -1097,7 +1100,7 @@ export class Orchestrator {
     let session: NativeSession | undefined;
     try {
       session = await this.#deps.attachBinding(binding);
-      await session.configure(modelForBinding(binding));
+      if (binding.assignment.role !== "manager") await session.configure(modelForBinding(binding));
       const identity = await session.describe();
       if (!identity.ok) return identity;
       if (
@@ -1173,6 +1176,7 @@ export class Orchestrator {
       if (claim.value.disposition === "in_progress") {
         if (
           binding.assignment.role === "supervisor" ||
+          binding.assignment.role === "manager" ||
           binding.assignment.ownerBindingId === null
         ) {
           const session = await this.#deps.attachBinding(binding);
@@ -1194,7 +1198,11 @@ export class Orchestrator {
         }
         return this.#finishInitialization(binding.id, "uncertain");
       }
-      if (binding.assignment.role === "supervisor" || binding.assignment.ownerBindingId === null) {
+      if (
+        binding.assignment.role === "supervisor" ||
+        binding.assignment.role === "manager" ||
+        binding.assignment.ownerBindingId === null
+      ) {
         await this.#deps.prompt(binding, text);
         return this.#finishInitialization(binding.id, "accepted");
       }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { z } from "zod";
-import type { NativeReceipt } from "../src/core/contracts";
+import type { Binding, NativeReceipt, ScopeSnapshot } from "../src/core/contracts";
 import { modelForRole } from "../src/core/policy";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
@@ -292,6 +292,187 @@ describe("native delivery extension", () => {
       const unknown = context({ ...parent, durableSessionId: "unbound-session" });
       expect(await bound.guard()("thread_create", {}, unknown)).toBeUndefined();
       expect(await bound.guard()("thread_send", {}, unknown)).toBeUndefined();
+    });
+  });
+
+  test("routes bound role questions with stable IDs, replay and actual delivery outcomes", async () => {
+    await fixture(async ({ root, child, parent }) => {
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(child));
+      const questions = {
+        questions: [
+          {
+            id: "choice",
+            question: "Choose?",
+            options: [{ label: "Yes", description: "Proceed" }],
+            multiSelect: false,
+          },
+        ],
+      };
+      for (const name of ["request_user_input", "ask_user_question"]) {
+        expect(await harness.guard()(name, questions, context(child))).toEqual({
+          block: true,
+          reason: "OLW role: use olw_ask with the same questions; the answer arrives as a delivery",
+        });
+        expect(await harness.guard()(name, questions, context(parent))).toMatchObject({
+          block: true,
+        });
+      }
+      expect(harness.tools.has("olw_ask")).toBe(true);
+      harness.receipt = {
+        kind: "ok",
+        thread_id: parent.durableSessionId,
+        message_seq: 1,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "turn" },
+      };
+      const first = await harness.callTool("olw_ask", "call-1", questions);
+      expect(first).toMatchObject({
+        state: "accepted",
+        disposition: "new",
+        id: `question:${child.id}:call-1`,
+        instruction: "end your turn; the answer arrives as a message",
+      });
+      expect(await harness.callTool("olw_ask", "call-1", questions)).toMatchObject({
+        state: "accepted",
+        disposition: "replay",
+      });
+      expect(harness.executeCount).toBe(1);
+      harness.receipt = {
+        kind: "error",
+        error: { code: "recipient_closed", message: "closed", next_action: "inspect" },
+      };
+      expect(await harness.callTool("olw_ask", "call-2", questions)).toMatchObject({
+        state: "rejected",
+        id: `question:${child.id}:call-2`,
+      });
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        value(registry.setContactState(parent.id, "paused"));
+      } finally {
+        registry.close();
+      }
+      expect(await harness.callTool("olw_ask", "call-3", questions)).toMatchObject({
+        ok: false,
+        error: { code: "contact_paused" },
+      });
+    });
+  });
+
+  test("posts parent questions without a ready owner; manager and unbound sessions are untouched", async () => {
+    await fixture(async ({ root, parent, supervisor }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        value(registry.beginClose(supervisor.id));
+        value(registry.finishClose(supervisor.id));
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const questions = {
+        questions: [
+          { id: "q", question: "Decision?", options: [{ label: "Yes" }], multiSelect: false },
+        ],
+      };
+      expect(await harness.callTool("olw_ask", "parent-call", questions)).toMatchObject({
+        state: "posted",
+        id: `question:${parent.id}:parent-call`,
+      });
+      expect(harness.executeCount).toBe(0);
+      expect(await harness.callTool("olw_ask", "parent-call", questions)).toMatchObject({
+        state: "posted",
+        disposition: "replay",
+      });
+      const unbound = context({ ...parent, durableSessionId: "unbound" });
+      for (const name of ["request_user_input", "ask_user_question"])
+        expect(await harness.guard()(name, {}, unbound)).toBeUndefined();
+    });
+  });
+
+  test("posts standalone parent's question to the user inbox", async () => {
+    await fixture(async ({ root, parent }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        value(registry.setOwner(parent.id, null));
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const result = await harness.callTool("olw_ask", "standalone-call", {
+        questions: [
+          { id: "q", question: "Which way?", options: [{ label: "Yes" }], multiSelect: false },
+        ],
+      });
+      expect(result).toMatchObject({
+        state: "posted",
+        id: `question:${parent.id}:standalone-call`,
+      });
+      expect(harness.executeCount).toBe(0);
+      const inbox = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        expect(value(inbox.postedQuestions({}))).toMatchObject([
+          {
+            record: {
+              state: "posted",
+              envelope: { id: `question:${parent.id}:standalone-call`, toBindingId: null },
+            },
+            answered: false,
+          },
+        ]);
+      } finally {
+        inbox.close();
+      }
+    });
+  });
+
+  test("manager does not intercept native asks or register olw_ask", async () => {
+    await fixture(async ({ root }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      let manager: Binding;
+      try {
+        const snapshot: ScopeSnapshot = {
+          version: 1,
+          source: "linear-export",
+          initiative: null,
+          projects: [],
+          decisionRefs: [],
+        };
+        const digest = value(registry.importScope(snapshot)).digest;
+        manager = value(
+          registry.reserve({
+            bindingId: "manager",
+            durableSessionId: "session-manager",
+            designation: {
+              id: "manager-designation",
+              snapshotDigest: digest,
+              designatedBy: "test",
+              designatedAt: "today",
+              execute: true,
+              create: true,
+              contact: true,
+            },
+            snapshot,
+            assignment: { role: "manager" },
+            cwd: "/repo/manager",
+            checkout: null,
+            herdrSocket: join(root, "herdr.sock"),
+            omoSocket: join(root, "omo.sock"),
+          }),
+        );
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      for (const name of ["request_user_input", "ask_user_question"])
+        expect(await harness.guard()(name, {}, context(manager))).toBeUndefined();
+      await harness.start()(context(manager));
+      expect(harness.tools.has("olw_ask")).toBe(false);
     });
   });
 

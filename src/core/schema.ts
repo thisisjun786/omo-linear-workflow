@@ -263,6 +263,30 @@ const claimRequestSchema = z.strictObject({
     envelope: z.union([envelopeSchema, runtimeFailureClaimSchema]),
   }),
 });
+const bindingRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("lookup-binding"),
+  input: z.strictObject({ bindingId: text }),
+});
+const designationRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("lookup-designation"),
+  input: z.strictObject({ designationId: text }),
+});
+const deliveryRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("lookup-delivery"),
+  input: z.strictObject({ messageId: text }),
+});
+const postRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("post"),
+  input: z.strictObject({ senderSessionId: text, envelope: envelopeSchema }),
+});
 const finishRequestSchema = z.strictObject({
   version: z.literal(1),
   dbPath: text,
@@ -287,8 +311,12 @@ const releaseUserAnswerRequestSchema = z.strictObject({
 });
 export const workerRequestSchema = z.union([
   lookupRequestSchema,
+  bindingRequestSchema,
+  designationRequestSchema,
   routeRequestSchema,
   claimRequestSchema,
+  postRequestSchema,
+  deliveryRequestSchema,
   finishRequestSchema,
   uncertainRequestSchema,
   releaseUserAnswerRequestSchema,

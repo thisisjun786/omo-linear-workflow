@@ -144,6 +144,12 @@ export class Harness implements RuntimePort {
       ) => Promise<{ readonly block: boolean; readonly reason?: string } | undefined>)
     | undefined;
   readonly handlers = new Map<string, (data: unknown) => Promise<unknown>>();
+  readonly tools = new Map<
+    string,
+    {
+      execute: (toolCallId: string, params: unknown, ctx: SessionContextPort) => Promise<unknown>;
+    }
+  >();
   readonly activated: string[][] = [];
   readonly execCalls: Array<{
     readonly command: string;
@@ -182,6 +188,20 @@ export class Harness implements RuntimePort {
   }
   handleRpc(name: string, handler: (data: unknown) => Promise<unknown>): void {
     this.handlers.set(name, handler);
+  }
+  registerTool(tool: {
+    name: string;
+    execute: (toolCallId: string, params: unknown, ctx: SessionContextPort) => Promise<unknown>;
+  }): void {
+    this.tools.set(tool.name, tool);
+  }
+  callTool(name: string, toolCallId: string, params: unknown): Promise<unknown> {
+    const tool = this.tools.get(name);
+    if (tool === undefined || this.currentContext === undefined)
+      throw new Error(`Missing tool ${name}`);
+    return tool
+      .execute(toolCallId, params, this.currentContext)
+      .then((result) => z.object({ details: z.unknown() }).parse(result).details);
   }
   async exec(command: string, args: readonly string[], options?: { readonly timeout: number }) {
     this.execCalls.push({ command, args: [...args], options });

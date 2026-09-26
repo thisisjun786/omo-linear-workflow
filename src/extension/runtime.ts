@@ -1,10 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { Type } from "typebox";
 import { z } from "zod";
 import type {
   ClaimResult,
   DeliveryRecord,
+  Designation,
   Envelope,
   Result,
   RuntimeIdentity,
@@ -13,8 +15,10 @@ import {
   bindingSchema,
   claimResultSchema,
   deliveryRecordSchema,
+  designationSchema,
   envelopeSchema,
   nativeReceiptSchema,
+  questionPayloadSchema,
   resultSchema,
   workerRequestSchema,
 } from "../core/schema";
@@ -51,6 +55,20 @@ export interface RuntimePort {
     ) => Promise<{ readonly block: boolean; readonly reason?: string } | undefined>,
   ): void;
   handleRpc(name: string, handler: (data: unknown) => Promise<unknown>): void;
+  registerTool(tool: {
+    name: string;
+    label: string;
+    description: string;
+    parameters: typeof askParameters;
+    execute: (
+      toolCallId: string,
+      params: unknown,
+      ctx: SessionContextPort,
+    ) => Promise<{
+      content: { type: "text"; text: string }[];
+      details: unknown;
+    }>;
+  }): void;
   exec(
     command: string,
     args: readonly string[],
@@ -73,8 +91,12 @@ export interface RuntimeConfig {
 
 type WorkerAction =
   | "lookup-session"
+  | "lookup-binding"
+  | "lookup-designation"
+  | "lookup-delivery"
   | "authorize"
   | "claim"
+  | "post"
   | "finish"
   | "uncertain"
   | "release-user-answer";
@@ -86,6 +108,22 @@ const nativeSendInputSchema = z.strictObject({
   all_scope: z.literal(true),
   idempotency_key: z.string().min(1),
 });
+
+const askParameters = Type.Object({
+  questions: Type.Array(
+    Type.Object({
+      id: Type.String(),
+      question: Type.String(),
+      options: Type.Array(
+        Type.Object({ label: Type.String(), description: Type.Optional(Type.String()) }),
+      ),
+      multiSelect: Type.Boolean(),
+    }),
+    { minItems: 1 },
+  ),
+});
+const askInputSchema = questionPayloadSchema.shape.questions.min(1);
+const askInstruction = "end your turn; the answer arrives as a message";
 
 function failure<T>(code: string, message: string, details?: unknown): Result<T> {
   return details === undefined
@@ -176,22 +214,47 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     );
   }
 
+  let askRegistered = false;
   port.onResourcesDiscover(() => ({
     skillPaths: ["define", "plan", "run", "check"].map((name) => join(config.root, "skills", name)),
   }));
 
   port.onSessionStart(async (ctx) => {
-    if (config.hostRuntime) {
-      const binding = await lookup(ctx.sessionManager.getSessionId());
-      if (binding.ok && binding.value.assignment.role !== "manager")
-        ctx.disableModelFallbackForSession();
+    const binding = await lookup(ctx.sessionManager.getSessionId());
+    if (binding.ok && binding.value.assignment.role !== "manager" && config.hostRuntime)
+      ctx.disableModelFallbackForSession();
+    if (
+      binding.ok &&
+      (binding.value.assignment.role === "child" || binding.value.assignment.role === "parent") &&
+      !askRegistered
+    ) {
+      port.registerTool({
+        name: "olw_ask",
+        label: "Ask OLW owner",
+        description:
+          "Route questions to the OLW owner or user inbox. End your turn; the answer arrives as a message.",
+        parameters: askParameters,
+        execute: async (toolCallId, params, toolCtx) => {
+          const result = await ask(toolCallId, params, toolCtx);
+          const details = result.ok
+            ? {
+                ok: true,
+                id: result.value.record.envelope.id,
+                state: result.value.record.state,
+                disposition: result.value.disposition,
+                instruction: askInstruction,
+              }
+            : result;
+          return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+        },
+      });
+      askRegistered = true;
     }
     currentContext = ctx;
     sessionStarted.resolve();
     if (config.hostRuntime || ctx.mode !== "tui") return;
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (sessionPath === undefined) return;
-    const binding = await lookup(ctx.sessionManager.getSessionId());
     if (!binding.ok || binding.value.paneId === null) return;
     await publishReadiness(config.root, {
       bindingId: binding.value.id,
@@ -223,19 +286,106 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     return { ok: true, value: identity };
   });
 
+  async function ask(
+    toolCallId: string,
+    params: unknown,
+    ctx: SessionContextPort,
+  ): Promise<Result<{ record: DeliveryRecord; disposition: "new" | "replay" }>> {
+    const questions = z.strictObject({ questions: askInputSchema }).safeParse(params);
+    if (!questions.success)
+      return failure("invalid_question", "Questions are invalid", questions.error.issues);
+    const sender = await lookup(ctx.sessionManager.getSessionId());
+    if (!sender.ok) return sender;
+    if (sender.value.assignment.role !== "child" && sender.value.assignment.role !== "parent")
+      return failure("route_denied", "Only children and parents ask questions");
+    const messageId = `question:${sender.value.id}:${toolCallId}`;
+    const existing = await worker(
+      "lookup-delivery",
+      { messageId },
+      resultSchema(deliveryRecordSchema),
+    );
+    if (!existing.ok && existing.error.code !== "not_found") return existing;
+    const ownerId = sender.value.assignment.ownerBindingId;
+    const owner =
+      ownerId === null
+        ? null
+        : await worker("lookup-binding", { bindingId: ownerId }, resultSchema(bindingSchema));
+    if (owner !== null && !owner.ok && owner.error.code !== "not_found") return owner;
+    const targetId = existing.ok
+      ? existing.value.envelope.toBindingId
+      : owner?.ok && owner.value.launchState === "ready"
+        ? owner.value.id
+        : null;
+    if (targetId === null && sender.value.assignment.role === "child")
+      return failure("not_ready", "Child's parent is not ready");
+    const designation = await worker<Designation>(
+      "lookup-designation",
+      { designationId: sender.value.designationId },
+      resultSchema(designationSchema),
+    );
+    if (!designation.ok) return designation;
+    const envelope: Envelope = {
+      version: 1,
+      id: messageId,
+      fromBindingId: sender.value.id,
+      toBindingId: targetId,
+      designationId: sender.value.designationId,
+      snapshotDigest: designation.value.snapshotDigest,
+      kind: "question",
+      text: questions.data.questions.map((question) => question.question).join("\n"),
+      outcome: null,
+      evidence: [],
+      question: { questions: questions.data.questions, escalates: null },
+    };
+    if (
+      existing.ok &&
+      JSON.stringify(existing.value.envelope) !== JSON.stringify(envelopeSchema.parse(envelope))
+    )
+      return failure("message_conflict", "Message ID is bound to a different immutable payload");
+    if (targetId === null) {
+      if (existing.ok)
+        return { ok: true, value: { record: existing.value, disposition: "replay" } };
+      const posted = await worker(
+        "post",
+        { senderSessionId: ctx.sessionManager.getSessionId(), envelope },
+        resultSchema(deliveryRecordSchema),
+      );
+      return posted.ok
+        ? {
+            ok: true,
+            value: {
+              record: posted.value,
+              disposition: "new",
+            },
+          }
+        : posted;
+    }
+    const claimed = await claimAndDeliver(envelope, ctx);
+    return claimed.ok ? { ok: true, value: claimed.value } : claimed;
+  }
+
   port.handleRpc("omo.initiative.send", async (data) => {
     const ctx = await contextWhenStarted();
     if (ctx === undefined) return failure("session_unavailable", "Session has not started");
     const envelope = envelopeSchema.safeParse(data);
     if (!envelope.success)
       return failure("invalid_envelope", "Envelope is invalid", envelope.error.issues);
+    const result = await claimAndDeliver(envelope.data, ctx);
+    return result.ok ? { ok: true, value: result.value.record } : result;
+  });
+
+  async function claimAndDeliver(
+    envelope: Envelope,
+    ctx: SessionContextPort,
+  ): Promise<Result<{ record: DeliveryRecord; disposition: "new" | "replay" }>> {
     const claim = await worker(
       "claim",
-      { senderSessionId: ctx.sessionManager.getSessionId(), envelope: envelope.data },
+      { senderSessionId: ctx.sessionManager.getSessionId(), envelope },
       resultSchema(claimResultSchema),
     );
     if (!claim.ok) return claim;
-    if (claim.value.disposition === "replay") return { ok: true, value: claim.value.record };
+    if (claim.value.disposition === "replay")
+      return { ok: true, value: { record: claim.value.record, disposition: "replay" } };
     if (claim.value.disposition === "in_progress") {
       return failure(
         "delivery_in_progress",
@@ -244,8 +394,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       );
     }
 
-    return deliver(claim.value, ctx, false);
-  });
+    const delivered = await deliver(claim.value, ctx, false);
+    return delivered.ok
+      ? { ok: true, value: { record: delivered.value, disposition: "new" } }
+      : delivered;
+  }
 
   port.handleRpc("omo.initiative.deliver-user-answer", async (data) => {
     const ctx = await contextWhenStarted();
@@ -354,10 +507,25 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
   });
 
   port.onToolCall(async (toolName, input, ctx) => {
-    if (toolName !== "thread_create" && toolName !== "thread_send") return undefined;
+    if (
+      toolName !== "thread_create" &&
+      toolName !== "thread_send" &&
+      toolName !== "ask_user_question" &&
+      toolName !== "request_user_input"
+    )
+      return undefined;
     const sender = await lookup(ctx.sessionManager.getSessionId());
     if (!sender.ok && sender.error.code === "not_found") return undefined;
     if (!sender.ok) return { block: true, reason: sender.error.message };
+    if (toolName === "ask_user_question" || toolName === "request_user_input") {
+      return sender.value.assignment.role === "child" || sender.value.assignment.role === "parent"
+        ? {
+            block: true,
+            reason:
+              "OLW role: use olw_ask with the same questions; the answer arrives as a delivery",
+          }
+        : undefined;
+    }
     if (toolName === "thread_create") {
       return { block: true, reason: "Bound initiative roles cannot create native threads" };
     }

@@ -29,6 +29,13 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
     handleRpc(name, handler): void {
       pi.rpc.handle(name, handler);
     },
+    registerTool(tool): void {
+      pi.registerTool({
+        ...tool,
+        execute: (toolCallId, params, _signal, _onUpdate, ctx) =>
+          tool.execute(toolCallId, params, contextPort(ctx)),
+      });
+    },
     exec(command, args, options) {
       return pi.exec(command, [...args], options);
     },

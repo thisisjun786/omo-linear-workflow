@@ -187,6 +187,7 @@ class Harness implements RuntimePort {
   handleRpc(name: string, handler: (data: unknown) => Promise<unknown>) {
     this.handlers.set(name, handler);
   }
+  registerTool(_tool: Parameters<RuntimePort["registerTool"]>[0]) {}
   getActiveTools() {
     return ["read"];
   }

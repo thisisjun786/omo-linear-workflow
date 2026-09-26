@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -11,8 +11,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+  # Push runs are release evidence for their exact commit: a group of their own, never cancelled.
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate:
@@ -21,6 +22,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Reject pull requests into main
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          echo '::error::Pull requests must target dev; releases alone advance main.'
+          exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false

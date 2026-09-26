@@ -32,20 +32,21 @@ Breaking changes in a `0.x` minor get a `### Migration` subsection that tells an
 
 ## Cutting a release (owner)
 
-None of these steps run on their own, and none should be skipped because "it's just a patch".
+None of these steps should be skipped because "it's just a patch".
 
 1. Decide the version using the rules above. On a branch from `dev`, update `package.json` `version`, move the `## [Unreleased]` notes into `## [VERSION]`, add the `Released:` line, and write the migration subsection if anything breaks. Leave an empty `## [Unreleased]` behind.
 2. Check both READMEs still describe the code being released.
 3. Run `bun run release:check`, `bun test`, `bun run typecheck`, `bun run lint` and `bun run build` locally, plus the isolated QA scripts that cover what changed since the last release. Fix whatever they report.
 4. Commit as a Conventional Commit, for example `chore(release): v0.2.0`, open a PR into `dev`, and merge it with a merge commit under the [PR policy](pull-requests.md).
-5. Record the exact merge commit SHA on `dev`. That SHA is the release source; its PR CI run must be green. Tag it: `git tag -a v0.2.0 -m "v0.2.0" <sha>` and push the tag.
-6. Pushing a `v*` tag runs the [release workflow](../../.github/workflows/release.yml). It reruns the full [CI job](ci.md), including the native Herdr build, verifies that the tag matches `package.json` and the changelog, then creates a source-only GitHub release from the changelog section. Tags containing `-rc.` are marked prerelease.
-7. Advance `main` to the same SHA with a fast-forward only: `git push origin <sha>:refs/heads/main`. The push must be a fast-forward from the current `main`; if it isn't, stop and inspect rather than force. Until the release workflow performs this step itself, the owner does it by hand right after the release is published.
-8. Watch the workflow. Retry a transient infrastructure failure at the same immutable tag. If a source fix is needed, merge it into `dev` and prepare a new version and tag instead of moving the failed tag. Never move a published tag.
+5. Wait for the `CI` push run on the exact `dev` merge commit to pass. Record its full 40-character SHA.
+6. For `v0.2.0`, the first release after this workflow change, create the annotated tag at that SHA and push it as the repository owner: `git tag -a v0.2.0 -m "v0.2.0" <sha>` then `git push origin v0.2.0`. This bootstrap is necessary because GitHub only exposes `workflow_dispatch` for workflows already present on the default branch, while `main` still has the old tag-triggered workflow. The tag event derives the SHA and version from the immutable tag, then runs the same ancestry, exact-SHA CI, version, changelog, publication, and fast-forward path as dispatch.
+7. For later releases, use GitHub's Actions UI to dispatch the [release workflow](../../.github/workflows/release.yml) as the repository owner. Enter the SHA and version without the `v` prefix. Leave `dry_run` enabled first; review the successful validation, then dispatch the same SHA and version with `dry_run` disabled.
+8. The publication path revalidates that the SHA belongs to `dev`, can fast-forward `main`, has a successful exact-SHA `CI` push run, matches `package.json`, has matching changelog notes, and does not conflict with an existing tag. It then uses the dedicated `RELEASE_TOKEN` to create an annotated `vVERSION` tag when needed, create a source-only GitHub release, mark `-rc.N` versions as prereleases, and fast-forward `main`. It never force-pushes or moves an existing tag; an existing tag is accepted only when it resolves to the same commit.
+9. Watch the workflow. Retry a transient infrastructure failure with the same SHA and version. If a source fix is needed, merge it into `dev` and prepare a new version instead of moving the failed tag. Never move a published tag.
 
-Nothing is published to npm. The release workflow doesn't attach binaries and doesn't sign anything.
+Nothing is published to npm. The release workflow doesn't attach binaries and doesn't sign anything. Dispatch dry runs use only the read-only `GITHUB_TOKEN`; publication, including the bootstrap tag path, requires the `RELEASE_TOKEN` repository secret backed by a fine-grained token with repository permissions **Contents: Read and write**, **Workflows: Read and write**, and **Actions: Read-only**.
 
-Only the owner tags releases and advances `main`. An agent may prepare the release PR when asked, but tagging, publishing and moving `main` need the owner's explicit go-ahead each time.
+Only the repository owner can trigger a release, either by pushing the one-time bootstrap tag or dispatching the workflow. An agent may prepare the release PR when asked, but the owner's tag push or non-dry-run dispatch is the explicit authorization to publish and advance `main`.
 
 ## Recovery
 

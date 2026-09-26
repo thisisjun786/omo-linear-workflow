@@ -35,6 +35,10 @@ published.
 
 ### Changed
 
+- CI now records exact-commit results for every `dev` merge and rejects pull requests into
+  `main`. Owner-authorized releases validate that evidence, publish an immutable source tag and
+  GitHub release, then fast-forward `main` with dedicated release credentials. The first release
+  after adopting the workflow is bootstrapped by an owner-pushed tag; later releases use dispatch.
 - Repository policies follow `docs/policy/`: PRs target `dev` and merge with a merge
   commit, `main` only advances to released commits, and issue and PR text is in
   English. Issue forms are now `bug` and `proposal`.
@@ -119,4 +123,5 @@ Initial source release of OMO Linear Workflow (OLW).
 - Linux x64 is the only supported installer target.
 - Live Linear OAuth and real Linear writes have not been exercised.
 - The OLW orchestration runtime does not automatically merge work or mutate Linear.
-  GitHub source releases require a maintainer to push a version tag.
+  GitHub source releases require repository-owner authorization through the documented workflow;
+  only the one-time `v0.2.0` bootstrap starts from an owner-pushed version tag.

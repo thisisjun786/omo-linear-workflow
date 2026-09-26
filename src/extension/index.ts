@@ -1,10 +1,39 @@
 import type { ExtensionAPI, ExtensionContext } from "@code-yeongyu/senpi";
+import { waitForAnswerIdle } from "./answer-idle";
+import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
 
 export default function initiativeExtension(pi: ExtensionAPI): void {
   const port: RuntimePort = {
     onSessionStart(handler): void {
       pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
+    },
+    onMessageStart(handler): void {
+      pi.on("message_start", (event, ctx) => handler(event.message, contextPort(ctx)));
+    },
+    emitQuestionWait(active, ids): void {
+      pi.events.emit("continuation_hold_state", { source: "olw-question", active });
+      pi.events.emit("wake_source_state", {
+        source: "olw-question",
+        activeCount: ids.length,
+        items: ids.map((id) => ({ id })),
+      });
+    },
+    appendQuestionWait(data): void {
+      pi.appendEntry("olw-question-wait", data);
+    },
+    pauseGoal,
+    ownsGoalPause,
+    resumeGoal,
+    waitForIdle: waitForAnswerIdle,
+    onUserInterrupt(handler): void {
+      pi.on("session_abort", (_event, ctx) => handler(contextPort(ctx)));
+      pi.on("agent_end", (event, ctx) => {
+        if (event.aborted && event.abortSource === "user") return handler(contextPort(ctx));
+      });
+    },
+    onGoalCheck(handler): void {
+      pi.on("agent_start", (_event, ctx) => handler(contextPort(ctx)));
     },
     onTurnEnd(handler): void {
       pi.on("turn_end", (event, ctx) => {
@@ -61,6 +90,7 @@ function contextPort(ctx: ExtensionContext): SessionContextPort {
   return {
     cwd: ctx.cwd,
     mode: ctx.mode,
+    ...(ctx.goalStoreFile === undefined ? {} : { goalStoreFile: ctx.goalStoreFile }),
     get model() {
       return ctx.model === undefined
         ? undefined

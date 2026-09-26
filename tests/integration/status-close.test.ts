@@ -569,7 +569,7 @@ test("status/close: status counts unanswered sent/received records, excludes ans
           delivery: { kind: "started", turn_id: "turn" },
         }),
       );
-      if (id === "answered")
+      if (id === "answered") {
         value(
           w.registry.claim(w.parent.durableSessionId, {
             ...envelope,
@@ -585,6 +585,20 @@ test("status/close: status counts unanswered sent/received records, excludes ans
             },
           }),
         );
+        // A claim alone is not delivery; only a native accepted receipt answers it.
+        expect(value(w.orchestrator.status()).find((b) => b.id === execute.id)?.openQuestions).toBe(
+          2,
+        );
+        value(
+          w.registry.finish(`answer:${envelope.id}`, {
+            kind: "ok",
+            thread_id: execute.durableSessionId,
+            message_seq: 2,
+            deduplicated: false,
+            delivery: { kind: "started", turn_id: "answer-turn" },
+          }),
+        );
+      }
     }
     value(w.registry.post(w.parent.durableSessionId, question("inbox", w.parent, null)));
     // The authorization matrix currently forbids parent->child questions. Seed a stored historical inbound question to check the status read projection independently of that routing rule.

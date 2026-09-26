@@ -1457,9 +1457,12 @@ export function openRegistry(
       for (const row of rows) {
         const record = parseDelivery(row);
         if (!record.ok) return record;
+        const answerRow = deliveryById.get(`answer:${record.value.envelope.id}`);
+        const answer = answerRow === null ? null : parseDelivery(answerRow);
+        if (answer !== null && !answer.ok) return answer;
         result.push({
           record: record.value,
-          answered: deliveryById.get(`answer:${record.value.envelope.id}`) !== null,
+          answered: answer?.value.state === "accepted",
         });
       }
       return ok(result);
@@ -1504,7 +1507,7 @@ export function openRegistry(
         if (answer !== null && !answer.ok) return answer;
         result.push({
           record: record.value,
-          answered: answer !== null,
+          answered: answer?.value.state === "accepted",
           answer: answer?.value ?? null,
         });
       }

@@ -173,6 +173,63 @@ export class Harness implements RuntimePort {
     this.sessionStart = handler;
   }
   onTurnEnd(): void {}
+  messageStart: Parameters<RuntimePort["onMessageStart"]>[0] | undefined;
+  readonly waitEvents: unknown[] = [];
+  readonly entries: Array<{ type: string; id: string; customType: string; data: unknown }> = [];
+  goal: { id: string; updatedAt: number; status: "active" | "paused" | "complete" } | null = {
+    id: "packet-goal",
+    updatedAt: 1,
+    status: "active",
+  };
+  pauseCalls = 0;
+  resumeCalls = 0;
+  userInterrupt: ((ctx: SessionContextPort) => Promise<void>) | undefined;
+  goalCheck: ((ctx: SessionContextPort) => Promise<void>) | undefined;
+  onUserInterrupt(handler: (ctx: SessionContextPort) => Promise<void>) {
+    this.userInterrupt = handler;
+  }
+  onGoalCheck(handler: (ctx: SessionContextPort) => Promise<void>) {
+    this.goalCheck = handler;
+  }
+  idleWaits = 0;
+  onMessageStart(handler: Parameters<RuntimePort["onMessageStart"]>[0]): void {
+    this.messageStart = handler;
+  }
+  emitQuestionWait(active: boolean, ids: readonly string[]): void {
+    this.waitEvents.push({ active, ids: [...ids] });
+  }
+  appendQuestionWait(data: unknown): void {
+    this.entries.push({
+      type: "custom",
+      id: String(this.entries.length),
+      customType: "olw-question-wait",
+      data,
+    });
+  }
+  async pauseGoal() {
+    this.pauseCalls++;
+    if (this.goal?.status !== "active") return null;
+    this.goal.status = "paused";
+    this.goal.updatedAt++;
+    return { id: this.goal.id, updatedAt: this.goal.updatedAt };
+  }
+  async ownsGoalPause(_ctx: SessionContextPort, pause: { id: string; updatedAt: number }) {
+    return (
+      this.goal?.id === pause.id &&
+      this.goal.status === "paused" &&
+      this.goal.updatedAt === pause.updatedAt
+    );
+  }
+  async resumeGoal(
+    ctx: SessionContextPort,
+    pause: { id: string; updatedAt: number },
+  ): Promise<void> {
+    this.resumeCalls++;
+    if (this.goal && (await this.ownsGoalPause(ctx, pause))) this.goal.status = "active";
+  }
+  async waitForIdle(): Promise<void> {
+    this.idleWaits++;
+  }
   notifyOperational(): void {}
   onResourcesDiscover(handler: () => { readonly skillPaths: readonly string[] }): void {
     this.resources = handler;

@@ -331,6 +331,44 @@ test("role-valid answers cannot use another recipient's accepted question", asyn
     expect(value(r.delivery(otherQuestion.id)).state).toBe("accepted");
   }));
 
+test.each(["sending", "rejected", "uncertain"] as const)(
+  "only native acceptance answers a question, not %s",
+  async (state) =>
+    fixture((r, { parent, child }, digest) => {
+      for (const inbox of [false, true]) {
+        const from = inbox ? parent : child;
+        const q = question(from, inbox ? null : parent, digest);
+        if (inbox) value(r.post(from.durableSessionId, q));
+        else {
+          value(r.claim(from.durableSessionId, q));
+          value(r.finish(q.id, receipt(parent)));
+        }
+        const a = answer(inbox ? null : parent, from, q, digest);
+        if (inbox) value(r.answerFromUser(q.id, a));
+        else value(r.claim(parent.durableSessionId, a));
+        if (state === "rejected")
+          value(
+            r.finish(a.id, {
+              kind: "error",
+              error: {
+                code: "turn_conflict_before_delivery",
+                message: "busy",
+                next_action: "inspect",
+              },
+            }),
+          );
+        if (state === "uncertain") value(r.uncertain(a.id, "lost acknowledgment"));
+        expect(
+          value(r.questions({})).find((item) => item.record.envelope.id === q.id),
+        ).toMatchObject({
+          answered: false,
+          answer: { state },
+        });
+        if (inbox) expect(value(r.postedQuestions({}))).toMatchObject([{ answered: false }]);
+      }
+    }),
+);
+
 test("parent inbox fallback and user answer claim", async () =>
   fixture((r, { parent, child }, digest, path) => {
     const q = question(parent, null, digest);

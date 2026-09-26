@@ -110,6 +110,7 @@ export function buildRoleBrief(
     parts.push(
       "your_user: parent",
       "questions: olw_ask only (batch up to 4 per call with options and a recommended default); prose in the pane reaches nobody",
+      "answer_delivery: Answers arrive as native deliveries; end your turn while waiting. Never act on answers read through olw questions; that view is inspection only.",
       "mode_mismatch: report blocked without work",
     );
     if (stage === "plan") {

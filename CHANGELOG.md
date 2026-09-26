@@ -58,6 +58,8 @@ published.
 
 ### Fixed
 
+- Upstream Sol Fast selectors are routed to standard-tier Sol through opencodex;
+  Luna keeps its Fast row. Sol's priority tier cost too much for its speed gain.
 - The managed `omo` launcher works with omo-ai installed through bun (5.0.0 and
   later). It finds the omo-ai package from its manifest instead of assuming a
   symlinked bin, so the generated bun launcher script no longer fails the routing

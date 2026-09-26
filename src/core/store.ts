@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   Assignment,
   Binding,
+  ChildStage,
   ClaimResult,
   DeliveryAttempt,
   DeliveryRecord,
@@ -17,6 +18,9 @@ import type {
   RuntimeIdentity,
   ScopeFilter,
   ScopeSnapshot,
+  StageHandoff,
+  StageLineage,
+  StageRecord,
 } from "./contracts";
 import { createDeliveryAttempts } from "./delivery-attempts";
 import { canRetryDelivery, initializationMessageId, matchesRuntime } from "./policy";
@@ -31,6 +35,7 @@ import {
   runtimeIdentitySchema,
   scopeSnapshotSchema,
 } from "./schema";
+import { createStageLineage } from "./stage-lineage";
 
 interface JsonRow {
   readonly json: string;
@@ -156,6 +161,7 @@ export function openRegistry(
   }
 
   const attempts = createDeliveryAttempts(db, options.readonly ?? false);
+  const lineage = createStageLineage(db, options.readonly ?? false);
   const bindingById = db.query<JsonRow, [string]>("SELECT json FROM bindings WHERE id = ?");
   const bindingBySession = db.query<JsonRow, [string]>(
     "SELECT json FROM bindings WHERE durable_session_id = ?",
@@ -248,92 +254,258 @@ export function openRegistry(
     ) {
       return error("execute_denied", "Standalone parent creation requires execution approval");
     }
-    return transaction(() => {
-      const existingScope = scopeByDigest.get(digest);
-      if (existingScope === null)
-        db.query("INSERT INTO scopes (digest, json) VALUES (?, ?)").run(
-          digest,
-          encoded(validScope.value),
-        );
-      else if (existingScope.json !== encoded(validScope.value))
-        return error("digest_conflict", "Scope digest has different content");
+    return transaction(() => reserveInTransaction(input, validScope.value, digest));
+  }
 
-      const priorDesignation = designationById.get(input.designation.id);
-      if (priorDesignation === null) {
-        db.query("INSERT INTO designations (id, scope_digest, json) VALUES (?, ?, ?)").run(
-          input.designation.id,
-          digest,
-          encoded(input.designation),
-        );
-      } else {
-        const prior = parseDesignation(priorDesignation);
-        if (!prior.ok) return prior;
-        if (!same(prior.value, input.designation))
-          return error("designation_conflict", "Designation ID is immutable");
-      }
+  function reserveInTransaction(
+    input: ReserveInput,
+    snapshot: ScopeSnapshot,
+    digest: string,
+  ): Result<Binding> {
+    const existingScope = scopeByDigest.get(digest);
+    if (existingScope === null)
+      db.query("INSERT INTO scopes (digest, json) VALUES (?, ?)").run(digest, encoded(snapshot));
+    else if (existingScope.json !== encoded(snapshot))
+      return error("digest_conflict", "Scope digest has different content");
 
-      if (input.assignment.role !== "supervisor" && input.assignment.ownerBindingId !== null) {
-        const owner = get(input.assignment.ownerBindingId);
-        if (!owner.ok) return error("owner_mismatch", "Owner binding does not exist");
-        if (
-          owner.value.launchState === "closing" ||
-          owner.value.launchState === "closed" ||
-          owner.value.contactState === "cancelled"
-        ) {
-          return error("owner_unavailable", "Owner is closing or cancelled");
-        }
-        const expectedRole = input.assignment.role === "parent" ? "supervisor" : "parent";
-        if (
-          owner.value.assignment.role !== expectedRole ||
-          owner.value.designationId !== input.designation.id ||
-          owner.value.assignment.initiativeId !== input.assignment.initiativeId ||
-          (input.assignment.role === "child" &&
-            owner.value.assignment.role === "parent" &&
-            owner.value.assignment.projectId !== input.assignment.projectId)
-        ) {
-          return error("owner_mismatch", "Owner edge does not match the assignment");
-        }
-      }
-      const owner = db
-        .query<{ readonly id: string }, [string]>(
-          "SELECT id FROM bindings WHERE ownership_key = ? AND launch_state <> 'closed'",
-        )
-        .get(ownershipKey(input.assignment));
-      if (owner !== null)
-        return error("ownership_conflict", "Scope already has a live owner", {
-          bindingId: owner.id,
-        });
-      if (bindingById.get(input.bindingId) !== null)
-        return error("binding_conflict", "Binding ID already exists");
-      if (bindingBySession.get(input.durableSessionId) !== null)
-        return error("session_conflict", "Durable session already belongs to a binding");
-      const binding: Binding = {
-        id: input.bindingId,
-        designationId: input.designation.id,
-        assignment: input.assignment,
-        durableSessionId: input.durableSessionId,
-        cwd: input.cwd,
-        checkout: input.checkout,
-        herdrSocket: input.herdrSocket,
-        omoSocket: input.omoSocket,
-        workspaceId: null,
-        paneId: null,
-        sessionPath: null,
-        launchState: "reserved",
-        contactState: "active",
-        initialization: { state: "pending", text: null },
-      };
-      db.query(
-        "INSERT INTO bindings (id, designation_id, durable_session_id, ownership_key, launch_state, json) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(
-        binding.id,
-        binding.designationId,
-        binding.durableSessionId,
-        ownershipKey(binding.assignment),
-        binding.launchState,
-        encoded(binding),
+    const priorDesignation = designationById.get(input.designation.id);
+    if (priorDesignation === null) {
+      db.query("INSERT INTO designations (id, scope_digest, json) VALUES (?, ?, ?)").run(
+        input.designation.id,
+        digest,
+        encoded(input.designation),
       );
-      return ok(binding);
+    } else {
+      const prior = parseDesignation(priorDesignation);
+      if (!prior.ok) return prior;
+      if (!same(prior.value, input.designation))
+        return error("designation_conflict", "Designation ID is immutable");
+    }
+
+    if (input.assignment.role !== "supervisor" && input.assignment.ownerBindingId !== null) {
+      const owner = get(input.assignment.ownerBindingId);
+      if (!owner.ok) return error("owner_mismatch", "Owner binding does not exist");
+      if (
+        owner.value.launchState === "closing" ||
+        owner.value.launchState === "closed" ||
+        owner.value.contactState === "cancelled"
+      ) {
+        return error("owner_unavailable", "Owner is closing or cancelled");
+      }
+      const expectedRole = input.assignment.role === "parent" ? "supervisor" : "parent";
+      if (
+        owner.value.assignment.role !== expectedRole ||
+        owner.value.designationId !== input.designation.id ||
+        owner.value.assignment.initiativeId !== input.assignment.initiativeId ||
+        (input.assignment.role === "child" &&
+          owner.value.assignment.role === "parent" &&
+          owner.value.assignment.projectId !== input.assignment.projectId)
+      ) {
+        return error("owner_mismatch", "Owner edge does not match the assignment");
+      }
+    }
+    const owner = db
+      .query<{ readonly id: string }, [string]>(
+        "SELECT id FROM bindings WHERE ownership_key = ? AND launch_state <> 'closed'",
+      )
+      .get(ownershipKey(input.assignment));
+    if (owner !== null)
+      return error("ownership_conflict", "Scope already has a live owner", {
+        bindingId: owner.id,
+      });
+    if (bindingById.get(input.bindingId) !== null)
+      return error("binding_conflict", "Binding ID already exists");
+    if (bindingBySession.get(input.durableSessionId) !== null)
+      return error("session_conflict", "Durable session already belongs to a binding");
+    const binding: Binding = {
+      id: input.bindingId,
+      designationId: input.designation.id,
+      assignment: input.assignment,
+      durableSessionId: input.durableSessionId,
+      cwd: input.cwd,
+      checkout: input.checkout,
+      herdrSocket: input.herdrSocket,
+      omoSocket: input.omoSocket,
+      workspaceId: null,
+      paneId: null,
+      sessionPath: null,
+      launchState: "reserved",
+      contactState: "active",
+      initialization: { state: "pending", text: null },
+    };
+    db.query(
+      "INSERT INTO bindings (id, designation_id, durable_session_id, ownership_key, launch_state, json) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(
+      binding.id,
+      binding.designationId,
+      binding.durableSessionId,
+      ownershipKey(binding.assignment),
+      binding.launchState,
+      encoded(binding),
+    );
+    return ok(binding);
+  }
+
+  function stageOf(bindingId: string): Result<StageRecord | null> {
+    try {
+      return ok(lineage.get(bindingId));
+    } catch (cause) {
+      return error("storage_error", "Could not read stage", messageOf(cause));
+    }
+  }
+  function stageChain(issueId: string): Result<StageRecord[]> {
+    try {
+      return ok(lineage.chain(issueId));
+    } catch (cause) {
+      return error("storage_error", "Could not read stage chain", messageOf(cause));
+    }
+  }
+  function lineageFor(bindingId: string): Result<StageLineage> {
+    const binding = get(bindingId);
+    if (!binding.ok) return binding;
+    if (binding.value.assignment.role !== "child")
+      return error("invalid_stage", "Only children have stage lineage");
+    const issueId = binding.value.assignment.issueId;
+    const stage = stageOf(bindingId);
+    if (!stage.ok) return stage;
+    if (stage.value === null)
+      return ok({
+        issueId,
+        mode: "direct",
+        stages: [
+          { bindingId, stage: "direct", ordinal: 0, launchState: binding.value.launchState },
+        ],
+      });
+    const chain = stageChain(issueId);
+    if (!chain.ok) return chain;
+    const stages = chain.value.map((entry) => {
+      const current = get(entry.bindingId);
+      return {
+        bindingId: entry.bindingId,
+        stage: entry.stage,
+        ordinal: entry.ordinal,
+        launchState: current.ok ? current.value.launchState : ("closed" as const),
+      };
+    });
+    return ok({
+      issueId,
+      mode: stages[0]?.stage === "plan" ? "planned" : (stages[0]?.stage ?? "direct"),
+      stages,
+    });
+  }
+  function recordStage(
+    bindingId: string,
+    issueId: string,
+    stage: ChildStage,
+    ordinal: number,
+    previousBindingId: string | null,
+  ): Result<StageRecord> {
+    return transaction(() => {
+      const binding = get(bindingId);
+      if (!binding.ok) return binding;
+      if (
+        binding.value.assignment.role !== "child" ||
+        binding.value.assignment.issueId !== issueId ||
+        !["direct", "plan", "execute", "research"].includes(stage) ||
+        !Number.isSafeInteger(ordinal) ||
+        ordinal < 0
+      )
+        return error("invalid_stage", "Stage does not match child binding");
+      if (lineage.get(bindingId) !== null) return error("stage_conflict", "Stage already recorded");
+      const chain = lineage.chain(issueId);
+      if (
+        previousBindingId !== null &&
+        (chain.at(-1)?.handoff === null || chain.at(-1)?.handoff === undefined)
+      )
+        return error("handoff_missing", "Previous stage has no handoff");
+      if (
+        previousBindingId === null
+          ? ordinal !== 0 || chain.length !== 0
+          : chain.at(-1)?.bindingId !== previousBindingId ||
+            ordinal !== (chain.at(-1)?.ordinal ?? -1) + 1
+      )
+        return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+      lineage.insert(bindingId, issueId, stage, ordinal, previousBindingId);
+      return ok({ bindingId, issueId, stage, ordinal, previousBindingId, handoff: null });
+    });
+  }
+  function recordHandoff(bindingId: string, handoff: StageHandoff): Result<StageRecord> {
+    return transaction(() => {
+      const binding = get(bindingId);
+      if (!binding.ok) return binding;
+      const stage = lineage.get(bindingId);
+      if (
+        binding.value.launchState !== "ready" ||
+        binding.value.assignment.role !== "child" ||
+        stage?.stage !== "plan"
+      )
+        return error("handoff_not_allowed", "Handoff requires a ready plan owner");
+      if (stage.handoff !== null && !same(stage.handoff, handoff))
+        return error("handoff_conflict", "Handoff is immutable");
+      lineage.handoff(bindingId, handoff);
+      return ok({ ...stage, handoff });
+    });
+  }
+  function successorReservation(
+    previousBindingId: string,
+    input: ReserveInput,
+    nextStage: ChildStage,
+  ): Result<Binding> {
+    const parsed = reserveInputSchema.safeParse(input);
+    if (!parsed.success)
+      return error("invalid_input", "Reservation input is invalid", parsed.error.issues);
+    if (!["direct", "plan", "execute", "research"].includes(nextStage))
+      return error("invalid_stage", "Successor stage is invalid");
+    const scope = validateSnapshot(parsed.data.snapshot);
+    if (!scope.ok) return scope;
+    const digest = digestOf(scope.value);
+    if (parsed.data.designation.snapshotDigest !== digest)
+      return error("digest_mismatch", "Designation does not match the snapshot");
+    const membership = assignmentAllowed(scope.value, parsed.data.assignment);
+    if (!membership.ok) return membership;
+    if (!parsed.data.designation.create)
+      return error("create_denied", "Designation does not permit role creation");
+    return transaction(() => {
+      const previous = get(previousBindingId);
+      if (!previous.ok) return previous;
+      const priorStage = lineage.get(previousBindingId);
+      if (priorStage?.handoff === null || priorStage === null)
+        return error("handoff_missing", "Previous stage has no handoff");
+      if (
+        previous.value.launchState !== "ready" ||
+        previous.value.assignment.role !== "child" ||
+        parsed.data.assignment.role !== "child" ||
+        ownershipKey(previous.value.assignment) !== ownershipKey(parsed.data.assignment) ||
+        previous.value.assignment.ownerBindingId !== parsed.data.assignment.ownerBindingId ||
+        previous.value.designationId !== parsed.data.designation.id ||
+        lineage.successor(previousBindingId) !== null
+      )
+        return error(
+          "stage_conflict",
+          "Previous stage is not the live owner or already has a successor",
+        );
+      if (
+        db
+          .query(
+            "SELECT message_id FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? AND state IN ('sending', 'uncertain') LIMIT 1",
+          )
+          .get(previousBindingId) !== null
+      )
+        return error("stage_in_flight", "Previous stage has an unresolved delivery");
+      const closing = beginCloseInTransaction(previousBindingId);
+      if (!closing.ok) return closing;
+      const closed = finishCloseInTransaction(previousBindingId);
+      if (!closed.ok) return closed;
+      const successor = reserveInTransaction(parsed.data, scope.value, digest);
+      if (!successor.ok) return successor;
+      lineage.insert(
+        successor.value.id,
+        priorStage.issueId,
+        nextStage,
+        priorStage.ordinal + 1,
+        previousBindingId,
+      );
+      return successor;
     });
   }
 
@@ -484,28 +656,32 @@ export function openRegistry(
   }
 
   function beginClose(id: string): Result<Binding> {
-    return transaction(() => {
-      const binding = get(id);
-      if (!binding.ok || binding.value.launchState === "closed") return binding;
-      const child = db
-        .query<{ readonly id: string }, [string]>(
-          "SELECT id FROM bindings WHERE json_extract(json, '$.assignment.role') = 'child' AND json_extract(json, '$.assignment.ownerBindingId') = ? AND launch_state <> 'closed' LIMIT 1",
-        )
-        .get(id);
-      if (child !== null)
-        return error("children_active", "Close child owners first", { bindingId: child.id });
-      return saveBinding({ ...binding.value, launchState: "closing", contactState: "cancelled" });
-    });
+    return transaction(() => beginCloseInTransaction(id));
+  }
+
+  function beginCloseInTransaction(id: string): Result<Binding> {
+    const binding = get(id);
+    if (!binding.ok || binding.value.launchState === "closed") return binding;
+    const child = db
+      .query<{ readonly id: string }, [string]>(
+        "SELECT id FROM bindings WHERE json_extract(json, '$.assignment.role') = 'child' AND json_extract(json, '$.assignment.ownerBindingId') = ? AND launch_state <> 'closed' LIMIT 1",
+      )
+      .get(id);
+    if (child !== null)
+      return error("children_active", "Close child owners first", { bindingId: child.id });
+    return saveBinding({ ...binding.value, launchState: "closing", contactState: "cancelled" });
   }
 
   function finishClose(id: string): Result<Binding> {
-    return transaction(() => {
-      const binding = get(id);
-      if (!binding.ok || binding.value.launchState === "closed") return binding;
-      if (binding.value.launchState !== "closing")
-        return error("invalid_transition", "Closure was not started");
-      return saveBinding({ ...binding.value, launchState: "closed" });
-    });
+    return transaction(() => finishCloseInTransaction(id));
+  }
+
+  function finishCloseInTransaction(id: string): Result<Binding> {
+    const binding = get(id);
+    if (!binding.ok || binding.value.launchState === "closed") return binding;
+    if (binding.value.launchState !== "closing")
+      return error("invalid_transition", "Closure was not started");
+    return saveBinding({ ...binding.value, launchState: "closed" });
   }
 
   function beginInitialization(id: string, text: string): Result<InitializationClaim> {
@@ -696,6 +872,11 @@ export function openRegistry(
       return error("route_denied", "User reports use the local inbox, not native delivery");
     const target = get(envelope.toBindingId);
     if (!target.ok) return error("target_unknown", "Target binding was not found");
+    if (target.value.launchState === "closed") {
+      const successorBindingId = lineage.successor(target.value.id);
+      if (successorBindingId !== null)
+        return error("target_retired", "Target binding has a successor", { successorBindingId });
+    }
     const initializing =
       target.value.launchState === "initializing" &&
       target.value.initialization.state === "sending" &&
@@ -1042,6 +1223,12 @@ export function openRegistry(
       return validateSnapshot(parseJson(row.json));
     },
     reserve,
+    recordStage,
+    stageOf,
+    stageChain,
+    lineageFor,
+    recordHandoff,
+    successorReservation,
     get,
     bySession,
     designation: designationFor,

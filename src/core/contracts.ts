@@ -50,6 +50,30 @@ export type Assignment =
       readonly issueId: string;
       readonly ownerBindingId: string;
     };
+export interface StageHandoff {
+  readonly planPath: string;
+  readonly planSha256: string;
+  readonly head: string;
+  readonly completedAt: string;
+}
+export interface StageRecord {
+  readonly bindingId: string;
+  readonly issueId: string;
+  readonly stage: ChildStage;
+  readonly ordinal: number;
+  readonly previousBindingId: string | null;
+  readonly handoff: StageHandoff | null;
+}
+export interface StageLineage {
+  readonly issueId: string;
+  readonly mode: ChildStage | "planned";
+  readonly stages: ReadonlyArray<{
+    readonly bindingId: string;
+    readonly stage: ChildStage;
+    readonly ordinal: number;
+    readonly launchState: Binding["launchState"];
+  }>;
+}
 export interface Checkout {
   readonly originalRepoRoot: string;
   readonly path: string;
@@ -192,6 +216,22 @@ export interface Registry {
   scope(digest: string): Result<ScopeSnapshot>;
   designation(id: string): Result<Designation>;
   reserve(input: ReserveInput): Result<Binding>;
+  recordStage(
+    bindingId: string,
+    issueId: string,
+    stage: ChildStage,
+    ordinal: number,
+    previousBindingId: string | null,
+  ): Result<StageRecord>;
+  stageOf(bindingId: string): Result<StageRecord | null>;
+  stageChain(issueId: string): Result<StageRecord[]>;
+  lineageFor(bindingId: string): Result<StageLineage>;
+  recordHandoff(bindingId: string, handoff: StageHandoff): Result<StageRecord>;
+  successorReservation(
+    previousBindingId: string,
+    input: ReserveInput,
+    nextStage: ChildStage,
+  ): Result<Binding>;
   get(id: string): Result<Binding>;
   bySession(id: string): Result<Binding>;
   list(): Result<Binding[]>;

@@ -5,9 +5,9 @@ import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Result, ScopeFilter } from "./core/contracts";
 import { canRetryDelivery } from "./core/policy";
-import { deliveryRecordSchema } from "./core/schema";
+import { answerFieldsSchema, deliveryRecordSchema, questionPayloadSchema } from "./core/schema";
 import { resolveHerdrArtifact } from "./herdr/artifact";
-import { Orchestrator } from "./orchestrator";
+import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
 
 type Options = Readonly<Record<string, string | true | readonly string[]>>;
@@ -33,8 +33,19 @@ const valueFlags = new Set([
   "evidence",
   "binding",
   "mode",
+  "question",
+  "questions-file",
+  "answers-file",
 ]);
-const booleanFlags = new Set(["json", "fixture", "execute", "help", "confirm-absent", "to-user"]);
+const booleanFlags = new Set([
+  "json",
+  "fixture",
+  "execute",
+  "help",
+  "confirm-absent",
+  "to-user",
+  "as-user",
+]);
 
 function parseArguments(
   argv: readonly string[],
@@ -83,6 +94,25 @@ function has(options: Options, key: string): boolean {
 function evidence(options: Options): readonly string[] {
   const value = options["evidence"];
   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+}
+async function jsonFile<T>(
+  path: string | undefined,
+  schema: z.ZodType<T>,
+  flag: string,
+): Promise<Result<T | undefined>> {
+  if (path === undefined) return { ok: true, value: undefined };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(path, "utf8"));
+  } catch (cause) {
+    return invalid(
+      `Could not read ${flag}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+  const parsed = schema.safeParse(raw);
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : invalid(`${flag} is invalid`, parsed.error.issues);
 }
 function invalid(message: string, details?: unknown): Result<never> {
   return details === undefined
@@ -225,7 +255,10 @@ async function doctorWithChains(root: string, herdrSocket?: string): Promise<Res
   }
 }
 
-export async function runCli(argv: readonly string[]): Promise<number> {
+export async function runCli(
+  argv: readonly string[],
+  dependencies?: OrchestratorDependencies,
+): Promise<number> {
   const parsed = parseArguments(argv);
   if (!parsed.ok) {
     print(parsed, true);
@@ -249,6 +282,9 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             "send",
             "report",
             "reports",
+            "ask",
+            "answer",
+            "questions",
             "notices",
             "status",
             "pause",
@@ -270,6 +306,10 @@ export async function runCli(argv: readonly string[]): Promise<number> {
               "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--to-user]",
             reports:
               "[--initiative ID | --project ID] (read-only user inbox; posted is not native acceptance)",
+            ask: "--from BINDING --id ID --text-file PATH [--questions-file JSON] [--to-user]",
+            answer:
+              "(--from BINDING | --as-user) --question QUESTION_ID --text-file PATH [--answers-file JSON]",
+            questions: "[--initiative ID | --project ID] (read-only; never wakes a role)",
             notices:
               "[--initiative ID | --project ID] (read-only operational telemetry; not completion reports)",
             status: "[--initiative ID | --project ID]",
@@ -285,7 +325,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     return 0;
   }
   const root = resolve(stringOption(options, "root") ?? join(import.meta.dir, ".."));
-  const orchestrator = new Orchestrator(root, stringOption(options, "herdr-socket"));
+  const orchestrator = new Orchestrator(root, stringOption(options, "herdr-socket"), dependencies);
   let result: Result<unknown>;
   const command = words.join(" ");
   try {
@@ -412,14 +452,79 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             : !body.ok
               ? body
               : invalid("--outcome must be completed, blocked, or failed");
-    } else if (command === "status" || command === "reports" || command === "notices") {
+    } else if (command === "ask") {
+      const values = requireOptions(options, ["from", "id", "text-file"]);
+      const body = values.ok ? await text(values.value["text-file"]) : invalid("");
+      const questions = await jsonFile(
+        stringOption(options, "questions-file"),
+        questionPayloadSchema,
+        "--questions-file",
+      );
+      result =
+        values.ok && body.ok && questions.ok
+          ? await orchestrator.ask({
+              fromId: values.value["from"] ?? "",
+              messageId: values.value["id"] ?? "",
+              text: body.value,
+              toUser: has(options, "to-user"),
+              questions: questions.value,
+            })
+          : !values.ok
+            ? values
+            : !body.ok
+              ? body
+              : questions;
+    } else if (command === "answer") {
+      const values = requireOptions(options, ["question", "text-file"]);
+      const body = values.ok ? await text(values.value["text-file"]) : invalid("");
+      const answers = await jsonFile(
+        stringOption(options, "answers-file"),
+        answerFieldsSchema,
+        "--answers-file",
+      );
+      const fromId = stringOption(options, "from");
+      const asUser = has(options, "as-user");
+      const fields =
+        answers.ok && answers.value !== undefined
+          ? { answers: answers.value.answers, unanswered: answers.value.unanswered }
+          : {};
+      result = !values.ok
+        ? values
+        : !body.ok
+          ? body
+          : !answers.ok
+            ? answers
+            : asUser && fromId !== undefined
+              ? invalid("--as-user cannot be combined with --from")
+              : asUser
+                ? await orchestrator.answerAsUser({
+                    questionId: values.value["question"] ?? "",
+                    text: body.value,
+                    ...fields,
+                  })
+                : fromId === undefined
+                  ? invalid("--from or --as-user is required")
+                  : await orchestrator.answer({
+                      fromId,
+                      questionId: values.value["question"] ?? "",
+                      text: body.value,
+                      ...fields,
+                    });
+    } else if (
+      command === "status" ||
+      command === "reports" ||
+      command === "notices" ||
+      command === "questions"
+    ) {
       const filter = scopeFilter(options, false);
       result = filter.ok
         ? command === "reports"
           ? orchestrator.reports(filter.value)
           : command === "notices"
             ? orchestrator.notices(filter.value)
-            : orchestrator.status(filter.value)
+            : command === "questions"
+              ? orchestrator.questions(filter.value)
+              : orchestrator.status(filter.value)
         : filter;
     } else if (command === "pause" || command === "resume" || command === "close") {
       const values = requireOptions(options, ["binding"]);
@@ -433,7 +538,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, send, report, reports, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {
@@ -445,7 +550,8 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       },
     };
   }
-  if (command === "send" || command === "report") result = deliveryOutcome(result);
+  if (command === "send" || command === "report" || command === "ask" || command === "answer")
+    result = deliveryOutcome(result);
   print(result, has(options, "json"));
   return exitCode(result);
 }

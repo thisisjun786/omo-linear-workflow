@@ -285,7 +285,15 @@ export interface Registry {
   postedQuestions(
     filter: ScopeFilter,
   ): Result<Array<{ readonly record: DeliveryRecord; readonly answered: boolean }>>;
+  questions(filter: ScopeFilter): Result<
+    Array<{
+      readonly record: DeliveryRecord;
+      readonly answered: boolean;
+      readonly answer: DeliveryRecord | null;
+    }>
+  >;
   answerFromUser(questionId: string, envelope: Envelope): Result<ClaimResult>;
+  releaseUserAnswer(messageId: string, recipientSessionId: string): Result<ClaimResult>;
   operationalNotices(filter: ScopeFilter): Result<DeliveryRecord[]>;
   close(): void;
 }
@@ -329,5 +337,14 @@ export type WorkerRequest =
         readonly messageId: string;
         readonly reason: string;
         readonly nativeKey?: string | undefined;
+      };
+    }
+  | {
+      readonly version: 1;
+      readonly dbPath: string;
+      readonly action: "release-user-answer";
+      readonly input: {
+        readonly messageId: string;
+        readonly recipientSessionId: string;
       };
     };

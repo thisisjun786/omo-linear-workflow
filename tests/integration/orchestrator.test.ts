@@ -358,6 +358,12 @@ class FakeNative implements NativeSession {
   async describe(): Promise<Result<RuntimeIdentity>> {
     return { ok: true, value: this.identity };
   }
+  async deliverUserAnswer(): Promise<Result<DeliveryRecord>> {
+    return {
+      ok: false,
+      error: { code: "route_denied", message: "User answers use the dedicated RPC" },
+    };
+  }
   async send(envelope: Envelope): Promise<Result<DeliveryRecord>> {
     return {
       ok: true,

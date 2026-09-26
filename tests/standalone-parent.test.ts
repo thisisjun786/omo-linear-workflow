@@ -495,6 +495,10 @@ async function world() {
         configure: async () => {},
         describe: async () => ({ ok: true, value: identity }),
         hasUserMessage: async (text) => prompts.get(binding.id)?.has(text) ?? false,
+        deliverUserAnswer: async () => ({
+          ok: false as const,
+          error: { code: "route_denied", message: "User answers use the dedicated RPC" },
+        }),
         send: async (envelope) =>
           registry((r) => {
             const claim = r.claim(binding.durableSessionId, envelope);

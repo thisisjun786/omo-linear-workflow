@@ -1336,6 +1336,87 @@ export function openRegistry(
     }
   }
 
+  function questions(filter: ScopeFilter): Result<
+    Array<{
+      readonly record: DeliveryRecord;
+      readonly answered: boolean;
+      readonly answer: DeliveryRecord | null;
+    }>
+  > {
+    try {
+      const rows = db
+        .query<DeliveryRow, [string | null, string | null, string | null, string | null]>(`
+        SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
+        JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
+        WHERE json_extract(d.envelope_json, '$.kind') = 'question'
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
+        ORDER BY d.rowid
+      `)
+        .all(
+          filter.projectId ?? null,
+          filter.projectId ?? null,
+          filter.initiativeId ?? null,
+          filter.initiativeId ?? null,
+        );
+      const result: Array<{
+        record: DeliveryRecord;
+        answered: boolean;
+        answer: DeliveryRecord | null;
+      }> = [];
+      for (const row of rows) {
+        const record = parseDelivery(row);
+        if (!record.ok) return record;
+        const answerRow = deliveryById.get(`answer:${record.value.envelope.id}`);
+        const answer = answerRow === null ? null : parseDelivery(answerRow);
+        if (answer !== null && !answer.ok) return answer;
+        result.push({
+          record: record.value,
+          answered: answer !== null,
+          answer: answer?.value ?? null,
+        });
+      }
+      return ok(result);
+    } catch (cause) {
+      return error("storage_error", "Could not read questions", messageOf(cause));
+    }
+  }
+
+  function releaseUserAnswer(messageId: string, recipientSessionId: string): Result<ClaimResult> {
+    const stored = parseDelivery(deliveryById.get(messageId));
+    if (!stored.ok) return stored;
+    const envelope = stored.value.envelope;
+    const questionId = envelope.answer?.questionId;
+    if (
+      envelope.kind !== "answer" ||
+      envelope.fromBindingId !== null ||
+      questionId === undefined ||
+      envelope.id !== `answer:${questionId}` ||
+      stored.value.state !== "sending"
+    )
+      return error("route_denied", "No claimed user answer is waiting for delivery");
+    const question = parseDelivery(deliveryById.get(questionId));
+    if (
+      !question.ok ||
+      question.value.state !== "posted" ||
+      question.value.envelope.kind !== "question" ||
+      question.value.envelope.toBindingId !== null ||
+      question.value.envelope.fromBindingId !== envelope.toBindingId
+    )
+      return error("question_not_in_inbox", "Claimed answer does not match an inbox question");
+    const recipient = bySession(recipientSessionId);
+    if (!recipient.ok) return error("sender_unknown", "Recipient session is not bound");
+    if (recipient.value.id !== envelope.toBindingId)
+      return error("route_denied", "User answer is not claimed for this session");
+    const nativeKey = stored.value.attempts?.at(-1)?.nativeKey ?? envelope.id;
+    return ok({
+      disposition: "new",
+      record: stored.value,
+      target: recipient.value,
+      nativeKey,
+    });
+  }
+
   function answerFromUser(questionId: string, envelopeValue: Envelope): Result<ClaimResult> {
     return transaction(() => {
       const parsed = envelopeSchema.safeParse(envelopeValue);
@@ -1482,7 +1563,9 @@ export function openRegistry(
     post,
     postedReports: (filter) => inboxRecords(filter, false),
     postedQuestions,
+    questions,
     answerFromUser,
+    releaseUserAnswer,
     operationalNotices: (filter) => inboxRecords(filter, true),
     beginClose,
     finishClose,

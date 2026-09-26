@@ -10,6 +10,7 @@ export interface NativeSession {
   hasUserMessage(text: string): Promise<boolean>;
   describe(): Promise<Result<RuntimeIdentity>>;
   send(envelope: Envelope): Promise<Result<DeliveryRecord>>;
+  deliverUserAnswer(messageId: string): Promise<Result<DeliveryRecord>>;
   onEvent(listener: (event: unknown) => void): () => void;
   close(): Promise<void>;
 }
@@ -135,6 +136,19 @@ export async function attachBindingWithClient(
       return parsed.success
         ? parsed.data
         : failure("invalid_response", "Send RPC returned an invalid result", parsed.error.issues);
+    },
+    async deliverUserAnswer(messageId: string): Promise<Result<DeliveryRecord>> {
+      const decoded = await client.requestExtension("omo.initiative.deliver-user-answer", {
+        messageId,
+      });
+      const parsed = sendResultSchema.safeParse(decoded);
+      return parsed.success
+        ? parsed.data
+        : failure(
+            "invalid_response",
+            "User answer RPC returned an invalid result",
+            parsed.error.issues,
+          );
     },
     onEvent(listener: (event: unknown) => void): () => void {
       return client.onEvent(listener);

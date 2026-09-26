@@ -88,6 +88,21 @@ export const runtimeFailureClaimSchema = z.strictObject({
   kind: z.literal("runtime_failure"),
   failure: runtimeFailureSchema,
 });
+export const questionPayloadSchema = z.strictObject({
+  questions: z.array(
+    z.strictObject({
+      id: text,
+      question: text,
+      options: z.array(z.strictObject({ label: text, description: text.optional() })),
+      multiSelect: z.boolean(),
+    }),
+  ),
+  escalates: text.nullable(),
+});
+export const answerFieldsSchema = z.strictObject({
+  answers: z.record(text, z.strictObject({ selected: z.array(text), text: z.string().optional() })),
+  unanswered: z.array(text),
+});
 export const envelopeSchema = z
   .strictObject({
     version: z.literal(1),
@@ -107,27 +122,12 @@ export const envelopeSchema = z
     text: z.string(),
     outcome: z.enum(["completed", "blocked", "failed"]).nullable(),
     evidence: z.array(text),
-    question: z
-      .strictObject({
-        questions: z.array(
-          z.strictObject({
-            id: text,
-            question: text,
-            options: z.array(z.strictObject({ label: text, description: text.optional() })),
-            multiSelect: z.boolean(),
-          }),
-        ),
-        escalates: text.nullable(),
-      })
-      .optional(),
+    question: questionPayloadSchema.optional(),
     answer: z
       .strictObject({
         questionId: text,
-        answers: z.record(
-          text,
-          z.strictObject({ selected: z.array(text), text: z.string().optional() }),
-        ),
-        unanswered: z.array(text),
+        answers: answerFieldsSchema.shape.answers,
+        unanswered: answerFieldsSchema.shape.unanswered,
       })
       .optional(),
     operational: z
@@ -279,12 +279,19 @@ const uncertainRequestSchema = z.strictObject({
   action: z.literal("uncertain"),
   input: z.strictObject({ messageId: text, reason: text, nativeKey: text.optional() }),
 });
+const releaseUserAnswerRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("release-user-answer"),
+  input: z.strictObject({ messageId: text, recipientSessionId: text }),
+});
 export const workerRequestSchema = z.union([
   lookupRequestSchema,
   routeRequestSchema,
   claimRequestSchema,
   finishRequestSchema,
   uncertainRequestSchema,
+  releaseUserAnswerRequestSchema,
 ]);
 
 export function resultSchema<T extends z.ZodType>(value: T) {

@@ -48,6 +48,11 @@ async function run(): Promise<void> {
         request.data.input.reason,
         request.data.input.nativeKey,
       );
+    } else if (request.data.action === "release-user-answer") {
+      result = registry.releaseUserAnswer(
+        request.data.input.messageId,
+        request.data.input.recipientSessionId,
+      );
     } else {
       result = invalid("invalid_request", "Worker action is invalid");
     }

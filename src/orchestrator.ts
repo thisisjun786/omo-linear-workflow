@@ -103,6 +103,31 @@ export interface ReportInput {
   readonly evidence: readonly string[];
   readonly text: string;
 }
+export interface AskInput {
+  readonly toUser?: boolean;
+  readonly fromId: string;
+  readonly messageId: string;
+  readonly text: string;
+  readonly questions?: Envelope["question"] | undefined;
+}
+export interface AnswerInput {
+  readonly fromId: string;
+  readonly questionId: string;
+  readonly text: string;
+  readonly answers?: NonNullable<Envelope["answer"]>["answers"] | undefined;
+  readonly unanswered?: readonly string[] | undefined;
+}
+export interface UserAnswerInput {
+  readonly questionId: string;
+  readonly text: string;
+  readonly answers?: NonNullable<Envelope["answer"]>["answers"] | undefined;
+  readonly unanswered?: readonly string[] | undefined;
+}
+export interface ListedQuestion {
+  readonly record: DeliveryRecord;
+  readonly answered: boolean;
+  readonly answer: DeliveryRecord | null;
+}
 export interface CreationResult {
   readonly binding: Binding;
   readonly expectedModel: RoleModel;
@@ -624,6 +649,226 @@ export class Orchestrator {
           ...cause.details,
         });
       return failure("runtime_unavailable", "Native host protocol check failed", messageOf(cause));
+    }
+  }
+
+  public async ask(input: AskInput): Promise<Result<unknown>> {
+    const sender = this.#binding(input.fromId);
+    if (!sender.ok) return sender;
+    const host = await this.#checkHostProtocol(sender.value);
+    if (host !== undefined) return host;
+    if (sender.value.assignment.role !== "child" && sender.value.assignment.role !== "parent")
+      return failure("route_denied", "Only children and parents ask questions");
+    const context = await this.#context(sender.value);
+    if (!context.ok) return context;
+    if (input.toUser && sender.value.assignment.role !== "parent")
+      return failure("route_denied", "Only parents ask the user inbox");
+    const messageId = input.messageId.startsWith(`question:${sender.value.id}:`)
+      ? input.messageId
+      : `question:${sender.value.id}:${input.messageId}`;
+    const existing = this.#withRegistry((registry) => registry.delivery(messageId));
+    if (!existing.ok && existing.error.code !== "not_found") return existing;
+    let targetId = sender.value.assignment.ownerBindingId;
+    if (existing.ok) targetId = existing.value.envelope.toBindingId;
+    else if (sender.value.assignment.role === "parent" && targetId !== null && !input.toUser) {
+      const owner = this.#binding(targetId);
+      if (!owner.ok && owner.error.code !== "not_found") return owner;
+      if (!owner.ok || owner.value.launchState !== "ready") targetId = null;
+    }
+    if (input.toUser) targetId = null;
+    const envelope: Envelope = {
+      version: 1,
+      id: messageId,
+      fromBindingId: sender.value.id,
+      toBindingId: targetId,
+      designationId: sender.value.designationId,
+      snapshotDigest: context.value.designation.snapshotDigest,
+      kind: "question",
+      text: input.text,
+      outcome: null,
+      evidence: [],
+      question: input.questions ?? {
+        questions: [
+          { id: "text", question: input.text, options: [{ label: "text" }], multiSelect: false },
+        ],
+        escalates: null,
+      },
+    };
+    if (existing.ok) {
+      if (
+        JSON.stringify(existing.value.envelope) !== JSON.stringify(envelopeSchema.parse(envelope))
+      )
+        return failure("message_conflict", "Message ID is bound to a different immutable payload");
+      if (canRetryDelivery(existing.value)) return this.#deliver(sender.value, envelope);
+      return existing.value.state === "sending" || existing.value.state === "uncertain"
+        ? failure(
+            "delivery_in_progress",
+            "Original delivery requires inspection; no resend or recipient migration",
+            existing.value,
+          )
+        : existing;
+    }
+    if (targetId !== null) return this.#deliver(sender.value, envelope);
+    return this.#postInbox(sender.value, envelope, "Could not verify question sender");
+  }
+
+  public async answer(input: AnswerInput): Promise<Result<unknown>> {
+    const sender = this.#binding(input.fromId);
+    if (!sender.ok) return sender;
+    const host = await this.#checkHostProtocol(sender.value);
+    if (host !== undefined) return host;
+    const context = await this.#context(sender.value);
+    if (!context.ok) return context;
+    const source = this.#withRegistry((registry) => registry.delivery(input.questionId));
+    if (!source.ok) {
+      return source.error.code === "not_found"
+        ? failure("question_unknown", "No question with this id exists")
+        : source;
+    }
+    if (source.value.envelope.kind !== "question" || source.value.envelope.fromBindingId === null)
+      return failure("question_unknown", "No question with this id exists");
+    if (source.value.state !== "accepted" && source.value.state !== "posted")
+      return failure("question_unknown", "Question is not accepted");
+    if (source.value.envelope.toBindingId !== sender.value.id)
+      return failure("question_unknown", "No accepted question from this recipient exists");
+    const envelope: Envelope = {
+      version: 1,
+      id: `answer:${input.questionId}`,
+      fromBindingId: sender.value.id,
+      toBindingId: source.value.envelope.fromBindingId,
+      designationId: sender.value.designationId,
+      snapshotDigest: context.value.designation.snapshotDigest,
+      kind: "answer",
+      text: input.text,
+      outcome: null,
+      evidence: [],
+      answer: {
+        questionId: input.questionId,
+        answers: input.answers ?? { text: { selected: [], text: input.text } },
+        unanswered: [...(input.unanswered ?? [])],
+      },
+    };
+    return this.#deliver(sender.value, envelope);
+  }
+
+  public async answerAsUser(input: UserAnswerInput): Promise<Result<unknown>> {
+    const source = this.#withRegistry((registry) => registry.delivery(input.questionId));
+    if (!source.ok) {
+      return source.error.code === "not_found"
+        ? failure("question_unknown", "No question with this id exists")
+        : source;
+    }
+    if (
+      source.value.envelope.kind !== "question" ||
+      source.value.state !== "posted" ||
+      source.value.envelope.toBindingId !== null ||
+      source.value.envelope.fromBindingId === null
+    )
+      return failure("question_not_in_inbox", "Question is not posted to the user inbox");
+    const parent = this.#binding(source.value.envelope.fromBindingId);
+    if (!parent.ok) return parent;
+    const host = await this.#checkHostProtocol(parent.value);
+    if (host !== undefined) return host;
+    const context = await this.#context(parent.value);
+    if (!context.ok) return context;
+    const envelope: Envelope = {
+      version: 1,
+      id: `answer:${input.questionId}`,
+      fromBindingId: null,
+      toBindingId: parent.value.id,
+      designationId: parent.value.designationId,
+      snapshotDigest: context.value.designation.snapshotDigest,
+      kind: "answer",
+      text: input.text,
+      outcome: null,
+      evidence: [],
+      answer: {
+        questionId: input.questionId,
+        answers: input.answers ?? { text: { selected: [], text: input.text } },
+        unanswered: [...(input.unanswered ?? [])],
+      },
+    };
+    const claimed = this.#withRegistry((registry) =>
+      registry.answerFromUser(input.questionId, envelope),
+    );
+    if (!claimed.ok) return claimed;
+    if (claimed.value.disposition === "replay") return ok(claimed.value.record);
+    if (claimed.value.disposition === "in_progress")
+      return failure(
+        "delivery_in_progress",
+        "Original delivery requires inspection; no resend",
+        claimed.value.record,
+      );
+    if (claimed.value.target === null)
+      return failure("route_denied", "User answer has no parent target");
+    return this.#finishUserAnswer(parent.value, claimed.value);
+  }
+
+  async #finishUserAnswer(
+    parent: Binding,
+    claim: {
+      readonly record: DeliveryRecord;
+      readonly nativeKey?: string | undefined;
+    },
+  ): Promise<Result<DeliveryRecord>> {
+    const nativeKey = claim.nativeKey ?? claim.record.envelope.id;
+    let session: NativeSession | undefined;
+    const unresolved = (reason: string): Result<DeliveryRecord> => {
+      const marked = this.#withRegistry((registry) =>
+        registry.uncertain(claim.record.envelope.id, reason, nativeKey),
+      );
+      return marked.ok
+        ? failure("delivery_uncertain", "Native delivery did not return a receipt", marked.value)
+        : marked;
+    };
+    try {
+      session = await this.#deps.attachBinding(parent);
+      const delivered = await session.deliverUserAnswer(claim.record.envelope.id);
+      if (!delivered.ok) return unresolved(delivered.error.message);
+      return delivered;
+    } catch (cause) {
+      const marked = this.#withRegistry((registry) =>
+        registry.uncertain(
+          claim.record.envelope.id,
+          `Native send did not return: ${messageOf(cause)}`,
+          nativeKey,
+        ),
+      );
+      return marked.ok
+        ? failure("runtime_unavailable", "Could not deliver the user answer", messageOf(cause))
+        : marked;
+    } finally {
+      await session?.close();
+    }
+  }
+
+  async #postInbox(
+    sender: Binding,
+    envelope: Envelope,
+    unavailable: string,
+  ): Promise<Result<DeliveryRecord>> {
+    let session: NativeSession | undefined;
+    try {
+      session = await this.#deps.attachBinding(sender);
+      const identity = await session.describe();
+      if (!identity.ok) return identity;
+      if (!matchesRuntime(sender, identity.value))
+        return failure("identity_mismatch", "Sender does not match the bound runtime");
+      return this.#withRegistry((registry) => registry.post(sender.durableSessionId, envelope));
+    } catch (cause) {
+      return failure("runtime_unavailable", unavailable, messageOf(cause));
+    } finally {
+      await session?.close();
+    }
+  }
+
+  public questions(filter: ScopeFilter = {}): Result<ListedQuestion[]> {
+    if (!existsSync(this.#dbPath)) return ok([]);
+    const registry = this.#deps.openRegistry(this.#dbPath, { readonly: true });
+    try {
+      return registry.questions(filter);
+    } finally {
+      registry.close();
     }
   }
 

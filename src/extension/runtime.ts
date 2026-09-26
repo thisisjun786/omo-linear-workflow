@@ -71,7 +71,13 @@ export interface RuntimeConfig {
   readonly hostRuntime: boolean;
 }
 
-type WorkerAction = "lookup-session" | "authorize" | "claim" | "finish" | "uncertain";
+type WorkerAction =
+  | "lookup-session"
+  | "authorize"
+  | "claim"
+  | "finish"
+  | "uncertain"
+  | "release-user-answer";
 
 const nativeSendInputSchema = z.strictObject({
   thread: z.string().min(1),
@@ -100,6 +106,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly senderSessionId: string;
     readonly messageId: string;
     readonly input: z.infer<typeof nativeSendInputSchema>;
+    readonly userAnswer: boolean;
     used: boolean;
   }>();
 
@@ -237,12 +244,31 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       );
     }
 
-    return deliver(claim.value, ctx);
+    return deliver(claim.value, ctx, false);
+  });
+
+  port.handleRpc("omo.initiative.deliver-user-answer", async (data) => {
+    const ctx = await contextWhenStarted();
+    if (ctx === undefined) return failure("session_unavailable", "Session has not started");
+    const requested = z.strictObject({ messageId: z.string().min(1) }).safeParse(data);
+    if (!requested.success)
+      return failure("invalid_envelope", "User answer id is invalid", requested.error.issues);
+    const released = await worker(
+      "release-user-answer",
+      {
+        messageId: requested.data.messageId,
+        recipientSessionId: ctx.sessionManager.getSessionId(),
+      },
+      resultSchema(claimResultSchema),
+    );
+    if (!released.ok) return released;
+    return deliver(released.value, ctx, true);
   });
 
   async function deliver(
     claim: ClaimResult,
     ctx: SessionContextPort,
+    userAnswer: boolean,
   ): Promise<Result<DeliveryRecord>> {
     if (claim.target === null) return { ok: true, value: claim.record };
     const envelope = claim.record.envelope;
@@ -264,6 +290,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           senderSessionId: ctx.sessionManager.getSessionId(),
           messageId: envelope.id,
           input,
+          userAnswer,
           used: false,
         },
         () => port.executeTool("thread_send", input),
@@ -310,7 +337,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       }
       await publishOperationalNotice(config.root, claim.value.record);
       if (claim.value.disposition !== "new") return;
-      const delivered = await deliver(claim.value, ctx);
+      const delivered = await deliver(claim.value, ctx, false);
       if (!delivered.ok) throw new Error(`${delivered.error.code}: ${delivered.error.message}`);
       const path = await publishOperationalNotice(config.root, delivered.value);
       port.notifyOperational(
@@ -355,11 +382,32 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       return { block: true, reason: "Direct thread_send message is not an envelope" };
     }
     const envelope = envelopeSchema.safeParse(decoded);
-    if (
-      !envelope.success ||
-      envelope.data.id !== permit.messageId ||
-      envelope.data.fromBindingId !== sender.value.id
-    ) {
+    if (!envelope.success || envelope.data.id !== permit.messageId) {
+      return { block: true, reason: "Direct thread_send identity is invalid" };
+    }
+    if (permit.userAnswer) {
+      const released = await worker(
+        "release-user-answer",
+        {
+          messageId: envelope.data.id,
+          recipientSessionId: ctx.sessionManager.getSessionId(),
+        },
+        resultSchema(claimResultSchema),
+      );
+      if (!released.ok) return { block: true, reason: released.error.message };
+      if (
+        envelope.data.fromBindingId !== null ||
+        envelope.data.kind !== "answer" ||
+        released.value.target === null ||
+        JSON.stringify(envelope.data) !== JSON.stringify(released.value.record.envelope) ||
+        nativeInput.data.thread !== released.value.target.durableSessionId
+      ) {
+        return { block: true, reason: "Direct thread_send identity is invalid" };
+      }
+      permit.used = true;
+      return undefined;
+    }
+    if (envelope.data.fromBindingId !== sender.value.id) {
       return { block: true, reason: "Direct thread_send identity is invalid" };
     }
     const authorized = await worker(

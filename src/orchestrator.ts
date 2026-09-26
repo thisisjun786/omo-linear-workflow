@@ -40,6 +40,12 @@ import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting } from "./proxy/routing-launch";
 import { type Readiness, removeReadiness, subscribeReadiness } from "./readiness";
 import { attachBinding, type NativeSession } from "./transport";
+import {
+  checkUpdates,
+  systemUpdateTimer,
+  type UpdateCheck,
+  type UpdateTimer,
+} from "./update/check";
 
 const normalizedPaneSchema = z.strictObject({
   paneId: z.string(),
@@ -127,8 +133,7 @@ export interface ManageResult {
   /** `reattaching`: another `olw manage` call owns the in-flight reattachment. */
   readonly action: "created" | "focused" | "reattached" | "reattaching";
   readonly binding: Binding;
-  /** Reserved for the update check; `olw manage` does not run it yet. */
-  readonly updateCheck: null;
+  readonly updateCheck: UpdateCheck;
 }
 export type ChildCreateMode = "direct" | "planned" | "research";
 export interface CreateChildInput {
@@ -236,6 +241,8 @@ export interface OrchestratorDependencies {
   readonly gitTip: (repo: string, revision: string) => Promise<string>;
   /** Settings file read for the manager's default model; defaults to ~/.omo/agent/settings.json. */
   readonly managerSettingsPath?: string;
+  readonly updateCheck?: () => Promise<UpdateCheck>;
+  readonly updateTimer?: UpdateTimer;
   readonly now: () => string;
   readonly uuid: () => string;
 }
@@ -421,6 +428,7 @@ export class Orchestrator {
   readonly #omoSocket: string;
   readonly #dbPath: string;
   readonly #deps: OrchestratorDependencies;
+  #currentUpdateCheck: UpdateCheck | null = null;
 
   public constructor(
     root: string,
@@ -579,13 +587,44 @@ export class Orchestrator {
   }
 
   /** Open, focus or reattach the single management session; never adopts a non-host session. */
+  public async updateCheck(
+    tags: Partial<Record<"omo-ai" | "@code-yeongyu/senpi", string>> = {},
+  ): Promise<Result<UpdateCheck>> {
+    try {
+      return ok(await checkUpdates(this.#root, { tags }));
+    } catch (cause) {
+      return ok({
+        checkedAt: this.#deps.now(),
+        state: "unavailable",
+        packages: {
+          "omo-ai": {
+            state: "unknown",
+            pinned: "unknown",
+            available: null,
+            tag: tags["omo-ai"] ?? "beta",
+          },
+          "@code-yeongyu/senpi": {
+            state: "unknown",
+            pinned: "unknown",
+            available: null,
+            tag: tags["@code-yeongyu/senpi"] ?? "latest",
+          },
+        },
+        globalOmo: null,
+        reason: messageOf(cause),
+      });
+    }
+  }
+
   public async manage(): Promise<Result<ManageResult>> {
+    const updateCheck = await this.#runUpdateCheck();
+    this.#currentUpdateCheck = updateCheck;
     const listed = this.#withRegistry((registry) => registry.list());
     if (!listed.ok) return listed;
     const existing = listed.value.find(
       (binding) => binding.assignment.role === "manager" && binding.launchState !== "closed",
     );
-    if (existing !== undefined) return this.#reopenManager(existing);
+    if (existing !== undefined) return this.#reopenManager(existing, updateCheck);
     const scope = this.#withRegistry((registry) => registry.importScope(managerSnapshot));
     if (!scope.ok) return scope;
     const previous = this.#withRegistry((registry) => registry.designation(MANAGER_DESIGNATION_ID));
@@ -611,11 +650,86 @@ export class Orchestrator {
       null,
     );
     return created.ok
-      ? ok({ action: "created", binding: created.value.binding, updateCheck: null })
+      ? ok({ action: "created", binding: created.value.binding, updateCheck })
       : created;
   }
 
-  async #reopenManager(binding: Binding): Promise<Result<ManageResult>> {
+  #managerUpdateLine(): string {
+    const check = this.#currentUpdateCheck;
+    if (!check) return "unavailable; run olw update check";
+    const versions = Object.entries(check.packages)
+      .map(
+        ([name, item]) =>
+          `${name} pinned ${item.pinned}, ${item.tag} ${item.available ?? item.state}`,
+      )
+      .join("; ");
+    return `${versions}; ${Object.values(check.packages).some((item) => item.state === "update_available") ? "run olw update prepare to prepare an update PR" : "run olw update check to refresh"}`;
+  }
+
+  async #runUpdateCheck(): Promise<UpdateCheck> {
+    const timer = this.#deps.updateTimer ?? systemUpdateTimer;
+    const startedAt = timer.now();
+    const deadline = startedAt + 20_000;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const deadlineController = new AbortController();
+    const makeUnknown = (reason: string): UpdateCheck => ({
+      checkedAt: this.#deps.now(),
+      state: "unknown",
+      packages: {
+        "omo-ai": { state: "unknown", pinned: "unknown", available: null, tag: "beta", reason },
+        "@code-yeongyu/senpi": {
+          state: "unknown",
+          pinned: "unknown",
+          available: null,
+          tag: "latest",
+          reason,
+        },
+      },
+      globalOmo: null,
+      reason,
+    });
+    try {
+      const result = await Promise.race([
+        (
+          this.#deps.updateCheck ??
+          (() => checkUpdates(this.#root, { timer, signal: deadlineController.signal }))
+        )(),
+        new Promise<UpdateCheck>((resolve) => {
+          deadlineTimer = timer.setTimeout(
+            () => {
+              timedOut = true;
+              deadlineController.abort();
+              resolve(makeUnknown("Update check timed out"));
+            },
+            Math.max(0, deadline - timer.now()),
+          );
+        }),
+      ]);
+      return timedOut || timer.now() >= deadline ? makeUnknown("Update check timed out") : result;
+    } catch (cause) {
+      return {
+        checkedAt: this.#deps.now(),
+        state: "unavailable",
+        packages: {
+          "omo-ai": { state: "unknown", pinned: "unknown", available: null, tag: "beta" },
+          "@code-yeongyu/senpi": {
+            state: "unknown",
+            pinned: "unknown",
+            available: null,
+            tag: "latest",
+          },
+        },
+        globalOmo: null,
+        reason: messageOf(cause),
+      };
+    } finally {
+      if (deadlineTimer !== undefined) timer.clearTimeout(deadlineTimer);
+      deadlineController.abort();
+    }
+  }
+
+  async #reopenManager(binding: Binding, updateCheck: UpdateCheck): Promise<Result<ManageResult>> {
     const closeInstruction = `run olw close --binding ${binding.id} first`;
     if (binding.launchState === "uncertain")
       return failure(
@@ -658,7 +772,7 @@ export class Orchestrator {
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
         await herdr.focusWorkspace(workspaceId);
-        return ok({ action: "focused", binding, updateCheck: null });
+        return ok({ action: "focused", binding, updateCheck });
       }
       const now = this.#deps.now();
       const claim = this.#withRegistry((registry) =>
@@ -672,7 +786,7 @@ export class Orchestrator {
       if (!claim.ok) return claim;
       if (!claim.value.claimed) {
         await herdr.focusWorkspace(workspaceId);
-        return ok({ action: "reattaching", binding: claim.value.binding, updateCheck: null });
+        return ok({ action: "reattaching", binding: claim.value.binding, updateCheck });
       }
       const owner = claim.value.token;
       token = owner;
@@ -697,7 +811,7 @@ export class Orchestrator {
         token = undefined;
         if (!finished.value) return leaseLost();
         await herdr.focusWorkspace(workspaceId);
-        return ok({ action: "focused", binding, updateCheck: null });
+        return ok({ action: "focused", binding, updateCheck });
       }
       const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
       const managedPath = managedHerdrPath(artifact.artifactDir);
@@ -750,7 +864,7 @@ export class Orchestrator {
       token = undefined;
       if (!finished.value) return leaseLost();
       await herdr.focusWorkspace(workspaceId);
-      return ok({ action: "reattached", binding: moved.value, updateCheck: null });
+      return ok({ action: "reattached", binding: moved.value, updateCheck });
     } catch (cause) {
       return failure(
         "runtime_unavailable",
@@ -2391,7 +2505,10 @@ export class Orchestrator {
               `plan_head: ${successor.head}`,
               "Use the plan with the ulw-execute skill to implement this issue.",
             ]),
-      ].join("\n");
+      ].join("\n") +
+        (binding.assignment.role === "manager"
+          ? `\nupdate_check: ${this.#managerUpdateLine()}`
+          : "");
     const claim = this.#withRegistry((registry) => registry.beginInitialization(binding.id, text));
     if (!claim.ok) return claim;
     if (claim.value.disposition === "replay") return ok(claim.value.binding);

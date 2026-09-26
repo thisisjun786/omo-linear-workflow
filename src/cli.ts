@@ -39,6 +39,7 @@ const valueFlags = new Set([
   "plan",
   "head",
   "stage",
+  "tag",
 ]);
 const booleanFlags = new Set([
   "json",
@@ -80,7 +81,7 @@ function parseArguments(
         error: { code: "invalid_arguments", message: `Option --${key} requires a value` },
       };
     index += 1;
-    if (key === "evidence") {
+    if (key === "evidence" || key === "tag") {
       const current = mutable[key];
       mutable[key] = Array.isArray(current) ? [...current, value] : [value];
     } else mutable[key] = value;
@@ -278,6 +279,7 @@ export async function runCli(
           commands: [
             "doctor",
             "manage",
+            "update check",
             "scope import",
             "supervisor create",
             "parent create",
@@ -301,6 +303,7 @@ export async function runCli(
           ],
           options: {
             manage: "[--json]",
+            "update check": "[--tag omo-ai=beta] [--tag @code-yeongyu/senpi=latest] [--json]",
             "scope import": "--file PATH [--fixture]",
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
@@ -338,10 +341,37 @@ export async function runCli(
   }
   const root = resolve(stringOption(options, "root") ?? join(import.meta.dir, ".."));
   const orchestrator = new Orchestrator(root, stringOption(options, "herdr-socket"), dependencies);
-  let result: Result<unknown>;
+  let result: Result<unknown> | undefined;
   const command = words.join(" ");
   try {
-    if (command === "doctor") {
+    if (command === "update check") {
+      const tags: Record<string, string> = {};
+      const rawTags = options["tag"];
+      for (const raw of Array.isArray(rawTags)
+        ? rawTags
+        : typeof rawTags === "string"
+          ? [rawTags]
+          : []) {
+        const split = raw.indexOf("=");
+        const tagValue = split < 0 ? "" : raw.slice(split + 1);
+        if (
+          split < 1 ||
+          split !== raw.lastIndexOf("=") ||
+          split === raw.length - 1 ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(tagValue)
+        ) {
+          result = invalid("--tag must be PACKAGE=TAG with a valid dist-tag");
+          break;
+        }
+        const name = raw.slice(0, split);
+        if (name !== "omo-ai" && name !== "@code-yeongyu/senpi") {
+          result = invalid(`Unsupported package tag ${name}`);
+          break;
+        }
+        tags[name] = raw.slice(split + 1);
+      }
+      if (result === undefined) result = await orchestrator.updateCheck(tags);
+    } else if (command === "doctor") {
       result = await doctorWithChains(root, stringOption(options, "herdr-socket"));
     } else if (command === "manage") {
       result = await orchestrator.manage();
@@ -587,7 +617,7 @@ export async function runCli(
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, manage, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, manage, update check, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {
@@ -599,10 +629,12 @@ export async function runCli(
       },
     };
   }
+  const finalResult = result ?? invalid("Invalid update check tag");
   if (["send", "report", "stage complete", "ask", "answer"].includes(command))
-    result = deliveryOutcome(result);
-  print(result, has(options, "json"));
-  return exitCode(result);
+    result = deliveryOutcome(finalResult);
+  const completed = result ?? finalResult;
+  print(completed, has(options, "json"));
+  return exitCode(completed);
 }
 
 if (import.meta.main) process.exitCode = await runCli(process.argv.slice(2));

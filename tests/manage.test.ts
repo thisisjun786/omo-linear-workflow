@@ -57,12 +57,18 @@ async function world() {
     beforeTab: (() => Promise<void>) | undefined;
     /** Awaited when a manager's native session is attached for verification. */
     beforeAttach: (() => Promise<void>) | undefined;
+    updateTimer: OrchestratorDependencies["updateTimer"];
+    hangingUpdateCheck: boolean;
+    updateCheck: OrchestratorDependencies["updateCheck"];
   } = {
     failRun: false,
     hostCheck: undefined,
     now: "2026-09-26T00:00:00.000Z",
     beforeTab: undefined,
     beforeAttach: undefined,
+    updateTimer: undefined,
+    hangingUpdateCheck: false,
+    updateCheck: undefined,
   };
   const identities = new Map<string, RuntimeIdentity>();
   const prompts = new Map<string, Set<string>>();
@@ -176,6 +182,31 @@ async function world() {
     now: () => hooks.now,
     uuid: () => `id-${++sequence}`,
     managerSettingsPath: settingsPath,
+    updateTimer: {
+      now: () => hooks.updateTimer?.now() ?? Date.now(),
+      setTimeout: (callback, delay) =>
+        hooks.updateTimer?.setTimeout(callback, delay) ?? setTimeout(callback, delay),
+      clearTimeout: (timer) => hooks.updateTimer?.clearTimeout(timer) ?? clearTimeout(timer),
+    },
+    updateCheck: async () => {
+      if (hooks.updateCheck !== undefined) return hooks.updateCheck();
+      if (hooks.hangingUpdateCheck)
+        return new Promise<import("../src/update/check").UpdateCheck>(() => {});
+      return {
+        checkedAt: "2026-09-26T00:00:00.000Z",
+        state: "current",
+        packages: {
+          "omo-ai": { state: "current", pinned: "1.0.0", available: "1.0.0", tag: "beta" },
+          "@code-yeongyu/senpi": {
+            state: "current",
+            pinned: "1.0.0",
+            available: "1.0.0",
+            tag: "latest",
+          },
+        },
+        globalOmo: "1.0.0",
+      };
+    },
     terminateBinding: async (binding) => {
       identities.delete(binding.id);
     },
@@ -249,6 +280,7 @@ async function world() {
     created,
     tabs,
     focused,
+    prompts,
     hooks,
   };
 }
@@ -257,11 +289,62 @@ function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
 
+test("a hanging injected update check cannot delay manager creation or focus", async () => {
+  const w = await world();
+  const timers: Array<{ callback: () => void; cleared: boolean }> = [];
+  let now = 0;
+  let calls = 0;
+  const checkEntered = Promise.withResolvers<void>();
+  w.hooks.updateCheck = () => {
+    calls += 1;
+    checkEntered.resolve();
+    return new Promise<import("../src/update/check").UpdateCheck>(() => {});
+  };
+  w.hooks.updateTimer = {
+    now: () => now,
+    setTimeout(callback) {
+      const timer = { callback, cleared: false };
+      timers.push(timer);
+      return timer as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeout(id) {
+      (id as unknown as { cleared: boolean }).cleared = true;
+    },
+  };
+  const firstPromise = w.orchestrator.manage();
+  await checkEntered.promise;
+  const firstTimer = timers[0];
+  if (firstTimer === undefined) throw new Error("Manage deadline was not scheduled");
+  now = 20_000;
+  firstTimer.callback();
+  const first = value(await firstPromise);
+  expect(calls).toBe(1);
+  expect(first.action).toBe("created");
+  expect(first.updateCheck.state).toBe("unknown");
+  expect(w.created).toHaveLength(1);
+  w.hooks.updateCheck = async () => ({
+    checkedAt: "2026-09-26T00:00:00.000Z",
+    state: "current",
+    packages: {
+      "omo-ai": { state: "current", pinned: "1.0.0", available: "1.0.0", tag: "beta" },
+      "@code-yeongyu/senpi": {
+        state: "current",
+        pinned: "1.0.0",
+        available: "1.0.0",
+        tag: "latest",
+      },
+    },
+    globalOmo: "1.0.0",
+  });
+  const second = value(await w.orchestrator.manage());
+  expect(second.action).toBe("focused");
+});
+
 test("first manage creates one manager labeled manager; second focuses it and launches nothing", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage());
   expect(first.action).toBe("created");
-  expect(first.updateCheck).toBeNull();
+  expect(first.updateCheck.state).toBe("current");
   expect(first.binding).toMatchObject({
     assignment: { role: "manager" },
     launchState: "ready",
@@ -276,11 +359,13 @@ test("first manage creates one manager labeled manager; second focuses it and la
   expect(argv[argv.indexOf("--model") + 1]).toBe("fixture-provider/fixture-model");
   expect(argv[argv.indexOf("--thinking") + 1]).toBe("high");
   expect(argv).not.toContain("--no-model-fallback");
+  expect(w.prompts.get(first.binding.id)?.values().next().value).toContain("update_check:");
   expect(w.focused).toEqual([]);
 
+  w.hooks.hangingUpdateCheck = false;
   const second = value(await w.orchestrator.manage());
   expect(second.action).toBe("focused");
-  expect(second.updateCheck).toBeNull();
+  expect(second.updateCheck.state).toBe("current");
   expect(second.binding.id).toBe(first.binding.id);
   expect(w.runs).toHaveLength(1);
   expect(w.created).toHaveLength(1);

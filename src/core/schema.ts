@@ -91,14 +91,44 @@ export const envelopeSchema = z
   .strictObject({
     version: z.literal(1),
     id: text,
-    fromBindingId: text,
+    fromBindingId: text.nullable(),
     toBindingId: text.nullable(),
     designationId: text,
     snapshotDigest: text,
-    kind: z.enum(["instruction", "coordination", "report", "operational_notice"]),
+    kind: z.enum([
+      "instruction",
+      "coordination",
+      "report",
+      "operational_notice",
+      "question",
+      "answer",
+    ]),
     text: z.string(),
     outcome: z.enum(["completed", "blocked", "failed"]).nullable(),
     evidence: z.array(text),
+    question: z
+      .strictObject({
+        questions: z.array(
+          z.strictObject({
+            id: text,
+            question: text,
+            options: z.array(z.strictObject({ label: text, description: text.optional() })),
+            multiSelect: z.boolean(),
+          }),
+        ),
+        escalates: text.nullable(),
+      })
+      .optional(),
+    answer: z
+      .strictObject({
+        questionId: text,
+        answers: z.record(
+          text,
+          z.strictObject({ selected: z.array(text), text: z.string().optional() }),
+        ),
+        unanswered: z.array(text),
+      })
+      .optional(),
     operational: z
       .strictObject({
         failure: runtimeFailureSchema,
@@ -110,17 +140,35 @@ export const envelopeSchema = z
   })
   .refine(
     (envelope) =>
-      envelope.kind === "operational_notice"
-        ? envelope.operational !== undefined &&
+      envelope.kind === "question"
+        ? envelope.question !== undefined &&
+          envelope.answer === undefined &&
+          envelope.operational === undefined &&
           envelope.outcome === null &&
-          envelope.operational.binding.id === envelope.fromBindingId &&
-          envelope.operational.failure.durableSessionId ===
-            envelope.operational.binding.durableSessionId &&
-          (envelope.toBindingId === null
-            ? envelope.operational.localReason !== null
-            : envelope.operational.localReason === null &&
-              envelope.toBindingId === envelope.operational.ownerBindingId)
-        : envelope.operational === undefined,
+          envelope.fromBindingId !== null &&
+          envelope.id.startsWith(`question:${envelope.fromBindingId}:`)
+        : envelope.kind === "answer"
+          ? envelope.answer !== undefined &&
+            envelope.question === undefined &&
+            envelope.operational === undefined &&
+            envelope.outcome === null &&
+            envelope.id === `answer:${envelope.answer.questionId}`
+          : envelope.kind === "operational_notice"
+            ? envelope.question === undefined &&
+              envelope.answer === undefined &&
+              envelope.operational !== undefined &&
+              envelope.outcome === null &&
+              envelope.operational.binding.id === envelope.fromBindingId &&
+              envelope.operational.failure.durableSessionId ===
+                envelope.operational.binding.durableSessionId &&
+              (envelope.toBindingId === null
+                ? envelope.operational.localReason !== null
+                : envelope.operational.localReason === null &&
+                  envelope.toBindingId === envelope.operational.ownerBindingId)
+            : envelope.operational === undefined &&
+              envelope.question === undefined &&
+              envelope.answer === undefined &&
+              envelope.fromBindingId !== null,
     "Operational telemetry requires actual error evidence, its binding and route, and no result outcome",
   );
 const nativeErrorSchema = z.strictObject({
@@ -161,10 +209,11 @@ export const deliveryRecordSchema = z
       record.state === "posted"
         ? record.envelope.toBindingId === null &&
           ((record.envelope.kind === "report" && record.envelope.outcome !== null) ||
-            record.envelope.kind === "operational_notice") &&
+            record.envelope.kind === "operational_notice" ||
+            record.envelope.kind === "question") &&
           record.receipt === null
         : record.envelope.toBindingId !== null,
-    "Only local posted reports or operational notices address the user inbox, without a native receipt",
+    "Only local posted reports, questions or operational notices address the user inbox, without a native receipt",
   );
 export const runtimeIdentitySchema = z.strictObject({
   durableSessionId: text,

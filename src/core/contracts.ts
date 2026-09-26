@@ -138,16 +138,45 @@ export interface OperationalNotice {
 export interface Envelope {
   readonly version: 1;
   readonly id: string;
-  readonly fromBindingId: string;
+  readonly fromBindingId: string | null;
   // null addresses the local user inbox; it is never a native binding.
   readonly toBindingId: string | null;
   readonly designationId: string;
   readonly snapshotDigest: string;
-  readonly kind: "instruction" | "coordination" | "report" | "operational_notice";
+  readonly kind:
+    | "instruction"
+    | "coordination"
+    | "report"
+    | "operational_notice"
+    | "question"
+    | "answer";
   readonly text: string;
   readonly outcome: "completed" | "blocked" | "failed" | null;
   readonly evidence: string[];
   readonly operational?: OperationalNotice | undefined;
+  readonly question?:
+    | {
+        readonly questions: ReadonlyArray<{
+          readonly id: string;
+          readonly question: string;
+          readonly options: ReadonlyArray<{
+            readonly label: string;
+            readonly description?: string | undefined;
+          }>;
+          readonly multiSelect: boolean;
+        }>;
+        readonly escalates: string | null;
+      }
+    | undefined;
+  readonly answer?:
+    | {
+        readonly questionId: string;
+        readonly answers: Readonly<
+          Record<string, { readonly selected: string[]; readonly text?: string | undefined }>
+        >;
+        readonly unanswered: string[];
+      }
+    | undefined;
 }
 export type NativeReceipt =
   | {
@@ -252,6 +281,10 @@ export interface Registry {
   delivery(messageId: string): Result<DeliveryRecord>;
   post(senderSessionId: string, envelope: Envelope): Result<DeliveryRecord>;
   postedReports(filter: ScopeFilter): Result<DeliveryRecord[]>;
+  postedQuestions(
+    filter: ScopeFilter,
+  ): Result<Array<{ readonly record: DeliveryRecord; readonly answered: boolean }>>;
+  answerFromUser(questionId: string, envelope: Envelope): Result<ClaimResult>;
   operationalNotices(filter: ScopeFilter): Result<DeliveryRecord[]>;
   close(): void;
 }

@@ -893,6 +893,14 @@ export function openRegistry(
     const from = sender.value.assignment;
     const to = target.value.assignment;
     const managerRoute =
+      (envelope.kind === "question" &&
+        from.role === "parent" &&
+        to.role === "supervisor" &&
+        from.ownerBindingId === target.value.id) ||
+      (envelope.kind === "answer" &&
+        from.role === "supervisor" &&
+        to.role === "parent" &&
+        to.ownerBindingId === sender.value.id) ||
       (envelope.kind === "instruction" &&
         from.role === "supervisor" &&
         to.role === "parent" &&
@@ -913,13 +921,19 @@ export function openRegistry(
       return error("digest_mismatch", "Envelope snapshot is not designated");
     if (!designation.value.contact)
       return error("contact_denied", "Designation does not permit contact");
-    if (envelope.kind === "instruction" && !designation.value.execute)
+    if (
+      (envelope.kind === "instruction" || envelope.kind === "answer") &&
+      !designation.value.execute
+    )
       return error("execute_denied", "Designation does not permit execution");
     const targetApproval = designationFor(target.value.designationId);
     if (!targetApproval.ok) return targetApproval;
     if (!targetApproval.value.contact)
       return error("contact_denied", "Target designation does not permit contact");
-    if (envelope.kind === "instruction" && !targetApproval.value.execute)
+    if (
+      (envelope.kind === "instruction" || envelope.kind === "answer") &&
+      !targetApproval.value.execute
+    )
       return error("execute_denied", "Target designation does not permit execution");
     if (managerRoute) {
       const membership =
@@ -954,8 +968,31 @@ export function openRegistry(
       sender.value.id !== target.value.id &&
       from.initiativeId !== null &&
       from.initiativeId === to.initiativeId;
-    if (!instruction && !report && !coordination)
+    const question =
+      envelope.kind === "question" &&
+      ((from.role === "child" && to.role === "parent" && from.ownerBindingId === target.value.id) ||
+        (from.role === "parent" &&
+          to.role === "supervisor" &&
+          from.ownerBindingId === target.value.id));
+    const answer =
+      envelope.kind === "answer" &&
+      ((from.role === "parent" && to.role === "child" && to.ownerBindingId === sender.value.id) ||
+        (from.role === "supervisor" &&
+          to.role === "parent" &&
+          to.ownerBindingId === sender.value.id));
+    if (!instruction && !report && !coordination && !question && !answer)
       return error("route_denied", "Role route is not authorized");
+    if (answer) {
+      const source = parseDelivery(deliveryById.get(envelope.answer?.questionId ?? ""));
+      if (
+        !source.ok ||
+        (source.value.state !== "accepted" && source.value.state !== "posted") ||
+        source.value.envelope.kind !== "question" ||
+        source.value.envelope.fromBindingId !== target.value.id ||
+        source.value.envelope.toBindingId !== sender.value.id
+      )
+        return error("question_unknown", "No accepted question from this recipient exists");
+    }
     return ok(target.value);
   }
 
@@ -1150,10 +1187,14 @@ export function openRegistry(
       if (
         sender.value.assignment.role !== "parent" ||
         envelope.toBindingId !== null ||
-        envelope.kind !== "report"
+        (envelope.kind !== "report" && envelope.kind !== "question")
       )
-        return error("route_denied", "Only parents may post reports to the user inbox");
-      if (envelope.outcome === null) return error("invalid_envelope", "Reports require an outcome");
+        return error(
+          "route_denied",
+          "Only parents may post reports or questions to the user inbox",
+        );
+      if (envelope.kind === "report" && envelope.outcome === null)
+        return error("invalid_envelope", "Reports require an outcome");
       const approval = designationFor(sender.value.designationId);
       if (!approval.ok) return approval;
       if (envelope.designationId !== sender.value.designationId)
@@ -1177,6 +1218,111 @@ export function openRegistry(
         "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'posted', NULL)",
       ).run(envelope.id, encoded(envelope));
       return ok({ envelope, state: "posted", receipt: null });
+    });
+  }
+
+  function postedQuestions(
+    filter: ScopeFilter,
+  ): Result<Array<{ readonly record: DeliveryRecord; readonly answered: boolean }>> {
+    try {
+      const rows = db
+        .query<DeliveryRow, [string | null, string | null, string | null, string | null]>(`
+        SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
+        JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
+        WHERE d.state = 'posted' AND json_extract(d.envelope_json, '$.kind') = 'question'
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
+        ORDER BY d.rowid
+      `)
+        .all(
+          filter.projectId ?? null,
+          filter.projectId ?? null,
+          filter.initiativeId ?? null,
+          filter.initiativeId ?? null,
+        );
+      const result: Array<{ record: DeliveryRecord; answered: boolean }> = [];
+      for (const row of rows) {
+        const record = parseDelivery(row);
+        if (!record.ok) return record;
+        result.push({
+          record: record.value,
+          answered: deliveryById.get(`answer:${record.value.envelope.id}`) !== null,
+        });
+      }
+      return ok(result);
+    } catch (cause) {
+      return error("storage_error", "Could not read posted questions", messageOf(cause));
+    }
+  }
+
+  function answerFromUser(questionId: string, envelopeValue: Envelope): Result<ClaimResult> {
+    return transaction(() => {
+      const parsed = envelopeSchema.safeParse(envelopeValue);
+      if (!parsed.success)
+        return error("invalid_envelope", "Envelope is invalid", parsed.error.issues);
+      const envelope = parsed.data;
+      if (
+        envelope.kind !== "answer" ||
+        envelope.fromBindingId !== null ||
+        envelope.answer?.questionId !== questionId
+      )
+        return error("route_denied", "User answers require an inbox question");
+      const question = parseDelivery(deliveryById.get(questionId));
+      if (
+        !question.ok ||
+        question.value.envelope.kind !== "question" ||
+        question.value.state !== "posted"
+      )
+        return error("question_not_in_inbox", "Question is not posted to the user inbox");
+      const asker = question.value.envelope.fromBindingId;
+      if (asker === null || envelope.toBindingId !== asker)
+        return error("route_denied", "User answer must target the question sender");
+      const target = get(asker);
+      if (!target.ok) return target;
+      const approval = designationFor(target.value.designationId);
+      if (!approval.ok) return approval;
+      if (
+        envelope.designationId !== target.value.designationId ||
+        envelope.snapshotDigest !== approval.value.snapshotDigest
+      )
+        return error("foreign_designation", "User answer must use the parent's approval");
+      const existing = deliveryById.get(envelope.id);
+      if (existing !== null) {
+        const record = parseDelivery(existing);
+        if (!record.ok) return record;
+        if (!same(record.value.envelope, envelope))
+          return error("message_conflict", "Question already has a different answer");
+        return ok({
+          disposition:
+            record.value.state === "sending" || record.value.state === "uncertain"
+              ? "in_progress"
+              : "replay",
+          record: record.value,
+          target: target.value,
+        });
+      }
+      if (target.value.launchState !== "ready") return error("not_ready", "Parent is not ready");
+      if (target.value.contactState !== "active")
+        return error("contact_paused", "Parent is not accepting contact");
+      if (!approval.value.contact)
+        return error("contact_denied", "Parent designation does not permit contact");
+      const first: DeliveryAttempt = {
+        number: 1,
+        nativeKey: envelope.id,
+        state: "sending",
+        receipt: null,
+        uncertaintyReason: null,
+      };
+      db.query(
+        "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'sending', NULL)",
+      ).run(envelope.id, encoded(envelope));
+      attempts.append(envelope.id, first);
+      return ok({
+        disposition: "new",
+        record: { envelope, state: "sending", receipt: null, attempts: [first] },
+        target: target.value,
+        nativeKey: envelope.id,
+      });
     });
   }
 
@@ -1254,6 +1400,8 @@ export function openRegistry(
     setOwner,
     post,
     postedReports: (filter) => inboxRecords(filter, false),
+    postedQuestions,
+    answerFromUser,
     operationalNotices: (filter) => inboxRecords(filter, true),
     beginClose,
     finishClose,

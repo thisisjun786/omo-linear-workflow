@@ -11,7 +11,7 @@ The [CI workflow](../../.github/workflows/ci.yml) runs its required job, `valida
 | Push to `main` | The released source after a release advances `main`. |
 | Manual dispatch | The same checks on any branch. |
 
-Every PR runs the required `validate` job. When a PR targets `main`, its first step fails with the branch-policy message before checkout, so the required check cannot pass and contributor code is not executed. Other PRs run every validation step. There's no path-based selection: a documentation-only PR still installs dependencies and builds Herdr. New runs cancel obsolete runs for the same PR or branch, except reusable workflow calls. The job has a 60 minute timeout.
+Every PR runs the required `validate` job. When a PR targets `main`, its first step fails with the branch-policy message before checkout, so the required check cannot pass and contributor code is not executed. Other PRs run every validation step. There's no path-based selection: a documentation-only PR still installs dependencies and builds Herdr. A new run cancels the obsolete run for the same PR. Push runs are never cancelled: each pushed commit keeps its own run, which is the release evidence for that exact commit. The job has a 60 minute timeout.
 
 A merge into `dev` starts a push run for the exact merge commit. The release workflow requires a completed, successful `CI` push run on `dev` whose `head_sha` is exactly the requested release SHA; a PR run or a successful run for another commit is not release evidence.
 

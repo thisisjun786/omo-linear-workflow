@@ -19,8 +19,9 @@ here is itself an enforcement, and Linear permissions aren't enforced by these s
 | Child, `research` stage | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
 
 A project parent is the execution unit; it needs neither an initiative nor a supervisor.
-No hidden supervisor is created. Parents and children remain linked Git worktrees, not
-clones; management links do not change their branches or ancestry. A planned child's
+No hidden supervisor is created. Mapped parents own independent clones; their children are
+linked worktrees of those clones. Deprecated `--repo` parents retain the legacy linked-worktree
+layout and local merges. Management links do not change branches or ancestry. A planned child's
 stages share one worktree and one branch; each stage is its own binding and durable
 session, and only one stage is live at a time.
 
@@ -76,7 +77,16 @@ explicitly designated.
 | Pull request / repository | implementation, review threads, checks | whether the work was wanted or accepted |
 
 A parent writes its project's coordination record and integrates its issues. A child writes no
-Linear record and never merges; it delivers and reports. A supervisor writes the initiative's
+Linear record and never merges; it delivers and reports. Each owned-clone issue with
+`deliverable: pr` pushes to origin and opens one PR into its parent's integration branch,
+including issue key, verbatim criteria and evidence, then reports its URL and head SHA once.
+The parent reviews that exact head and runs `pr merge --from PARENT --pr URL` (merge commit,
+fetch, fast-forward and non-force push), not a local child merge. The project's final PR goes
+from integration to the default branch and stops for user review; the parent never merges it.
+`research` defaults to `report`; direct/planned default to `pr`. `--deliverable document`
+selects a document. PR-less children never push/open PRs and report a deliverable path or
+existing Linear document URL; code changes require proposing a new direct issue to the parent.
+Legacy parents keep local integration unchanged. A supervisor writes the initiative's
 record and decides only the order in which projects land on a shared target. Release and
 deployment stay with the user.
 
@@ -167,11 +177,14 @@ Commands and flags below follow the frozen implementation contract; confirm agai
 | Create a standalone project parent | `parent create --scope-digest SHA256 --designation ID --execute --project ID --repo ABS_ROOT --base REF [--no-manager]` |
 | Create under an existing supervisor | `parent create --supervisor BINDING --project ID --repo ABS_ROOT --base REF` |
 | Explicit management link (user operation) | `parent link --parent BINDING --supervisor BINDING`, `parent unlink --parent BINDING` |
-| Create an issue child | `child create --parent BINDING --issue ID [--mode direct\|planned\|research]` |
+| Create an issue child | `child create --parent BINDING --issue ID [--mode direct\|planned\|research] [--deliverable pr\|report\|document]` |
 | Hand off an approved plan (plan stage) | `stage complete --from PLAN_BINDING --plan ABS_PATH --head SHA --id MESSAGE_ID --text-file handoff.txt` |
 | Start the execute stage (parent) | `stage start --from PLAN_BINDING --parent PARENT_BINDING --stage execute --id MESSAGE_ID` |
+| Open an owned-clone issue PR | `pr open --from CHILD --body-file FILE [--title TITLE] [--draft]` |
+| Integrate a reviewed child PR | `pr merge --from PARENT --pr URL_OR_NUMBER` |
+| Open the project PR, never merge it | `pr open --from PARENT --base DEFAULT_BRANCH [--body-file FILE]` |
 | Instruct the level below | `send --from BINDING --to BINDING --id MESSAGE_ID --kind instruction --text-file brief.txt` |
-| Report to the level above | `report --from BINDING --id MESSAGE_ID --outcome completed\|blocked\|failed --evidence ABS_PATH --text-file result.txt` |
+| Report to the level above | `report --from BINDING --id MESSAGE_ID --outcome completed\|blocked\|failed --evidence ABS_PATH --text-file result.txt [--pr URL --head SHA \| --deliverable-path PATH_OR_URL]` |
 | Post explicitly to the user (parent only) | `report --from BINDING --id MESSAGE_ID --outcome blocked\|failed\|completed --text-file result.txt --to-user` |
 | Ask the level above | `ask --from BINDING --id ID --text-file question.txt [--questions-file JSON] [--to-user]` |
 | Answer one question | `answer --from BINDING --question QUESTION_ID --text-file answer.txt [--answers-file JSON]`, or `answer --as-user ...` for a posted inbox question |

@@ -15,6 +15,12 @@ published.
 
 ### Added
 
+- Issue deliverables (`pr`, `report`, `document`) on bindings, briefs, packets and status. Owned-clone
+  children publish one PR into their parent's integration branch; `pr open` reuses open PRs and
+  `pr merge` checks the reported head and merges with a merge commit. PR-less results require a
+  deliverable path. Project PRs stop for user review; legacy local merges remain deprecated but unchanged.
+- Fetch-before-close publication guards for owned parents and their PR children, with explicit
+  `--discard`, and isolated bare-remote/gh-shim PR lifecycle QA.
 - New mapped parents run in OLW-owned, hardlinked clones of repository mirrors, with readable
   per-project Herdr groups and child worktrees owned by the parent clone. Explicit private local-file
   copies, setup deadlines/logs/receipts, and close-time unpushed-commit reports are supported.

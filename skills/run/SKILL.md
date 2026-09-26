@@ -105,12 +105,15 @@ first (`close --binding <plan or execute binding>`), then create a new child wit
 `--mode direct`; the registry allows one live owner per issue.
 
 The child's base branch comes from the registry, not the packet. The packet carries the issue
-ID, the criteria verbatim, the integration branch, allowed write scope, delivery limits, an
+ID/key, `deliverable: pr | report | document`, the criteria verbatim, the integration branch, allowed write scope, delivery limits, an
 absolute evidence directory, and what evidence to return. Its envelope ID identifies this
 packet; the child uses `report:<packet-id>` for its single final report. Creation of a
 `direct` child selects mass-ulw mode (plan, execute and research stages select their own
 skills) but returns readiness separately from execution: a created child has done
-nothing yet. Only an explicit issue packet starts work.
+nothing yet. Only an explicit issue packet starts work. `child create --mode research` defaults
+to `report`; direct/planned default to `pr`. Select `--deliverable document` for a document.
+The immutable binding, brief, instruction envelope and `status` carry this choice; the packet
+must agree. A planned child's execute stage inherits it; plan handoff is not final delivery.
 
 ### Answering questions and approving plans
 
@@ -157,7 +160,26 @@ criterion, reviewed revision, evidence and required outcome. New scope or a real
 in the criteria goes up, not to the child. Serialize integrations that share a target and
 verify each landing. Release and deployment stay with the user.
 
-When the project's agreed scope is delivered, integrated and reconciled:
+For an **owned-clone parent**, each `pr` child delivers one PR into the integration branch.
+Review its body, verbatim criteria and evidence at the reported head, then use:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" pr merge --from <PARENT> --pr <URL_OR_NUMBER> --json
+```
+
+The helper requires the accepted child's reported head, uses a merge commit with a head-match
+guard, fetches and fast-forwards the parent clone, then pushes the integration branch without
+force. Do not locally merge these child branches. `report`/`document` results require artifact
+review, not a PR. **Deprecated legacy `--repo` parents** keep the existing local-merge flow.
+
+When the project's agreed scope is delivered, integrated and reconciled, an owned parent opens
+its integration-to-default-branch PR and stops for the user; it never merges that final PR:
+
+```sh
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" pr open --from <PARENT> --base <DEFAULT_BRANCH> --body-file project-result.md --json
+```
+
+Then report the project PR URL (legacy parents report their local integration result):
 
 ```sh
 bun "$OMO_INITIATIVE_ROOT/dist/cli.js" report --from <PARENT> --id <MESSAGE_ID> --outcome completed --evidence <ABS_PATH> --text-file result.txt --json
@@ -253,12 +275,26 @@ It owns native DAG syntax, category routing and recovery. Apply these OLW bounda
    is separate and is not part of the child's goal. A later correction packet reuses the
    existing issue owner and applicable run evidence; it is not a reason to duplicate workers.
 
-Never merge, touch the parent branch or write Linear records. Among OLW roles, contact only
-the parent. Report through the existing claimed route, never directly from an internal node:
+Never merge, modify the parent branch or write Linear records. Among OLW roles, contact only
+the parent. For `deliverable: pr` under an **owned-clone parent**, commit verified issue work,
+then push the child branch to `origin` and open exactly one PR into the parent's integration
+branch using the helper. The PR body must contain the issue key, the criteria verbatim and
+criterion-by-criterion evidence. The helper publishes the integration base if necessary, never
+force-pushes, and returns an existing open PR instead of duplicating it. Report once through
+the existing route with the returned URL and head SHA, never from an internal node:
 
 ```sh
-bun "$OMO_INITIATIVE_ROOT/dist/cli.js" report --from <CHILD> --id <MESSAGE_ID> --outcome completed --evidence <ABS_PATH> --text-file result.txt --json
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" pr open --from <CHILD> --body-file pr-body.md --json
+bun "$OMO_INITIATIVE_ROOT/dist/cli.js" report --from <CHILD> --id report:<PACKET_ID> --outcome completed --pr <URL> --head <SHA> --evidence <ABS_PATH> --text-file result.txt --json
 ```
+
+For `report`/`document`, do not push and do not open a PR. Return an explicit evidence file
+path or existing Linear document URL with `--deliverable-path <PATH_OR_URL>` instead of
+`--pr/--head`. If code changes are needed, propose a new direct issue to the parent, not an
+implementation under the research/document assignment. The child does not write Linear.
+For deprecated legacy parents, omit these PR flags and return the local head for parent merge.
+A plan stage uses `stage complete`, not `pr open` or a final PR report. If delivery limits forbid
+publication, report blocked; do not silently claim completion without the required deliverable.
 
 `result.txt` names the head commit, the branch, each criterion with its evidence, what's
 unverified, and anything left running or on disk. Blocked on a decision only a person can

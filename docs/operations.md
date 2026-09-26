@@ -21,22 +21,22 @@ Close children first, then `olw close --binding PARENT_BINDING --json`. Close re
 Herdr workspace and terminates its runtime, but preserves the clone, child worktrees, branches,
 dirty files and copy/setup receipts. It never pushes, opens a PR or deletes repository work.
 
-For owned clones the response adds `unpushedCommits`, the commit IDs reachable from local branches
-but not from any remote-tracking branch. This includes unmerged child branches in the clone.
-Inspection occurs after runtime termination; a failure leaves closure incomplete and preserves
-ownership for inspection/retry. Repeated close reports the current result again. A failed launch
-that never created its clone can be released with `--confirm-absent` after manual inspection.
-
-The report uses locally known remote-tracking refs and does not fetch during close. It is a
-preservation warning, not a push or PR policy. If somebody pushed elsewhere, fetch explicitly in
-the retained clone before interpreting the report. Remote publication policy is separate work.
-Legacy linked-worktree close behavior is unchanged.
+Owned parents and their `pr` children fetch origin with pruning **before** inspecting publication
+and before changing lifecycle state or terminating a runtime. Close refuses with `unpushed_commits`
+and the commit IDs absent from every remote-tracking ref. Parent inspection includes all local
+branches (including unmerged children); child inspection covers its own branch. Fetch failure also
+refuses close. Publication elsewhere is discovered by the fetch, and deleted stale refs cannot hide
+unpublished commits. `--discard` explicitly bypasses this guard, but still preserves checkout files.
+A failed launch that never created its clone can be released with `--confirm-absent` after inspection.
+Legacy linked-worktree and PR-less child close behavior is unchanged.
 
 ## Isolated owned-clone QA
 
 `bun scripts/qa-owned-clones.ts` uses the managed Herdr artifact, a temporary HOME, a unique server,
-a temporary bare remote and a recording socket proxy. It exercises the real CLI, registry, Git,
-Herdr workspaces/worktrees, plan/execute tabs and close; only native model execution/readiness is
-simulated, so it requires no model credentials or network. It verifies separate project common-dir
-keys and the absence of `worktree.create_grouped`, then removes its server and all fixture files.
-The receipt is `.omo/evidence/lina-273-qa.json`. It never connects to the user's Herdr server.
+a temporary bare remote, recording client wrapper and direct server snapshot. It exercises the real CLI, registry, Git,
+Herdr workspaces/worktrees, plan/execute tabs, child PR open/report/parent merge, project PR open
+and close. Native model execution/readiness and GitHub are simulated (a recording gh shim performs
+real Git merges against the bare remote), so no credentials/network are needed. It verifies the
+remote integration branch advances through a merge commit, project PRs leave the default branch
+unchanged, separate project common-dir keys and no `worktree.create_grouped`. It removes its server
+and all fixture files. The receipt is `.omo/evidence/lina-274-qa.json`; it never contacts user Herdr.

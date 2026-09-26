@@ -9,6 +9,7 @@ import type {
   Binding,
   Checkout,
   ChildStage,
+  Deliverable,
   DeliveryRecord,
   Designation,
   Envelope,
@@ -47,6 +48,7 @@ import {
   unpushedCommits,
 } from "./repo/checkout";
 import { fetchMirror } from "./repo/mirror";
+import { mergePr, type OpenPrInput, openPr } from "./repo/pr";
 import { attachBinding, type NativeSession } from "./transport";
 import {
   checkUpdates,
@@ -149,6 +151,7 @@ export interface CreateChildInput {
   readonly parentId: string;
   readonly issueId: string;
   readonly mode?: ChildCreateMode;
+  readonly deliverable?: Deliverable | undefined;
 }
 export interface SendInput {
   readonly fromId: string;
@@ -177,6 +180,7 @@ export interface ReportInput {
   readonly outcome: "completed" | "blocked" | "failed";
   readonly evidence: readonly string[];
   readonly text: string;
+  readonly delivery?: Envelope["delivery"];
 }
 export interface AskInput {
   readonly toUser?: boolean;
@@ -1094,6 +1098,7 @@ export class Orchestrator {
         stage,
         mode,
         ...(planPath === undefined ? {} : { planPath }),
+        deliverable: input.deliverable ?? (mode === "research" ? "report" : "pr"),
       },
     );
   }
@@ -1258,6 +1263,7 @@ export class Orchestrator {
         bindingId: this.#deps.uuid(),
         stage: "execute",
         mode: "planned",
+        deliverable: plan.value.deliverable,
         successor: {
           previousId: plan.value.id,
           workspaceId: plan.value.workspaceId,
@@ -1533,10 +1539,18 @@ export class Orchestrator {
       designationId: sender.value.designationId,
       snapshotDigest: context.value.designation.snapshotDigest,
       kind: input.kind,
+      ...this.#packetDeliverable(input.toId, input.kind),
       text: input.text,
       outcome: null,
       evidence: [],
     });
+  }
+
+  #packetDeliverable(targetId: string, kind: SendInput["kind"]): Pick<Envelope, "deliverable"> {
+    const target = this.#binding(targetId);
+    return kind === "instruction" && target.ok && target.value.assignment.role === "child"
+      ? { deliverable: target.value.deliverable ?? "pr" }
+      : {};
   }
 
   public async report(input: ReportInput): Promise<Result<unknown>> {
@@ -1572,6 +1586,7 @@ export class Orchestrator {
       text: input.text,
       outcome: input.outcome,
       evidence: [...input.evidence],
+      ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
     };
     if (existing.ok) {
       if (
@@ -1939,17 +1954,45 @@ export class Orchestrator {
     );
   }
 
+  public async prOpen(input: OpenPrInput): Promise<Result<unknown>> {
+    const registry = this.#deps.openRegistry(this.#dbPath);
+    try {
+      return await openPr(registry, input);
+    } finally {
+      registry.close();
+    }
+  }
+
+  public async prMerge(parentId: string, reference: string): Promise<Result<unknown>> {
+    const registry = this.#deps.openRegistry(this.#dbPath);
+    try {
+      return await mergePr(registry, parentId, reference);
+    } finally {
+      registry.close();
+    }
+  }
+
   public async close(
     bindingId: string,
     confirmAbsent = false,
+    discard = false,
   ): Promise<Result<Binding & { readonly unpushedCommits?: readonly string[] }>> {
     const target = this.#binding(bindingId);
     if (!target.ok) return target;
+    let guarded = target.value.checkout?.kind === "owned-clone";
+    if (target.value.assignment.role === "child" && (target.value.deliverable ?? "pr") === "pr") {
+      const owner = this.#binding(target.value.assignment.ownerBindingId);
+      if (!owner.ok) return owner;
+      guarded = owner.value.checkout?.kind === "owned-clone";
+    }
     const inspectUnpushed = async (): Promise<Result<readonly string[] | undefined>> => {
-      if (target.value.checkout?.kind !== "owned-clone") return ok(undefined);
+      if (!guarded || target.value.checkout === null || discard) return ok(undefined);
       if (confirmAbsent && !existsSync(target.value.checkout.path)) return ok([]);
       try {
-        return ok(await unpushedCommits(target.value.checkout));
+        await checkoutGit(target.value.checkout.path, ["fetch", "--prune", "origin"]);
+        return ok(
+          await unpushedCommits(target.value.checkout, target.value.assignment.role === "child"),
+        );
       } catch (cause) {
         return failure(
           "runtime_unavailable",
@@ -1965,6 +2008,14 @@ export class Orchestrator {
       result.ok && commits !== undefined
         ? ok({ ...result.value, unpushedCommits: commits })
         : result;
+    const inspected = await inspectUnpushed();
+    if (!inspected.ok) return inspected;
+    if (inspected.value !== undefined && inspected.value.length > 0)
+      return failure(
+        "unpushed_commits",
+        "Close refused: publish commits to origin or explicitly use --discard; checkout preserved",
+        { unpushedCommits: inspected.value },
+      );
     if (target.value.assignment.role === "child") {
       const stage = this.#withRegistry((registry) => registry.stageOf(bindingId));
       if (!stage.ok) return stage;
@@ -1972,10 +2023,7 @@ export class Orchestrator {
     }
     const closing = this.#withRegistry((registry) => registry.beginClose(bindingId));
     if (!closing.ok) return closing;
-    if (closing.value.launchState === "closed") {
-      const inspected = await inspectUnpushed();
-      return inspected.ok ? withUnpushed(closing, inspected.value) : inspected;
-    }
+    if (closing.value.launchState === "closed") return withUnpushed(closing, inspected.value);
     const binding = closing.value;
     const context = await this.#context(binding);
     // Bindings created before readable labels used the legacy `omo-<role>-<id>` name.
@@ -2031,8 +2079,6 @@ export class Orchestrator {
         await this.#deps.terminateBinding(binding);
       }
       await removeReadiness(this.#root, binding.id);
-      const inspected = await inspectUnpushed();
-      if (!inspected.ok) return inspected;
       return withUnpushed(
         this.#withRegistry((registry) => registry.finishClose(binding.id)),
         inspected.value,
@@ -2311,6 +2357,7 @@ export class Orchestrator {
       readonly stage?: ChildStage;
       readonly mode?: ChildCreateMode;
       readonly planPath?: string;
+      readonly deliverable?: Deliverable | undefined;
       readonly successor?: {
         readonly previousId: string;
         readonly workspaceId: string;
@@ -2342,6 +2389,7 @@ export class Orchestrator {
             designation,
             snapshot,
             assignment,
+            deliverable: target?.deliverable,
             cwd,
             checkout,
             herdrSocket: this.#herdrSocket,
@@ -2365,6 +2413,7 @@ export class Orchestrator {
         designation,
         snapshot,
         assignment,
+        deliverable: target?.deliverable,
         cwd,
         checkout,
         herdrSocket: this.#herdrSocket,
@@ -2681,6 +2730,7 @@ export class Orchestrator {
       buildRoleBrief(binding, snapshot, {
         ...(binding.assignment.role === "child"
           ? {
+              owner: this.#binding(binding.assignment.ownerBindingId),
               ...(currentStage === undefined ? {} : { stage: currentStage }),
             }
           : {}),
@@ -2744,6 +2794,7 @@ export class Orchestrator {
         designationId: binding.designationId,
         snapshotDigest: context.value.designation.snapshotDigest,
         kind: "instruction",
+        ...this.#packetDeliverable(binding.id, "instruction"),
         text,
         outcome: null,
         evidence: [],

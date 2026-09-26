@@ -1,3 +1,8 @@
+export type Deliverable = "pr" | "report" | "document";
+export type IssueDelivery =
+  | { readonly kind: "pr"; readonly url: string; readonly head: string }
+  | { readonly kind: "report" | "document"; readonly path: string };
+
 export type ChildStage = "direct" | "plan" | "execute" | "research";
 
 export type Result<T> =
@@ -100,6 +105,7 @@ export interface Checkout {
 export interface Binding {
   readonly id: string;
   readonly designationId: string;
+  readonly deliverable?: Deliverable | undefined;
   readonly assignment: Assignment;
   readonly durableSessionId: string;
   readonly cwd: string;
@@ -173,6 +179,8 @@ export interface Envelope {
   readonly text: string;
   readonly outcome: "completed" | "blocked" | "failed" | null;
   readonly evidence: string[];
+  readonly deliverable?: Deliverable | undefined;
+  readonly delivery?: IssueDelivery | undefined;
   readonly operational?: OperationalNotice | undefined;
   readonly question?:
     | {
@@ -248,6 +256,7 @@ export interface ClaimResult {
 export interface ReserveInput {
   readonly bindingId: string;
   readonly durableSessionId: string;
+  readonly deliverable?: Deliverable | undefined;
   readonly designation: Designation;
   readonly snapshot: ScopeSnapshot;
   readonly assignment: Assignment;
@@ -316,6 +325,7 @@ export interface Registry {
   finish(messageId: string, receipt: NativeReceipt, nativeKey?: string): Result<DeliveryRecord>;
   uncertain(messageId: string, reason: string, nativeKey?: string): Result<DeliveryRecord>;
   delivery(messageId: string): Result<DeliveryRecord>;
+  childReports(parentId: string): Result<DeliveryRecord[]>;
   post(senderSessionId: string, envelope: Envelope): Result<DeliveryRecord>;
   postedReports(filter: ScopeFilter): Result<DeliveryRecord[]>;
   postedQuestions(

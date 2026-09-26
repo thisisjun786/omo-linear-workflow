@@ -5,7 +5,12 @@ import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Result, ScopeFilter } from "./core/contracts";
 import { canRetryDelivery } from "./core/policy";
-import { answerFieldsSchema, deliveryRecordSchema, questionPayloadSchema } from "./core/schema";
+import {
+  answerFieldsSchema,
+  deliverableSchema,
+  deliveryRecordSchema,
+  questionPayloadSchema,
+} from "./core/schema";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
@@ -42,6 +47,11 @@ const valueFlags = new Set([
   "stage",
   "tag",
   "remote",
+  "deliverable",
+  "deliverable-path",
+  "pr",
+  "title",
+  "body-file",
 ]);
 const booleanFlags = new Set([
   "json",
@@ -52,6 +62,8 @@ const booleanFlags = new Set([
   "to-user",
   "as-user",
   "no-manager",
+  "draft",
+  "discard",
 ]);
 
 function parseArguments(
@@ -292,6 +304,8 @@ export async function runCli(
             "parent link",
             "parent unlink",
             "child create",
+            "pr open",
+            "pr merge",
             "stage complete",
             "stage start",
             "send",
@@ -322,14 +336,18 @@ export async function runCli(
               "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID [--repo PATH (deprecated; unmapped projects only)] [--base REF] (mapped projects use an owned clone; standalone parents link to the ready manager unless --no-manager)",
             "parent link": "--parent BINDING --supervisor BINDING (supervisor or manager)",
             "parent unlink": "--parent BINDING",
-            "child create": "--parent BINDING --issue ID [--mode direct|planned|research]",
+            "child create":
+              "--parent BINDING --issue ID [--mode direct|planned|research] [--deliverable pr|report|document]",
+            "pr open":
+              "--from BINDING [--title T] --body-file F [--draft] [--base DEFAULT_BRANCH (parent only; body optional)] [--json]",
+            "pr merge": "--from PARENT --pr URL|NUMBER [--json]",
             "stage complete":
               "--from PLAN_BINDING --plan ABS_PATH --head SHA --id MESSAGE_ID --text-file PATH",
             "stage start":
               "--from PLAN_BINDING --parent PARENT_BINDING --stage execute --id MESSAGE_ID",
             send: "--from BINDING --to BINDING --id ID --kind instruction|coordination --text-file PATH",
             report:
-              "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--to-user]",
+              "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--pr URL --head SHA | --deliverable-path PATH_OR_URL] [--to-user]",
             reports:
               "[--initiative ID | --project ID] (read-only user inbox; posted is not native acceptance)",
             ask: "--from BINDING --id ID --text-file PATH [--questions-file JSON] [--to-user]",
@@ -341,7 +359,7 @@ export async function runCli(
             status: "[--initiative ID | --project ID]",
             pause: "--binding ID",
             resume: "--binding ID",
-            close: "--binding ID [--confirm-absent]",
+            close: "--binding ID [--confirm-absent] [--discard]",
             reconcile: "--initiative ID | --project ID",
           },
         },
@@ -461,6 +479,22 @@ export async function runCli(
           ? orchestrator.linkParent(values.value["parent"] ?? "", values.value["supervisor"] ?? "")
           : orchestrator.unlinkParent(values.value["parent"] ?? "")
         : values;
+    } else if (command === "pr open") {
+      const values = requireOptions(options, ["from"]);
+      result = values.ok
+        ? await orchestrator.prOpen({
+            fromId: values.value["from"] ?? "",
+            title: stringOption(options, "title"),
+            bodyFile: stringOption(options, "body-file"),
+            base: stringOption(options, "base"),
+            draft: has(options, "draft"),
+          })
+        : values;
+    } else if (command === "pr merge") {
+      const values = requireOptions(options, ["from", "pr"]);
+      result = values.ok
+        ? await orchestrator.prMerge(values.value["from"] ?? "", values.value["pr"] ?? "")
+        : values;
     } else if (command === "child create") {
       const values = requireOptions(options, ["parent", "issue"]);
       const mode = values.ok
@@ -469,12 +503,17 @@ export async function runCli(
             .default("direct")
             .safeParse(stringOption(options, "mode"))
         : undefined;
-      result =
-        values.ok && mode?.success
+      const deliverable = deliverableSchema
+        .optional()
+        .safeParse(stringOption(options, "deliverable"));
+      result = !deliverable.success
+        ? invalid("--deliverable must be pr, report, or document")
+        : values.ok && mode?.success
           ? await orchestrator.createChild({
               parentId: values.value["parent"] ?? "",
               issueId: values.value["issue"] ?? "",
               mode: mode.data,
+              deliverable: deliverable.data,
             })
           : !values.ok
             ? values
@@ -539,21 +578,37 @@ export async function runCli(
       const body = values.ok
         ? await text(values.value["text-file"])
         : invalid("--text-file is required");
+      const pr = stringOption(options, "pr");
+      const head = stringOption(options, "head");
+      const path = stringOption(options, "deliverable-path");
+      const source = values.ok ? orchestrator.status() : undefined;
+      const from = stringOption(options, "from");
+      const binding = source?.ok ? source.value.find((b) => b.id === from) : undefined;
+      const kind = binding?.deliverable;
       result =
-        values.ok && outcome?.success && body.ok
-          ? await orchestrator.report({
-              fromId: values.value["from"] ?? "",
-              messageId: values.value["id"] ?? "",
-              outcome: outcome.data,
-              toUser: has(options, "to-user"),
-              evidence: evidence(options),
-              text: body.value,
-            })
-          : !values.ok
-            ? values
-            : !body.ok
-              ? body
-              : invalid("--outcome must be completed, blocked, or failed");
+        (pr === undefined) !== (head === undefined) || (path !== undefined && pr !== undefined)
+          ? invalid("Use --pr URL with --head SHA, or --deliverable-path PATH")
+          : path !== undefined && kind !== "report" && kind !== "document"
+            ? invalid("--deliverable-path requires a report/document binding")
+            : values.ok && outcome?.success && body.ok
+              ? await orchestrator.report({
+                  fromId: values.value["from"] ?? "",
+                  messageId: values.value["id"] ?? "",
+                  outcome: outcome.data,
+                  toUser: has(options, "to-user"),
+                  evidence: evidence(options),
+                  text: body.value,
+                  ...(pr !== undefined && head !== undefined
+                    ? { delivery: { kind: "pr", url: pr, head } as const }
+                    : path !== undefined && (kind === "report" || kind === "document")
+                      ? { delivery: { kind, path } }
+                      : {}),
+                })
+              : !values.ok
+                ? values
+                : !body.ok
+                  ? body
+                  : invalid("--outcome must be completed, blocked, or failed");
     } else if (command === "ask") {
       const values = requireOptions(options, ["from", "id", "text-file"]);
       const body = values.ok ? await text(values.value["text-file"]) : invalid("");
@@ -632,7 +687,11 @@ export async function runCli(
       const values = requireOptions(options, ["binding"]);
       result = values.ok
         ? command === "close"
-          ? await orchestrator.close(values.value["binding"] ?? "", has(options, "confirm-absent"))
+          ? await orchestrator.close(
+              values.value["binding"] ?? "",
+              has(options, "confirm-absent"),
+              has(options, "discard"),
+            )
           : orchestrator.setPaused(values.value["binding"] ?? "", command === "pause")
         : values;
     } else if (command === "reconcile") {

@@ -1,6 +1,15 @@
 import { z } from "zod";
 
 const text = z.string().min(1);
+export const deliverableSchema = z.enum(["pr", "report", "document"]);
+export const issueDeliverySchema = z.union([
+  z.strictObject({
+    kind: z.literal("pr"),
+    url: z.url({ protocol: /^https$/ }),
+    head: z.string().regex(/^[a-f0-9]{40,64}$/),
+  }),
+  z.strictObject({ kind: z.enum(["report", "document"]), path: text }),
+]);
 const refSchema = z.strictObject({ id: text, url: text, revision: text, key: text.optional() });
 
 export const scopeSnapshotSchema = z.strictObject({
@@ -61,6 +70,7 @@ export const checkoutSchema = z.strictObject({
 export const bindingSchema = z.strictObject({
   id: text,
   designationId: text,
+  deliverable: deliverableSchema.optional(),
   assignment: assignmentSchema,
   durableSessionId: text,
   cwd: text,
@@ -137,6 +147,8 @@ export const envelopeSchema = z
     text: z.string(),
     outcome: z.enum(["completed", "blocked", "failed"]).nullable(),
     evidence: z.array(text),
+    deliverable: deliverableSchema.optional(),
+    delivery: issueDeliverySchema.optional(),
     question: questionPayloadSchema.optional(),
     answer: z
       .strictObject({
@@ -249,6 +261,7 @@ export const claimResultSchema = z.strictObject({
 export const reserveInputSchema = z.strictObject({
   bindingId: text,
   durableSessionId: text,
+  deliverable: deliverableSchema.optional(),
   designation: designationSchema,
   snapshot: scopeSnapshotSchema,
   assignment: assignmentSchema,

@@ -1,4 +1,4 @@
-import type { Binding, ChildStage, ScopeSnapshot } from "../core/contracts";
+import type { Binding, ChildStage, Result, ScopeSnapshot } from "../core/contracts";
 import { digestOf } from "./scope";
 
 function scopeRefs(binding: Binding, snapshot: ScopeSnapshot): string {
@@ -68,6 +68,7 @@ function roleBehavior(role: Binding["assignment"]["role"]): string {
 }
 
 export interface RoleBriefOptions {
+  readonly owner?: Result<Binding>;
   readonly stage?: ChildStage;
   readonly planPath?: string;
   readonly planHead?: string;
@@ -153,6 +154,49 @@ export function buildRoleBrief(
       "ask_user_directly: true",
       ...(options.updateCheckLine === undefined ? [] : [options.updateCheckLine]),
     );
+  }
+
+  const ownedParent =
+    binding.assignment.role === "parent"
+      ? binding.checkout?.kind === "owned-clone"
+      : options.owner?.ok && options.owner.value.checkout?.kind === "owned-clone";
+  // Calls without stage metadata retain the byte-identical legacy brief.
+  if (binding.assignment.role === "child" && (stage !== undefined || ownedParent)) {
+    const deliverable = binding.deliverable ?? (stage === "research" ? "report" : "pr");
+    parts.push(`deliverable: ${deliverable}`);
+    if (stage === "plan")
+      parts.push(
+        "delivery_policy: Hand off the approved plan with olw stage complete; never push or open a PR in the plan stage. The execute stage delivers the issue.",
+      );
+    else if (deliverable !== "pr")
+      parts.push(
+        "delivery_policy: No push and no PR. Return an explicit evidence file path or Linear document URL with report --deliverable-path PATH.",
+        "code_changes: If needed, propose a new direct issue to the parent; do not implement it here.",
+      );
+    else if (ownedParent)
+      parts.push(
+        `integration_branch: ${binding.checkout?.baseBranch}`,
+        "delivery_policy: One issue = one PR. After the execute/direct stage, push the child branch to origin and open a PR into the parent integration branch with olw pr open --from BINDING --body-file FILE.",
+        "pr_body: Include the issue key, verbatim acceptance criteria, and evidence. Respect packet delivery limits; report blocked if publication is forbidden.",
+        "final_report: Report once with report --pr URL --head SHA and criterion evidence. Never merge or modify the parent branch. A plan stage hands off its plan instead of opening a PR.",
+      );
+    else
+      parts.push(
+        "delivery_policy: Deprecated legacy flow - return the local head and evidence for the parent to merge locally; no PR helper.",
+      );
+  } else if (
+    binding.assignment.role === "parent" &&
+    (ownedParent || options.includeParentGuidance === true)
+  ) {
+    parts.push(
+      ownedParent
+        ? "integration_policy: Review each child PR at its reported head against verbatim criteria and evidence, then olw pr merge --from PARENT --pr URL. This uses a merge commit, fetches and fast-forwards the integration branch, and pushes without force. Do not merge child branches locally."
+        : "integration_policy: Deprecated legacy flow - review the child's head and evidence and merge the child branch locally into the integration worktree.",
+    );
+    if (ownedParent)
+      parts.push(
+        "project_finish: olw pr open --from PARENT --base DEFAULT_BRANCH; report its URL and stop for the user. Never merge the project PR.",
+      );
   }
 
   if (qaStandby) {

@@ -177,7 +177,12 @@ export async function initializeCheckout(root: string, checkout: Checkout): Prom
   }
 }
 
-export async function unpushedCommits(checkout: Checkout): Promise<string[]> {
-  const output = await checkoutGit(checkout.path, ["rev-list", "--branches", "--not", "--remotes"]);
+export async function unpushedCommits(checkout: Checkout, childOnly = false): Promise<string[]> {
+  const output = await checkoutGit(checkout.path, [
+    "rev-list",
+    childOnly ? `refs/heads/${checkout.branch}` : "--branches",
+    "--not",
+    "--remotes",
+  ]);
   return output === "" ? [] : output.split("\n");
 }

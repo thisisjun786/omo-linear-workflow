@@ -359,6 +359,7 @@ export function openRegistry(
       id: input.bindingId,
       designationId: input.designation.id,
       assignment: input.assignment,
+      ...(input.assignment.role === "child" ? { deliverable: input.deliverable ?? "pr" } : {}),
       durableSessionId: input.durableSessionId,
       cwd: input.cwd,
       checkout: input.checkout,
@@ -1161,6 +1162,39 @@ export function openRegistry(
           to.ownerBindingId === sender.value.id));
     if (!instruction && !report && !coordination && !question && !answer)
       return error("route_denied", "Role route is not authorized");
+    if (
+      instruction &&
+      to.role === "child" &&
+      envelope.deliverable !== undefined &&
+      envelope.deliverable !== (target.value.deliverable ?? "pr")
+    )
+      return error(
+        "deliverable_mismatch",
+        "Issue packet deliverable differs from the child binding",
+      );
+    if (
+      report &&
+      from.role === "child" &&
+      envelope.outcome === "completed" &&
+      lineage.get(sender.value.id)?.stage !== "plan"
+    ) {
+      const kind = sender.value.deliverable;
+      if (kind === "report" || kind === "document") {
+        if (envelope.delivery?.kind !== kind)
+          return error(
+            "deliverable_missing",
+            "PR-less completion requires its deliverable path or document URL",
+          );
+      } else if (
+        target.value.checkout?.kind === "owned-clone" &&
+        envelope.delivery?.kind !== "pr"
+      ) {
+        return error(
+          "deliverable_missing",
+          "PR completion requires a PR URL and reported head SHA",
+        );
+      }
+    }
     if (answer) {
       const source = parseDelivery(deliveryById.get(envelope.answer?.questionId ?? ""));
       if (
@@ -1681,6 +1715,20 @@ export function openRegistry(
     uncertain,
     delivery(messageId: string): Result<DeliveryRecord> {
       return parseDelivery(deliveryById.get(messageId));
+    },
+    childReports(parentId: string): Result<DeliveryRecord[]> {
+      const rows = db
+        .query<DeliveryRow, [string]>(
+          "SELECT envelope_json, state, receipt_json FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? AND json_extract(envelope_json, '$.kind') = 'report' AND state = 'accepted' ORDER BY rowid DESC",
+        )
+        .all(parentId);
+      const records: DeliveryRecord[] = [];
+      for (const row of rows) {
+        const parsed = parseDelivery(row);
+        if (!parsed.ok) return parsed;
+        records.push(parsed.value);
+      }
+      return ok(records);
     },
     close(): void {
       db.close();

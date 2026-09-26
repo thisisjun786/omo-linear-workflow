@@ -253,6 +253,46 @@ test("mapped parent uses a hardlinked independent clone and children use its rea
   ]);
 });
 
+test("research defaults to a report, carries the packet kind and requires an explicit deliverable path", async () => {
+  const w = await world();
+  const parent = value(await w.create()).binding;
+  const child = value(
+    await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue", mode: "research" }),
+  ).binding;
+  expect(child.deliverable).toBe("report");
+  expect(Bun.YAML.parse(child.initialization.text ?? "")).toMatchObject({ deliverable: "report" });
+  expect(value(w.orchestrator.status()).find((b) => b.id === child.id)?.deliverable).toBe("report");
+  const packet = value(
+    await w.orchestrator.send({
+      fromId: parent.id,
+      toId: child.id,
+      messageId: "packet",
+      kind: "instruction",
+      text: "fixture research",
+    }),
+  );
+  expect(packet).toMatchObject({ envelope: { deliverable: "report" } });
+  const path = join(w.root, "findings.md");
+  await writeFile(path, "fixture findings");
+  const report = {
+    fromId: child.id,
+    messageId: "report:packet",
+    outcome: "completed" as const,
+    evidence: [path],
+    text: "findings",
+  };
+  expect(await w.orchestrator.report(report)).toMatchObject({
+    ok: false,
+    error: { code: "deliverable_missing" },
+  });
+  expect(
+    value(await w.orchestrator.report({ ...report, delivery: { kind: "report", path } })),
+  ).toMatchObject({ envelope: { delivery: { kind: "report", path } }, state: "accepted" });
+  expect(await git(parent.cwd, "ls-remote", "--heads", "origin")).not.toContain(
+    child.checkout?.branch ?? "missing",
+  );
+});
+
 test("mapping conflicts with --repo without creating a checkout", async () => {
   const w = await world();
   expect(
@@ -318,7 +358,7 @@ test("explicit local files are private, receipted and redacted from setup logs i
   }
 });
 
-test("close preserves owned clone and reports commits absent from every remote branch", async () => {
+test("close preserves owned clone and refuses unpublished commits unless explicitly discarded", async () => {
   const w = await world();
   const parent = value(await w.create()).binding;
   await writeFile(join(parent.cwd, "work"), "local work");
@@ -334,13 +374,14 @@ test("close preserves owned clone and reports commits absent from every remote b
     "local-only",
   );
   const commit = await git(parent.cwd, "rev-parse", "HEAD");
-  expect(value(await w.orchestrator.close(parent.id))).toMatchObject({
-    launchState: "closed",
-    unpushedCommits: [commit],
+  expect(await w.orchestrator.close(parent.id)).toMatchObject({
+    ok: false,
+    error: { code: "unpushed_commits", details: { unpushedCommits: [commit] } },
   });
+  expect(w.registry((r) => value(r.get(parent.id))).launchState).toBe("ready");
+  expect(value(await w.orchestrator.close(parent.id, false, true)).launchState).toBe("closed");
   expect(await git(parent.cwd, "rev-parse", "HEAD")).toBe(commit);
-  expect(value(await w.orchestrator.close(parent.id))).toMatchObject({ unpushedCommits: [commit] });
-  await git(parent.cwd, "update-ref", "refs/remotes/origin/another-branch", commit);
+  await git(parent.cwd, "push", "origin", "HEAD:refs/heads/published");
   expect(value(await w.orchestrator.close(parent.id))).toMatchObject({ unpushedCommits: [] });
 });
 

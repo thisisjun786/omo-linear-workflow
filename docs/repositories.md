@@ -50,6 +50,49 @@ A mapping and `--repo` together are an error, not an override. Existing rows wit
 kind decode as `linked-worktree`, including read-only status. No old checkout is moved or migrated,
 and legacy `originalRepoRoot` continues to identify the user's repository.
 
+## Issue deliverables and PR integration
+
+One issue produces one PR, or an explicitly selected PR-less deliverable. `child create` records
+`--deliverable pr|report|document` on the binding; research defaults to report, direct/planned to
+pr. The child brief, issue instruction envelope and `status` carry it. Plan/execute share the
+choice: plan handoff does not open a PR; the execute stage delivers it.
+
+For an owned-clone parent:
+
+```sh
+olw pr open --from CHILD --body-file pr-body.md [--title TITLE] [--draft] --json
+olw report --from CHILD --id report:PACKET --outcome completed --pr URL --head SHA --evidence PATH --text-file result.txt --json
+olw pr merge --from PARENT --pr URL_OR_NUMBER --json
+```
+
+The child PR body includes the issue key (stable ID when no key was imported), **verbatim criteria**
+and evidence. OLW checks the key; review checks criteria/evidence, not a prose parser. Open validates
+the owned-parent relationship, deliverable and checkout branch/origin, publishes the parent's
+integration base and the child branch to origin with ordinary non-force pushes, then runs
+`gh pr create --base INTEGRATION --head CHILD`. It returns `{url, head}`; an existing open PR
+for that head branch is returned, not duplicated. A conflicting base/head is refused. Tracked
+changes must be committed first; untracked local evidence/config files are not published.
+
+Parent review precedes merge. Merge requires the latest accepted completed child report, validates
+PR base, same-repository head branch and reported SHA, and uses
+`gh pr merge --merge --match-head-commit SHA`. It fetches origin, fast-forwards the integration
+branch, and pushes without force. A failed local update after remote merge is recoverable by
+repeating the same command; it never resets a diverged branch or automatically resolves conflicts.
+PR state, native report acceptance and review/Linear acceptance are separate facts.
+
+For report/document, do not push or open a PR. Report with `--deliverable-path PATH_OR_URL` naming
+an evidence file or existing Linear document. If implementation is needed, propose a new direct
+issue to the parent; do not expand the PR-less assignment or write Linear from the child.
+
+Project finish is `olw pr open --from PARENT --base DEFAULT_BRANCH [--body-file FILE] --json`.
+It opens integration -> the approved default branch and stops for the user, never merges it.
+The optional body defaults to a project-review notice; provide the actual project evidence.
+
+`gh` uses the existing GitHub authentication and the binding's origin (not inherited `GH_REPO`).
+Tests inject `OLW_GH_BIN` and a `file://` bare remote; no GitHub access is necessary.
+Legacy `--repo` parents and their children retain the **deprecated local-merge flow**; PR helpers
+refuse them. Deliverable selection does not migrate a legacy checkout to the new PR flow.
+
 ## Explicit local-only files and setup
 
 Create `<root>/.omo/repos/config.json` locally (not in version control), keyed by the exact

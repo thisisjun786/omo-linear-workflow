@@ -112,6 +112,32 @@ describe("routing synchronization real filesystem boundary", () => {
     expect(result.version).toBe("1.0.0");
   });
 
+  test("a launcher script without an entry comment still resolves through its exec target", async () => {
+    const world = await fixture();
+    const shimDirectory = join(dirname(dirname(world.options.upstream)), "..", "other-bin");
+    await mkdir(shimDirectory, { recursive: true });
+    // An unrelated package.json on the launcher's own ancestry must not be taken for omo-ai.
+    await writeFile(
+      join(shimDirectory, "..", "package.json"),
+      JSON.stringify({ name: "unrelated", version: "9.9.9" }),
+    );
+    const shim = join(shimDirectory, "omo");
+    await writeFile(shim, `#!/bin/sh\nexec /usr/bin/env bun "${world.options.upstream}" "$@"\n`, {
+      mode: 0o755,
+    });
+    const result = await syncRouting({ ...world.options, upstream: shim, check: true });
+    expect(result.version).toBe("1.0.0");
+  });
+
+  test("a launcher that names no omo-ai package fails with the paths it tried", async () => {
+    const world = await fixture();
+    const shim = join(dirname(world.options.configPath), "stray-omo");
+    await writeFile(shim, "#!/bin/sh\nexec true\n", { mode: 0o755 });
+    await expect(syncRouting({ ...world.options, upstream: shim, check: true })).rejects.toThrow(
+      /omo-ai package/,
+    );
+  });
+
   test("read-only check shows the next policy without changing configuration", async () => {
     const world = await fixture();
     const before = await readFile(world.options.configPath, "utf8");

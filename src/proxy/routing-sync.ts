@@ -23,15 +23,44 @@ const providerCatalogSchema = z.object({
   models: z.array(z.object({ id: z.string().min(1) })).min(1),
 });
 
-// omo-ai installs under bun as a generated shell shim that records its entry script.
-const SHIM_ENTRY = /^# entry: (\/\S+\/bin\/omo\.js)$/m;
+// A launcher is either a symlink into the package or a small script (bun's generated shim
+// records `# entry:`; hand-written wrappers exec it). Any absolute omo.js path it names is a
+// candidate; the package is the nearest ancestor whose package.json is omo-ai itself.
+const LAUNCHER_ENTRY = /(\/[^\s'"]*\/bin\/omo\.js)/g;
 
-/** Package root of the global omo-ai install, through a symlinked bin or bun's launcher shim. */
+async function omoAiPackageAbove(path: string): Promise<string | undefined> {
+  for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
+    const text = await optionalText(join(dir, "package.json"));
+    if (text === undefined) continue;
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(text);
+    } catch {
+      continue; // an unreadable manifest on the way up is not omo-ai
+    }
+    if (packageSchema.safeParse(manifest).success) return dir;
+  }
+  return undefined;
+}
+
+/** Package root of the global omo-ai install behind a symlinked bin or a launcher script. */
 export async function upstreamPackageRoot(upstream: string): Promise<string> {
   const target = await realpath(upstream);
-  const head = (await readFile(target, "utf8")).slice(0, 1024);
-  const entry = head.startsWith("#!/bin/sh") ? SHIM_ENTRY.exec(head)?.[1] : undefined;
-  return dirname(dirname(entry === undefined ? target : await realpath(entry)));
+  const tried = [target];
+  const direct = await omoAiPackageAbove(target);
+  if (direct !== undefined) return direct;
+  const head = (await readFile(target, "utf8")).slice(0, 4096);
+  if (head.startsWith("#!")) {
+    for (const [, entry] of head.matchAll(LAUNCHER_ENTRY)) {
+      if (entry === undefined) continue;
+      const resolved = await realpath(entry).catch(() => undefined);
+      if (resolved === undefined) continue;
+      tried.push(resolved);
+      const root = await omoAiPackageAbove(resolved);
+      if (root !== undefined) return root;
+    }
+  }
+  throw new RoutingError(`No omo-ai package found for ${upstream} (tried ${tried.join(", ")})`);
 }
 export interface SyncOptions {
   readonly upstream: string;

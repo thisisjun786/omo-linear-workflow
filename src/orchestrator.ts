@@ -7,6 +7,7 @@ import type {
   Assignment,
   Binding,
   Checkout,
+  ChildStage,
   DeliveryRecord,
   Designation,
   Envelope,
@@ -20,7 +21,8 @@ import {
   initializationMessageId,
   matchesRuntime,
   modelForBinding,
-  modelForRole,
+  modelForLaunch,
+  type RoleModel,
 } from "./core/policy";
 import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
@@ -80,9 +82,11 @@ const createParentInputSchema = z.union([
   }),
 ]);
 export type CreateParentInput = z.infer<typeof createParentInputSchema>;
+export type ChildCreateMode = "direct" | "planned" | "research";
 export interface CreateChildInput {
   readonly parentId: string;
   readonly issueId: string;
+  readonly mode?: ChildCreateMode;
 }
 export interface SendInput {
   readonly fromId: string;
@@ -101,9 +105,11 @@ export interface ReportInput {
 }
 export interface CreationResult {
   readonly binding: Binding;
-  readonly expectedModel: ReturnType<typeof modelForRole>;
+  readonly expectedModel: RoleModel;
   readonly readiness: "ready";
   readonly execution: "not_started" | "brief_accepted";
+  readonly stage?: ChildStage;
+  readonly mode?: ChildCreateMode;
   readonly ancestry: {
     readonly branch: string;
     readonly baseBranch: string;
@@ -498,13 +504,16 @@ export class Orchestrator {
       issueId: input.issueId,
       ownerBindingId: owner.value.id,
     };
+    const mode = input.mode ?? "direct";
+    const stage: ChildStage =
+      mode === "planned" ? "plan" : mode === "research" ? "research" : "direct";
     return this.#create(
       assignment,
       context.value.designation,
       context.value.snapshot,
       checkout.path,
       checkout,
-      { bindingId, grouping },
+      { bindingId, grouping, stage, mode },
     );
   }
 
@@ -863,7 +872,12 @@ export class Orchestrator {
     snapshot: ScopeSnapshot,
     cwd: string,
     checkout: Checkout | null,
-    target?: { readonly bindingId: string; readonly grouping?: WorktreeGrouping | undefined },
+    target?: {
+      readonly bindingId: string;
+      readonly grouping?: WorktreeGrouping | undefined;
+      readonly stage?: ChildStage;
+      readonly mode?: ChildCreateMode;
+    },
   ): Promise<Result<CreationResult>> {
     let managedPath: string;
     try {
@@ -892,6 +906,19 @@ export class Orchestrator {
       }),
     );
     if (!reserved.ok) return reserved;
+    const launchStage = target?.stage;
+    if (launchStage !== undefined && assignment.role === "child") {
+      const recorded = this.#withRegistry((registry) =>
+        registry.recordStage(bindingId, assignment.issueId, launchStage, 0, null),
+      );
+      if (!recorded.ok) {
+        this.#withRegistry((registry) => {
+          const closing = registry.beginClose(bindingId);
+          return closing.ok ? registry.finishClose(bindingId) : closing;
+        });
+        return recorded;
+      }
+    }
     try {
       await this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment);
       await this.#deps.ensureHost(this.#root, this.#omoSocket, environment);
@@ -941,6 +968,16 @@ export class Orchestrator {
         registry.provision(bindingId, workspace.workspaceId, workspace.rootPaneId),
       );
       if (!provisioned.ok) return provisioned;
+      if (target?.mode === "planned") {
+        let rootTabId = workspace.rootTabId;
+        if (rootTabId === undefined) {
+          const observed = (await herdr.snapshot()).workspaces.find(
+            (candidate) => candidate.workspaceId === workspace.workspaceId,
+          );
+          rootTabId = observed?.rootTabId;
+        }
+        if (rootTabId !== undefined) await herdr.renameTab(rootTabId, "plan");
+      }
       if (checkout !== null) {
         const observedHead = await this.#deps.gitTip(checkout.path, "HEAD");
         if (observedHead !== checkout.baseCommit) {
@@ -949,7 +986,7 @@ export class Orchestrator {
           );
         }
       }
-      const model = modelForRole(assignment.role);
+      const model = modelForLaunch(assignment.role, target?.stage ?? null);
       const manager = SessionManager.create(cwd, join(this.#root, ".omo/state/sessions"), {
         id: reserved.value.durableSessionId,
       });
@@ -1030,6 +1067,9 @@ export class Orchestrator {
         expectedModel: model,
         readiness: "ready",
         execution: "brief_accepted",
+        ...(launchStage === undefined
+          ? {}
+          : { stage: launchStage, mode: target?.mode ?? "direct" }),
         ancestry:
           checkout === null
             ? null

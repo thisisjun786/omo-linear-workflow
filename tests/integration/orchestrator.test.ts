@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,10 +13,11 @@ import type {
   RuntimeIdentity,
   ScopeSnapshot,
 } from "../../src/core/contracts";
-import { modelForRole } from "../../src/core/policy";
+import { modelForLaunch, modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../../src/herdr";
 import { createHostProfile, RUNTIME_CACHE_MARKER } from "../../src/host-profile";
+import { roleLabel } from "../../src/linear";
 import {
   Orchestrator,
   type OrchestratorDependencies,
@@ -151,6 +153,7 @@ class FakeHerdr implements HerdrClient {
   protocol: 1 | 2 = 2;
   readonly emittedEvent: unknown;
   readonly tabCalls: unknown[] = [];
+  lastArgv: readonly string[] = [];
   listener: ((event: unknown) => void) | undefined;
   verifyIdentity = false;
   holdSnapshot = false;
@@ -178,7 +181,13 @@ class FakeHerdr implements HerdrClient {
     this.events.push("create");
     this.cwd = cwd;
     this.root = cwd;
-    const workspace = { workspaceId: "ws", rootPaneId: "pane", cwd, label: _label };
+    const workspace = {
+      workspaceId: "ws",
+      rootPaneId: "pane",
+      rootTabId: "ws:t1",
+      cwd,
+      label: _label,
+    };
     this.workspaces.set(workspace.workspaceId, workspace);
     return workspace;
   }
@@ -197,10 +206,17 @@ class FakeHerdr implements HerdrClient {
   async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
     this.tabCalls.push({ method: "sendKeys", paneId, text, keys });
   }
+  rootTabFromCreate = true;
   async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
     this.cwd = checkout.path;
     const id = `worktree-${++this.nextWorkspace}`;
-    const workspace = { workspaceId: id, rootPaneId: `${id}:p1`, cwd: checkout.path, label };
+    const workspace = {
+      workspaceId: id,
+      rootPaneId: `${id}:p1`,
+      ...(this.rootTabFromCreate ? { rootTabId: `${id}:root` } : {}),
+      cwd: checkout.path,
+      label,
+    };
     this.workspaces.set(id, workspace);
     return workspace;
   }
@@ -210,6 +226,7 @@ class FakeHerdr implements HerdrClient {
     env: Readonly<Record<string, string>>,
   ): Promise<void> {
     this.events.push("run");
+    this.lastArgv = argv;
     const separator = process.platform === "win32" ? ";" : ":";
     expect(env).toEqual({
       PATH: `${join(this.root, ".managed-herdr")}${separator}${process.env["PATH"] ?? ""}`,
@@ -281,11 +298,19 @@ class FakeHerdr implements HerdrClient {
   async snapshot(): Promise<Snapshot> {
     this.snapshots += 1;
     if (this.holdSnapshot) throw new Error("Stale snapshot unavailable");
+    const workspaces = [...this.workspaces.values()].map((workspace) => {
+      const withTab = {
+        ...workspace,
+        rootTabId: workspace.rootTabId ?? `${workspace.workspaceId}:root`,
+      };
+      this.workspaces.set(workspace.workspaceId, withTab);
+      return withTab;
+    });
     return {
       focusedWorkspaceId: null,
       focusedTabId: null,
       focusedPaneId: null,
-      workspaces: [...this.workspaces.values()],
+      workspaces,
       panes: [...this.workspaces.values()].map((workspace) => ({
         paneId: workspace.rootPaneId,
         workspaceId: workspace.workspaceId,
@@ -801,6 +826,424 @@ describe("orchestrator startup", () => {
       });
       expect(events).not.toContain("attach");
       await rm(root, { recursive: true, force: true });
+    },
+  );
+
+  test.each([
+    ["direct", "direct", "opencodex/anthropic/claude-opus-5-5", "xhigh", false],
+    ["planned", "plan", "opencodex/anthropic/claude-fable-5-1", "xhigh", true],
+    ["research", "research", "opencodex/anthropic/claude-opus-5-5", "xhigh", false],
+  ] as const)(
+    "child create --mode %s launches stage %s and records lineage ordinal 0",
+    async (mode, stage, modelArg, thinking, renamesPlanTab) => {
+      const root = await ownedRoot(`omo-orchestrator-mode-${mode}-`);
+      const events: string[] = [];
+      const prompts = new Map<string, Set<string>>();
+      const herdr = new FakeHerdr(events);
+      let nextId = 0;
+      const dependencies: OrchestratorDependencies = {
+        openRegistry,
+        createHerdrClient: () => herdr,
+        resolveHerdrArtifact: async (controlRoot) => ({
+          artifactDir: join(controlRoot, ".managed-herdr"),
+        }),
+        ensureHost: async () => {
+          events.push("host");
+        },
+        gitTip: async () => "commit",
+        now: () => "2026-09-26T00:00:00.000Z",
+        uuid: () =>
+          [
+            "supervisor-binding",
+            "supervisor-session",
+            "parent-binding",
+            "parent-session",
+            "child-binding",
+            "child-session",
+          ][nextId++] ?? `id-${nextId}`,
+        attachBinding: async (binding: Binding) => {
+          events.push("attach");
+          const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+          if (identity === undefined) throw new Error("Exact native session is not open");
+          let messages = prompts.get(binding.durableSessionId);
+          if (messages === undefined) {
+            messages = new Set();
+            prompts.set(binding.durableSessionId, messages);
+          }
+          const session = new FakeNative(identity, events, messages);
+          session.onConfigure = (current) =>
+            herdr.nativeIdentities.set(binding.durableSessionId, current);
+          return session;
+        },
+        terminateBinding: async () => {},
+        prompt: async (binding, brief) => {
+          const messages = prompts.get(binding.durableSessionId);
+          if (messages === undefined) throw new Error("No exact native session");
+          messages.add(brief);
+        },
+      };
+      const scope: ScopeSnapshot = {
+        version: 1,
+        source: "fixture",
+        initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+        projects: [
+          {
+            project: { id: "project", url: "https://linear.test/p", revision: "r1" },
+            issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+          },
+        ],
+        decisionRefs: [],
+      };
+      const scopeFile = join(root, "scope.json");
+      await Bun.write(scopeFile, JSON.stringify(scope));
+      const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+      const imported = await orchestrator.importScope(scopeFile, true);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const supervisor = await orchestrator.createSupervisor({
+        initiativeId: "initiative",
+        scopeDigest: imported.value.digest,
+        designationId: "designation",
+        execute: true,
+        fixture: true,
+      });
+      if (!supervisor.ok) throw new Error(supervisor.error.message);
+      const parent = await orchestrator.createParent({
+        supervisorId: supervisor.value.binding.id,
+        projectId: "project",
+        repo: root,
+        base: "main",
+      });
+      if (!parent.ok) throw new Error(parent.error.message);
+      const runsBefore = events.filter((event) => event === "run").length;
+      if (mode === "planned") herdr.rootTabFromCreate = false;
+
+      const created = await orchestrator.createChild({
+        parentId: parent.value.binding.id,
+        issueId: "issue",
+        mode,
+      });
+
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error(created.error.message);
+      expect(created.value.stage).toBe(stage);
+      expect(created.value.mode).toBe(mode);
+      expect(created.value.expectedModel).toEqual(modelForLaunch("child", stage));
+      const childRuns = events.filter((event) => event === "run").length - runsBefore;
+      expect(childRuns).toBe(1);
+      const argv = herdr.lastArgv;
+      expect(argv).toContain("--model");
+      expect(argv[argv.indexOf("--model") + 1]).toBe(modelArg);
+      expect(argv[argv.indexOf("--thinking") + 1]).toBe(thinking);
+      expect(argv[argv.indexOf("--name") + 1]).toBe(
+        roleLabel(
+          {
+            role: "child",
+            initiativeId: "initiative",
+            projectId: "project",
+            issueId: "issue",
+            ownerBindingId: parent.value.binding.id,
+          },
+          scope,
+          created.value.binding.id,
+        ),
+      );
+      const seedPath = argv[argv.indexOf("--session") + 1];
+      if (seedPath === undefined) throw new Error("Missing seed path");
+      const seed = SessionManager.open(seedPath, join(root, ".omo/state/sessions"), root);
+      expect(seed.buildSessionContext().model).toEqual({
+        provider: "opencodex",
+        modelId: modelArg.slice("opencodex/".length),
+      });
+      expect(seed.buildSessionContext().thinkingLevel).toBe(thinking);
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const lineage = registry.lineageFor(created.value.binding.id);
+        expect(lineage).toMatchObject({
+          ok: true,
+          value: {
+            issueId: "issue",
+            mode,
+            stages: [
+              {
+                bindingId: created.value.binding.id,
+                stage,
+                ordinal: 0,
+                launchState: "ready",
+              },
+            ],
+          },
+        });
+        const recorded = registry.stageOf(created.value.binding.id);
+        expect(recorded).toMatchObject({
+          ok: true,
+          value: {
+            bindingId: created.value.binding.id,
+            issueId: "issue",
+            stage,
+            ordinal: 0,
+            previousBindingId: null,
+          },
+        });
+      } finally {
+        registry.close();
+      }
+      const planRenames = herdr.tabCalls.filter(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          "method" in call &&
+          call.method === "renameTab" &&
+          "label" in call &&
+          call.label === "plan",
+      );
+      if (renamesPlanTab) {
+        const childWorkspace = [...herdr.workspaces.values()].find(
+          (workspace) => workspace.workspaceId === created.value.binding.workspaceId,
+        );
+        expect(planRenames).toEqual([
+          { method: "renameTab", tabId: childWorkspace?.rootTabId, label: "plan" },
+        ]);
+      } else {
+        expect(planRenames).toEqual([]);
+      }
+      expect(created.value.binding.checkout?.branch).toContain("issues/issue-");
+    },
+  );
+
+  test("a failed stage record closes the reservation and launches nothing", async () => {
+    const root = await ownedRoot("omo-orchestrator-stage-fail-");
+    const events: string[] = [];
+    const herdr = new FakeHerdr(events);
+    let nextId = 0;
+    const realOpen = openRegistry;
+    const dependencies: OrchestratorDependencies = {
+      openRegistry: (path, options) => {
+        const registry = realOpen(path, options);
+        return new Proxy(registry, {
+          get(target, property, receiver) {
+            if (property === "recordStage") {
+              return () => ({
+                ok: false as const,
+                error: { code: "storage_error", message: "stage write failed" },
+              });
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async (controlRoot) => ({
+        artifactDir: join(controlRoot, ".managed-herdr"),
+      }),
+      ensureHost: async () => {
+        events.push("host");
+      },
+      gitTip: async () => "commit",
+      now: () => "2026-09-26T00:00:00.000Z",
+      uuid: () =>
+        ["supervisor-binding", "supervisor-session", "parent-binding", "parent-session"][
+          nextId++
+        ] ?? `id-${nextId}`,
+      attachBinding: async (binding: Binding) => {
+        const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+        if (identity === undefined) throw new Error("Exact native session is not open");
+        return new FakeNative(identity, events);
+      },
+      terminateBinding: async () => {},
+      prompt: async () => {},
+    };
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+      projects: [
+        {
+          project: { id: "project", url: "https://linear.test/p", revision: "r1" },
+          issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+        },
+      ],
+      decisionRefs: [],
+    };
+    await Bun.write(join(root, "scope.json"), JSON.stringify(scope));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(join(root, "scope.json"), true);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const supervisor = await orchestrator.createSupervisor({
+      initiativeId: "initiative",
+      scopeDigest: imported.value.digest,
+      designationId: "designation",
+      execute: true,
+      fixture: true,
+    });
+    if (!supervisor.ok) throw new Error(supervisor.error.message);
+    const parent = await orchestrator.createParent({
+      supervisorId: supervisor.value.binding.id,
+      projectId: "project",
+      repo: root,
+      base: "main",
+    });
+    if (!parent.ok) throw new Error(parent.error.message);
+    const runsBefore = events.filter((event) => event === "run").length;
+
+    const created = await orchestrator.createChild({
+      parentId: parent.value.binding.id,
+      issueId: "issue",
+      mode: "planned",
+    });
+
+    expect(created).toMatchObject({
+      ok: false,
+      error: { code: "storage_error", message: "stage write failed" },
+    });
+    expect(events.filter((event) => event === "run")).toHaveLength(runsBefore);
+    const status = orchestrator.status();
+    if (!status.ok) throw new Error(status.error.message);
+    const live = status.value
+      .filter((binding) => binding.launchState !== "closed")
+      .map((binding) => binding.id)
+      .sort();
+    expect(live).toEqual([parent.value.binding.id, supervisor.value.binding.id].sort());
+  });
+
+  test.each([
+    [undefined, "direct"],
+    ["planned", "plan"],
+  ] as const)(
+    "a closed child (%s) can be recreated as a new direct generation",
+    async (firstMode, firstStage) => {
+      const root = await ownedRoot(`omo-orchestrator-recreate-${firstStage}-`);
+      const events: string[] = [];
+      const prompts = new Map<string, Set<string>>();
+      const herdr = new FakeHerdr(events);
+      let nextId = 0;
+      const dependencies: OrchestratorDependencies = {
+        openRegistry,
+        createHerdrClient: () => herdr,
+        resolveHerdrArtifact: async (controlRoot) => ({
+          artifactDir: join(controlRoot, ".managed-herdr"),
+        }),
+        ensureHost: async () => {
+          events.push("host");
+        },
+        gitTip: async () => "commit",
+        now: () => "2026-09-26T00:00:00.000Z",
+        uuid: () => `id-${++nextId}`,
+        attachBinding: async (binding: Binding) => {
+          const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+          if (identity === undefined) throw new Error("Exact native session is not open");
+          let messages = prompts.get(binding.durableSessionId);
+          if (messages === undefined) {
+            messages = new Set();
+            prompts.set(binding.durableSessionId, messages);
+          }
+          const session = new FakeNative(identity, events, messages);
+          session.onConfigure = (current) =>
+            herdr.nativeIdentities.set(binding.durableSessionId, current);
+          return session;
+        },
+        terminateBinding: async (binding) => {
+          events.push(`terminate:${binding.id}`);
+          herdr.nativeIdentities.delete(binding.durableSessionId);
+        },
+        prompt: async (binding, brief) => {
+          prompts.get(binding.durableSessionId)?.add(brief);
+        },
+      };
+      const scope: ScopeSnapshot = {
+        version: 1,
+        source: "fixture",
+        initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+        projects: [
+          {
+            project: { id: "project", url: "https://linear.test/p", revision: "r1" },
+            issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+          },
+        ],
+        decisionRefs: [],
+      };
+      await Bun.write(join(root, "scope.json"), JSON.stringify(scope));
+      const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+      const imported = await orchestrator.importScope(join(root, "scope.json"), true);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const supervisor = await orchestrator.createSupervisor({
+        initiativeId: "initiative",
+        scopeDigest: imported.value.digest,
+        designationId: "designation",
+        execute: true,
+        fixture: true,
+      });
+      if (!supervisor.ok) throw new Error(supervisor.error.message);
+      const parent = await orchestrator.createParent({
+        supervisorId: supervisor.value.binding.id,
+        projectId: "project",
+        repo: root,
+        base: "main",
+      });
+      if (!parent.ok) throw new Error(parent.error.message);
+      const first = await orchestrator.createChild({
+        parentId: parent.value.binding.id,
+        issueId: "issue",
+        ...(firstMode === undefined ? {} : { mode: firstMode }),
+      });
+      if (!first.ok) throw new Error(first.error.message);
+      const duplicate = await orchestrator.createChild({
+        parentId: parent.value.binding.id,
+        issueId: "issue",
+      });
+      expect(duplicate).toMatchObject({ ok: false, error: { code: "ownership_conflict" } });
+      expect(await orchestrator.close(first.value.binding.id)).toMatchObject({
+        ok: true,
+        value: { launchState: "closed" },
+      });
+
+      const second = await orchestrator.createChild({
+        parentId: parent.value.binding.id,
+        issueId: "issue",
+      });
+
+      expect(second.ok).toBe(true);
+      if (!second.ok) throw new Error(second.error.message);
+      expect(second.value.binding.id).not.toBe(first.value.binding.id);
+      expect(second.value).toMatchObject({ stage: "direct", mode: "direct" });
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        expect(registry.lineageFor(first.value.binding.id)).toMatchObject({
+          ok: true,
+          value: {
+            mode: firstMode === "planned" ? "planned" : "direct",
+            stages: [{ bindingId: first.value.binding.id, stage: firstStage, ordinal: 0 }],
+          },
+        });
+        expect(registry.lineageFor(second.value.binding.id)).toMatchObject({
+          ok: true,
+          value: {
+            mode: "direct",
+            stages: [
+              {
+                bindingId: second.value.binding.id,
+                stage: "direct",
+                ordinal: 0,
+                launchState: "ready",
+              },
+            ],
+          },
+        });
+        const generations = new Database(join(root, ".omo/state/registry.sqlite"), {
+          readonly: true,
+        });
+        try {
+          const generation = generations.query<{ generation: number }, [string]>(
+            "SELECT generation FROM stage_lineage WHERE binding_id = ?",
+          );
+          expect(generation.get(first.value.binding.id)?.generation).toBe(0);
+          expect(generation.get(second.value.binding.id)?.generation).toBe(1);
+        } finally {
+          generations.close();
+        }
+      } finally {
+        registry.close();
+      }
     },
   );
 });

@@ -268,9 +268,11 @@ class SocketHerdrClient implements HerdrClient {
         );
       }
       const groupHeadWorkspaceId = source.worktree?.repo_key.match(/^herdr-group:(.+)$/)?.[1];
+      const rootTabId = layout?.tab_id ?? source.active_tab_id;
       return {
         workspaceId: source.workspace_id,
         rootPaneId: root.pane_id,
+        ...(rootTabId === undefined ? {} : { rootTabId }),
         cwd: rootPane.cwd,
         ...(source.label === undefined ? {} : { label: source.label }),
         ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),

@@ -32,6 +32,7 @@ const valueFlags = new Set([
   "outcome",
   "evidence",
   "binding",
+  "mode",
 ]);
 const booleanFlags = new Set(["json", "fixture", "execute", "help", "confirm-absent", "to-user"]);
 
@@ -263,7 +264,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
               "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture]) --project ID --repo PATH --base REF",
             "parent link": "--parent BINDING --supervisor BINDING",
             "parent unlink": "--parent BINDING",
-            "child create": "--parent BINDING --issue ID",
+            "child create": "--parent BINDING --issue ID [--mode direct|planned|research]",
             send: "--from BINDING --to BINDING --id ID --kind instruction|coordination --text-file PATH",
             report:
               "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--to-user]",
@@ -350,12 +351,22 @@ export async function runCli(argv: readonly string[]): Promise<number> {
         : values;
     } else if (command === "child create") {
       const values = requireOptions(options, ["parent", "issue"]);
-      result = values.ok
-        ? await orchestrator.createChild({
-            parentId: values.value["parent"] ?? "",
-            issueId: values.value["issue"] ?? "",
-          })
-        : values;
+      const mode = values.ok
+        ? z
+            .enum(["direct", "planned", "research"])
+            .default("direct")
+            .safeParse(stringOption(options, "mode"))
+        : undefined;
+      result =
+        values.ok && mode?.success
+          ? await orchestrator.createChild({
+              parentId: values.value["parent"] ?? "",
+              issueId: values.value["issue"] ?? "",
+              mode: mode.data,
+            })
+          : !values.ok
+            ? values
+            : invalid("--mode must be direct, planned, or research");
     } else if (command === "send") {
       const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
       const kind = values.ok

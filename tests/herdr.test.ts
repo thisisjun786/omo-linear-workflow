@@ -444,6 +444,7 @@ describe("HerdrClient", () => {
           {
             workspaceId: "ws",
             rootPaneId: "pane",
+            rootTabId: "tab",
             cwd: "/cwd",
             label: "ws",
             ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),

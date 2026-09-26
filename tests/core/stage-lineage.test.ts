@@ -115,6 +115,149 @@ function ready(registry: ReturnType<typeof openRegistry>, binding: Binding) {
   value(registry.finishInitialization(binding.id, "accepted"));
 }
 
+test("a read-only registry without a generation column still returns lineage", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "olw-lineage-ro-"));
+  const path = join(dir, "registry.sqlite");
+  const registry = openRegistry(path);
+  try {
+    const digest = value(registry.importScope(snapshot)).digest;
+    const designation = {
+      id: "designation",
+      snapshotDigest: digest,
+      designatedBy: "user",
+      designatedAt: "now",
+      create: true,
+      execute: true,
+      contact: true,
+    };
+    const parent = value(
+      registry.reserve({
+        designation,
+        snapshot,
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/tmp/herdr",
+        omoSocket: "/tmp/omo",
+        bindingId: "parent",
+        durableSessionId: "session-parent",
+        assignment: {
+          role: "parent",
+          initiativeId: null,
+          projectId: "project",
+          ownerBindingId: null,
+        },
+      }),
+    );
+    const child = value(
+      registry.reserve({
+        designation,
+        snapshot,
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/tmp/herdr",
+        omoSocket: "/tmp/omo",
+        bindingId: "child",
+        durableSessionId: "session-child",
+        assignment: {
+          role: "child",
+          initiativeId: null,
+          projectId: "project",
+          issueId: "issue",
+          ownerBindingId: parent.id,
+        },
+      }),
+    );
+    value(registry.recordStage(child.id, "issue", "direct", 0, null));
+  } finally {
+    registry.close();
+  }
+  const stripped = new Database(path);
+  try {
+    stripped.run(`CREATE TABLE stage_lineage_old (
+      binding_id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      previous_binding_id TEXT,
+      handoff_json TEXT
+    )`);
+    stripped.run(
+      "INSERT INTO stage_lineage_old (binding_id, issue_id, stage, ordinal, previous_binding_id, handoff_json) SELECT binding_id, issue_id, stage, ordinal, previous_binding_id, handoff_json FROM stage_lineage",
+    );
+    stripped.run("DROP TABLE stage_lineage");
+    stripped.run("ALTER TABLE stage_lineage_old RENAME TO stage_lineage");
+  } finally {
+    stripped.close();
+  }
+  const readonly = openRegistry(path, { readonly: true });
+  try {
+    expect(value(readonly.lineageFor("child"))).toEqual({
+      issueId: "issue",
+      mode: "direct",
+      stages: [{ bindingId: "child", stage: "direct", ordinal: 0, launchState: "reserved" }],
+    });
+    expect(value(readonly.stageChain("issue"))).toEqual([
+      expect.objectContaining({
+        bindingId: "child",
+        stage: "direct",
+        ordinal: 0,
+        previousBindingId: null,
+      }),
+    ]);
+    expect(value(readonly.stageOf("child"))?.stage).toBe("direct");
+  } finally {
+    readonly.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an existing lineage table gains generation without rewriting its rows", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "olw-lineage-old-"));
+  const path = join(dir, "registry.sqlite");
+  const created = new Database(path);
+  try {
+    created.run("CREATE TABLE scopes (digest TEXT PRIMARY KEY, json TEXT NOT NULL)");
+    created.run(
+      "CREATE TABLE designations (id TEXT PRIMARY KEY, scope_digest TEXT NOT NULL, json TEXT NOT NULL)",
+    );
+    created.run(
+      "CREATE TABLE bindings (id TEXT PRIMARY KEY, designation_id TEXT NOT NULL, durable_session_id TEXT NOT NULL UNIQUE, ownership_key TEXT NOT NULL, launch_state TEXT NOT NULL, json TEXT NOT NULL)",
+    );
+    created.run(
+      "CREATE TABLE stage_lineage (binding_id TEXT PRIMARY KEY, issue_id TEXT NOT NULL, stage TEXT NOT NULL, ordinal INTEGER NOT NULL, previous_binding_id TEXT, handoff_json TEXT)",
+    );
+    created.run(
+      "INSERT INTO stage_lineage (binding_id, issue_id, stage, ordinal, previous_binding_id) VALUES ('old', 'issue', 'direct', 0, NULL)",
+    );
+  } finally {
+    created.close();
+  }
+  const registry = openRegistry(path);
+  try {
+    const columns = new Database(path, { readonly: true });
+    try {
+      expect(
+        columns
+          .query<{ name: string }, []>("PRAGMA table_info(stage_lineage)")
+          .all()
+          .some((column) => column.name === "generation"),
+      ).toBe(true);
+      expect(
+        columns
+          .query<{ generation: number }, []>(
+            "SELECT generation FROM stage_lineage WHERE binding_id = 'old'",
+          )
+          .get()?.generation,
+      ).toBe(0);
+    } finally {
+      columns.close();
+    }
+  } finally {
+    registry.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("plan succession is atomic, persists, and retires old route", async () => {
   await fixture((path, registry, parent, plan, next) => {
     value(registry.recordStage(plan.id, "issue", "plan", 0, null));
@@ -175,6 +318,77 @@ test("plan succession is atomic, persists, and retires old route", async () => {
     } finally {
       reopened.close();
     }
+  });
+});
+
+test("a closed generation allows a new root and keeps its own history", async () => {
+  await fixture((_path, registry, _parent, first, next) => {
+    value(registry.recordStage(first.id, "issue", "direct", 0, null));
+    ready(registry, first);
+    value(registry.beginClose(first.id));
+    value(registry.finishClose(first.id));
+    const second = value(
+      registry.reserve({
+        ...next,
+        bindingId: "direct-2",
+        durableSessionId: "session-direct-2",
+      }),
+    );
+    value(registry.recordStage(second.id, "issue", "direct", 0, null));
+    expect(value(registry.lineageFor(first.id))).toEqual({
+      issueId: "issue",
+      mode: "direct",
+      stages: [{ bindingId: first.id, stage: "direct", ordinal: 0, launchState: "closed" }],
+    });
+    expect(value(registry.lineageFor(second.id))).toEqual({
+      issueId: "issue",
+      mode: "direct",
+      stages: [{ bindingId: second.id, stage: "direct", ordinal: 0, launchState: "reserved" }],
+    });
+    expect(value(registry.stageChain("issue"))).toEqual([
+      expect.objectContaining({ bindingId: second.id, ordinal: 0, previousBindingId: null }),
+    ]);
+
+    value(registry.beginClose(second.id));
+    value(registry.finishClose(second.id));
+    const planned = value(
+      registry.reserve({
+        ...next,
+        bindingId: "plan-2",
+        durableSessionId: "session-plan-2",
+      }),
+    );
+    value(registry.recordStage(planned.id, "issue", "plan", 0, null));
+    expect(value(registry.lineageFor(planned.id)).mode).toBe("planned");
+    expect(value(registry.lineageFor(second.id)).stages.map((stage) => stage.bindingId)).toEqual([
+      second.id,
+    ]);
+  });
+});
+
+test("a second root is refused while an earlier generation is still live", async () => {
+  await fixture((path, registry, _parent, first, next) => {
+    value(registry.recordStage(first.id, "issue", "plan", 0, null));
+    value(registry.beginClose(first.id));
+    value(registry.finishClose(first.id));
+    const parked = value(registry.reserve(next));
+    const db = new Database(path);
+    try {
+      db.query("UPDATE bindings SET ownership_key = 'parked' WHERE id = ?").run(parked.id);
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = ?",
+      ).run(first.id);
+    } finally {
+      db.close();
+    }
+    expect(code(registry.recordStage(parked.id, "issue", "direct", 0, null))).toBe(
+      "stage_conflict",
+    );
+    expect(value(registry.get(first.id)).launchState).toBe("uncertain");
+    expect(value(registry.stageOf(parked.id))).toBeNull();
+    expect(value(registry.lineageFor(first.id)).stages.map((stage) => stage.bindingId)).toEqual([
+      first.id,
+    ]);
   });
 });
 

@@ -111,6 +111,56 @@ test.each(["reports", "notices"] as const)(
   },
 );
 
+test("child create --mode bogus exits 2 and creates no binding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-cli-parent-"));
+  roots.push(root);
+  const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+  const create = spyOn(Orchestrator.prototype, "createChild").mockResolvedValue({
+    ok: false,
+    error: { code: "must_not_create", message: "invalid mode reached createChild" },
+  });
+  try {
+    expect(
+      await runCli([
+        "--root",
+        root,
+        "child",
+        "create",
+        "--parent",
+        "p",
+        "--issue",
+        "issue",
+        "--mode",
+        "bogus",
+        "--json",
+      ]),
+    ).toBe(2);
+    expect(create).not.toHaveBeenCalled();
+    const written = stdout.mock.calls.map((call) => String(call[0])).join("");
+    expect(JSON.parse(written)).toMatchObject({
+      ok: false,
+      error: { code: "invalid_arguments" },
+    });
+    expect(await Bun.file(join(root, ".omo/state/registry.sqlite")).exists()).toBe(false);
+  } finally {
+    create.mockRestore();
+    stdout.mockRestore();
+  }
+});
+
+test("child create help JSON lists --mode", async () => {
+  const result = await invoke(["--help"]);
+  expect(result.code).toBe(0);
+  expect(result.output).toMatchObject({
+    ok: true,
+    value: {
+      options: {
+        "child create": expect.stringContaining("--mode direct|planned|research"),
+      },
+    },
+  });
+});
+
 test("standalone CLI forwards explicit approval without adding a supervisor", async () => {
   const root = await mkdtemp(join(tmpdir(), "olw-cli-parent-"));
   roots.push(root);

@@ -376,9 +376,7 @@ export function openRegistry(
           { bindingId, stage: "direct", ordinal: 0, launchState: binding.value.launchState },
         ],
       });
-    const chain = stageChain(issueId);
-    if (!chain.ok) return chain;
-    const stages = chain.value.map((entry) => {
+    const stages = lineage.generationOf(bindingId).map((entry) => {
       const current = get(entry.bindingId);
       return {
         bindingId: entry.bindingId,
@@ -413,19 +411,28 @@ export function openRegistry(
         return error("invalid_stage", "Stage does not match child binding");
       if (lineage.get(bindingId) !== null) return error("stage_conflict", "Stage already recorded");
       const chain = lineage.chain(issueId);
-      if (
-        previousBindingId !== null &&
-        (chain.at(-1)?.handoff === null || chain.at(-1)?.handoff === undefined)
-      )
-        return error("handoff_missing", "Previous stage has no handoff");
-      if (
+      if (previousBindingId === null) {
+        if (ordinal !== 0)
+          return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+        const live = chain.some((entry) => {
+          const current = get(entry.bindingId);
+          return current.ok && current.value.launchState !== "closed";
+        });
+        if (live) return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+      } else {
+        if (chain.at(-1)?.handoff === null || chain.at(-1)?.handoff === undefined)
+          return error("handoff_missing", "Previous stage has no handoff");
+        if (
+          chain.at(-1)?.bindingId !== previousBindingId ||
+          ordinal !== (chain.at(-1)?.ordinal ?? -1) + 1
+        )
+          return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+      }
+      const generation =
         previousBindingId === null
-          ? ordinal !== 0 || chain.length !== 0
-          : chain.at(-1)?.bindingId !== previousBindingId ||
-            ordinal !== (chain.at(-1)?.ordinal ?? -1) + 1
-      )
-        return error("stage_conflict", "Stage predecessor or ordinal is invalid");
-      lineage.insert(bindingId, issueId, stage, ordinal, previousBindingId);
+          ? lineage.nextGeneration(issueId)
+          : lineage.generationNumber(previousBindingId);
+      lineage.insert(bindingId, issueId, stage, ordinal, previousBindingId, generation);
       return ok({ bindingId, issueId, stage, ordinal, previousBindingId, handoff: null });
     });
   }
@@ -498,12 +505,14 @@ export function openRegistry(
       if (!closed.ok) return closed;
       const successor = reserveInTransaction(parsed.data, scope.value, digest);
       if (!successor.ok) return successor;
+      const generation = lineage.generationNumber(previousBindingId);
       lineage.insert(
         successor.value.id,
         priorStage.issueId,
         nextStage,
         priorStage.ordinal + 1,
         previousBindingId,
+        generation,
       );
       return successor;
     });

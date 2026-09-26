@@ -10,6 +10,29 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
+test("update prepare CLI forwards the remote and documents the command", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-update-cli-"));
+  roots.push(root);
+  const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+  const prepare = spyOn(Orchestrator.prototype, "updatePrepare").mockResolvedValue({
+    ok: true,
+    value: { action: "exists", branch: "olw/update-omo-1-senpi-2", pr: null },
+  });
+  try {
+    expect(
+      await runCli(["--root", root, "update", "prepare", "--remote", "/tmp/bare.git", "--json"]),
+    ).toBe(0);
+    expect(prepare).toHaveBeenCalledWith({ remote: "/tmp/bare.git" });
+    expect(await runCli(["--help", "--json"])).toBe(0);
+    const help = JSON.parse(String(stdout.mock.calls.at(-1)?.[0]));
+    expect(help.value.commands).toContain("update prepare");
+    expect(help.value.options["update prepare"]).toContain("--remote");
+  } finally {
+    prepare.mockRestore();
+    stdout.mockRestore();
+  }
+});
+
 test("update check CLI accepts repeated package tags and documents the command", async () => {
   const root = await mkdtemp(join(tmpdir(), "olw-update-cli-"));
   roots.push(root);

@@ -12,3 +12,4 @@ omo-host.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.omo/update-worktrees/

@@ -46,6 +46,7 @@ import {
   type UpdateCheck,
   type UpdateTimer,
 } from "./update/check";
+import { type PrepareResult, prepareUpdate } from "./update/prepare";
 
 const normalizedPaneSchema = z.strictObject({
   paneId: z.string(),
@@ -584,6 +585,13 @@ export class Orchestrator {
     if (live.launchState !== "ready") return ok({ bindingId: null, reason: "manager_unavailable" });
     if (live.contactState !== "active") return ok({ bindingId: null, reason: "manager_paused" });
     return ok({ bindingId: live.id, reason: "linked" });
+  }
+
+  /** Prepare a dev pull request for the versions in the latest update check. */
+  public async updatePrepare(
+    options: { readonly remote?: string } = {},
+  ): Promise<Result<PrepareResult>> {
+    return prepareUpdate(this.#root, options);
   }
 
   /** Open, focus or reattach the single management session; never adopts a non-host session. */

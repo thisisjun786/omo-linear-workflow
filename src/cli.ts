@@ -40,6 +40,7 @@ const valueFlags = new Set([
   "head",
   "stage",
   "tag",
+  "remote",
 ]);
 const booleanFlags = new Set([
   "json",
@@ -139,6 +140,7 @@ function exitCode(result: Result<unknown>): number {
   if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
     return 4;
   if (result.error.code === "runtime_unavailable") return 3;
+  if (result.error.code === "interrupted") return 130;
   return 2;
 }
 function deliveryOutcome(result: Result<unknown>): Result<unknown> {
@@ -280,6 +282,7 @@ export async function runCli(
             "doctor",
             "manage",
             "update check",
+            "update prepare",
             "scope import",
             "supervisor create",
             "parent create",
@@ -304,6 +307,8 @@ export async function runCli(
           options: {
             manage: "[--json]",
             "update check": "[--tag omo-ai=beta] [--tag @code-yeongyu/senpi=latest] [--json]",
+            "update prepare":
+              "[--remote NAME|URL] [--json] (PR to dev for the latest check's versions; OLW_GH_BIN overrides gh)",
             "scope import": "--file PATH [--fixture]",
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
@@ -371,6 +376,9 @@ export async function runCli(
         tags[name] = raw.slice(split + 1);
       }
       if (result === undefined) result = await orchestrator.updateCheck(tags);
+    } else if (command === "update prepare") {
+      const remote = stringOption(options, "remote");
+      result = await orchestrator.updatePrepare(remote === undefined ? {} : { remote });
     } else if (command === "doctor") {
       result = await doctorWithChains(root, stringOption(options, "herdr-socket"));
     } else if (command === "manage") {
@@ -617,7 +625,7 @@ export async function runCli(
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, manage, update check, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, manage, update check/prepare, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {

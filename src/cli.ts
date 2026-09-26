@@ -36,6 +36,9 @@ const valueFlags = new Set([
   "question",
   "questions-file",
   "answers-file",
+  "plan",
+  "head",
+  "stage",
 ]);
 const booleanFlags = new Set([
   "json",
@@ -279,6 +282,8 @@ export async function runCli(
             "parent link",
             "parent unlink",
             "child create",
+            "stage complete",
+            "stage start",
             "send",
             "report",
             "reports",
@@ -301,6 +306,10 @@ export async function runCli(
             "parent link": "--parent BINDING --supervisor BINDING",
             "parent unlink": "--parent BINDING",
             "child create": "--parent BINDING --issue ID [--mode direct|planned|research]",
+            "stage complete":
+              "--from PLAN_BINDING --plan ABS_PATH --head SHA --id MESSAGE_ID --text-file PATH",
+            "stage start":
+              "--from PLAN_BINDING --parent PARENT_BINDING --stage execute --id MESSAGE_ID",
             send: "--from BINDING --to BINDING --id ID --kind instruction|coordination --text-file PATH",
             report:
               "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--to-user]",
@@ -407,6 +416,36 @@ export async function runCli(
           : !values.ok
             ? values
             : invalid("--mode must be direct, planned, or research");
+    } else if (command === "stage complete") {
+      const values = requireOptions(options, ["from", "plan", "head", "id", "text-file"]);
+      const body = values.ok
+        ? await text(values.value["text-file"])
+        : invalid("--text-file is required");
+      result =
+        values.ok && body.ok
+          ? await orchestrator.stageComplete({
+              fromId: values.value["from"] ?? "",
+              planPath: values.value["plan"] ?? "",
+              head: values.value["head"] ?? "",
+              messageId: values.value["id"] ?? "",
+              text: body.value,
+            })
+          : values.ok
+            ? body
+            : values;
+    } else if (command === "stage start") {
+      const values = requireOptions(options, ["from", "parent", "stage", "id"]);
+      result =
+        values.ok && values.value["stage"] === "execute"
+          ? await orchestrator.stageStart({
+              fromId: values.value["from"] ?? "",
+              stage: "execute",
+              parentId: values.value["parent"] ?? "",
+              messageId: values.value["id"] ?? "",
+            })
+          : values.ok
+            ? invalid("--stage must be execute")
+            : values;
     } else if (command === "send") {
       const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
       const kind = values.ok
@@ -538,7 +577,7 @@ export async function runCli(
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {
@@ -550,7 +589,7 @@ export async function runCli(
       },
     };
   }
-  if (command === "send" || command === "report" || command === "ask" || command === "answer")
+  if (["send", "report", "stage complete", "ask", "answer"].includes(command))
     result = deliveryOutcome(result);
   print(result, has(options, "json"));
   return exitCode(result);

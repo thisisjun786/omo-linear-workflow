@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readFile, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type {
@@ -15,6 +16,7 @@ import type {
   Result,
   ScopeFilter,
   ScopeSnapshot,
+  StageHandoff,
 } from "./core/contracts";
 import {
   canRetryDelivery,
@@ -59,6 +61,27 @@ const herdrConnectionErrorSchema = z.strictObject({
   data: z.strictObject({ code: z.string(), message: z.string() }),
 });
 
+const paneUpdatedExitSchema = z.object({
+  event: z.literal("pane.updated"),
+  data: z.object({
+    pane: z.object({ pane_id: z.string(), agent_session: z.unknown().optional() }),
+  }),
+});
+const paneExitedSchema = z.object({
+  event: z.literal("pane.exited"),
+  data: z.object({ pane_id: z.string() }),
+});
+export function planPaneExited(event: unknown, paneId: string): boolean {
+  const exited = paneExitedSchema.safeParse(event);
+  if (exited.success) return exited.data.data.pane_id === paneId;
+  const updated = paneUpdatedExitSchema.safeParse(event);
+  return (
+    updated.success &&
+    updated.data.data.pane.pane_id === paneId &&
+    updated.data.data.pane.agent_session == null
+  );
+}
+
 export interface CreateSupervisorInput {
   readonly initiativeId: string;
   readonly scopeDigest: string;
@@ -94,6 +117,19 @@ export interface SendInput {
   readonly messageId: string;
   readonly kind: "instruction" | "coordination";
   readonly text: string;
+}
+export interface StageCompleteInput {
+  readonly fromId: string;
+  readonly planPath: string;
+  readonly head: string;
+  readonly messageId: string;
+  readonly text: string;
+}
+export interface StageStartInput {
+  readonly fromId: string;
+  readonly stage: "execute";
+  readonly parentId: string;
+  readonly messageId: string;
 }
 export interface ReportInput {
   readonly toUser?: boolean;
@@ -540,6 +576,452 @@ export class Orchestrator {
       checkout,
       { bindingId, grouping, stage, mode },
     );
+  }
+
+  public async stageComplete(input: StageCompleteInput): Promise<Result<unknown>> {
+    const sender = this.#binding(input.fromId);
+    if (!sender.ok) return sender;
+    const stage = this.#withRegistry((registry) => registry.stageOf(input.fromId));
+    if (!stage.ok) return stage;
+    if (stage.value?.stage !== "plan" || sender.value.checkout === null)
+      return failure("handoff_not_allowed", "A plan child must complete its stage");
+    const host = await this.#checkHostProtocol(sender.value);
+    if (host !== undefined) return host;
+    let session: NativeSession | undefined;
+    try {
+      session = await this.#deps.attachBinding(sender.value);
+      const identity = await session.describe();
+      if (!identity.ok) return identity;
+      if (!matchesRuntime(sender.value, identity.value))
+        return failure("identity_mismatch", "Plan sender does not match the bound runtime");
+      if (!isAbsolute(input.planPath))
+        return failure("invalid_arguments", "Plan path must be absolute");
+      const [directory, path] = await Promise.all([
+        realpath(sender.value.checkout.path),
+        realpath(input.planPath),
+      ]);
+      const inside = relative(directory, path);
+      if (inside === "" || inside === ".." || inside.startsWith("../") || isAbsolute(inside))
+        return failure("invalid_arguments", "Plan file must be inside the child worktree");
+      const contents = await readFile(path);
+      const head = await this.#deps.gitTip(directory, "HEAD");
+      if (head !== input.head)
+        return failure("head_mismatch", "Plan worktree HEAD differs from the supplied head");
+      const planSha256 = createHash("sha256").update(contents).digest("hex");
+      const handoff = stage.value.handoff;
+      const recorded = this.#withRegistry((registry) =>
+        registry.recordHandoff(sender.value.id, {
+          planPath: path,
+          planSha256,
+          head,
+          completedAt:
+            handoff?.planPath === path && handoff.planSha256 === planSha256 && handoff.head === head
+              ? handoff.completedAt
+              : this.#deps.now(),
+        }),
+      );
+      if (!recorded.ok) return recorded;
+    } catch (cause) {
+      return failure("runtime_unavailable", "Could not verify plan handoff", messageOf(cause));
+    } finally {
+      await session?.close();
+    }
+    return this.report({
+      fromId: input.fromId,
+      messageId: input.messageId,
+      outcome: "completed",
+      evidence: [input.planPath],
+      text: input.text,
+    });
+  }
+
+  public async stageStart(input: StageStartInput): Promise<Result<CreationResult>> {
+    if (input.stage !== "execute") return failure("invalid_stage", "Only execute can follow plan");
+    const plan = this.#binding(input.fromId);
+    if (!plan.ok) return plan;
+    if (plan.value.assignment.role !== "child" || plan.value.checkout === null)
+      return failure("invalid_stage", "Stage start requires a planned child");
+    const stage = this.#withRegistry((registry) => registry.stageOf(plan.value.id));
+    if (!stage.ok) return stage;
+    if (stage.value?.stage !== "plan") return failure("invalid_stage", "Not a plan stage");
+    if (input.parentId !== plan.value.assignment.ownerBindingId)
+      return failure("owner_mismatch", "Named parent does not own the plan child");
+    const owner = this.#binding(input.parentId);
+    if (!owner.ok) return owner;
+    if (owner.value.assignment.role !== "parent" || owner.value.launchState !== "ready")
+      return failure("owner_mismatch", "Named parent is not ready");
+    const host = await this.#checkHostProtocol(owner.value);
+    if (host !== undefined) return host;
+    const planHost = await this.#checkHostProtocol(plan.value);
+    if (planHost !== undefined) return planHost;
+    const ownerContext = await this.#context(owner.value);
+    if (!ownerContext.ok) return ownerContext;
+    let session: NativeSession | undefined;
+    try {
+      session = await this.#deps.attachBinding(owner.value);
+      const identity = await session.describe();
+      if (!identity.ok) return identity;
+      if (!matchesRuntime(owner.value, identity.value))
+        return failure("identity_mismatch", "Stage sender is not the bound parent runtime");
+    } catch (cause) {
+      return failure("runtime_unavailable", "Could not verify stage owner", messageOf(cause));
+    } finally {
+      await session?.close();
+    }
+    const chain = this.#withRegistry((registry) => registry.lineageFor(plan.value.id));
+    if (!chain.ok) return chain;
+    const next = chain.value.stages.find((entry) => entry.ordinal === 1);
+    if (next !== undefined) {
+      const successor = this.#binding(next.bindingId);
+      if (!successor.ok) return successor;
+      const context = await this.#context(plan.value);
+      if (!context.ok) return context;
+      if (stage.value.handoff === null) return failure("handoff_missing", "Plan has no handoff");
+      return this.#resumeSuccessor(successor.value, context.value.snapshot, stage.value.handoff);
+    }
+    if (stage.value.handoff === null) return failure("handoff_missing", "Plan has no handoff");
+    const checkout = plan.value.checkout;
+    let head: string;
+    try {
+      head = await this.#deps.gitTip(checkout.path, "HEAD");
+    } catch (cause) {
+      return failure("runtime_unavailable", "Could not read plan HEAD", messageOf(cause));
+    }
+    if (head !== stage.value.handoff.head)
+      return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
+    if (plan.value.paneId === null || plan.value.workspaceId === null)
+      return failure("runtime_unavailable", "Plan has no Herdr pane or workspace");
+    const context = await this.#context(plan.value);
+    if (!context.ok) return context;
+    const herdr = this.#deps.createHerdrClient(plan.value.herdrSocket);
+    let stop: (() => void) | undefined;
+    try {
+      const snapshot = await herdr.snapshot();
+      const pane = snapshot.panes.find(
+        (item) => item.paneId === plan.value.paneId && item.workspaceId === plan.value.workspaceId,
+      );
+      if (
+        !snapshot.workspaces.some(
+          (item) => item.workspaceId === plan.value.workspaceId && item.cwd === checkout.path,
+        ) ||
+        pane === undefined
+      )
+        return failure("runtime_unavailable", "Plan workspace or pane is missing");
+      // The retained native engine may still be open after its TUI has exited.
+      // Only the pane attachment determines whether another /quit is needed.
+      if (pane.sessionPath !== null) {
+        const native = await this.#deps.attachBinding(plan.value);
+        try {
+          const identity = await native.describe();
+          if (!identity.ok) return identity;
+          if (!matchesRuntime(plan.value, identity.value))
+            return failure("identity_mismatch", "Plan runtime identity changed");
+        } finally {
+          await native.close();
+        }
+        const exited = Promise.withResolvers<void>();
+        const outcome = exited.promise.then(
+          () => true,
+          () => false,
+        );
+        stop = await herdr.subscribe((event) => {
+          if (planPaneExited(event, plan.value.paneId ?? "")) exited.resolve();
+          const disconnected = herdrConnectionErrorSchema.safeParse(event);
+          if (disconnected.success) exited.reject(new Error(disconnected.data.data.message));
+        });
+        const timeout = setTimeout(
+          () => exited.reject(new Error("Plan pane did not exit")),
+          30_000,
+        );
+        timeout.unref();
+        try {
+          await herdr.sendKeys(plan.value.paneId, "/quit", ["Enter"]);
+          if (!(await outcome)) return failure("runtime_unavailable", "Plan pane did not exit");
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      await this.#deps.terminateBinding(plan.value);
+    } catch (cause) {
+      return failure("runtime_unavailable", "Plan session could not be stopped", messageOf(cause));
+    } finally {
+      stop?.();
+      herdr.close();
+    }
+    return this.#create(
+      plan.value.assignment,
+      context.value.designation,
+      context.value.snapshot,
+      checkout.path,
+      checkout,
+      {
+        bindingId: this.#deps.uuid(),
+        stage: "execute",
+        mode: "planned",
+        successor: {
+          previousId: plan.value.id,
+          workspaceId: plan.value.workspaceId,
+          head: stage.value.handoff.head,
+          planPath: stage.value.handoff.planPath,
+        },
+      },
+    );
+  }
+
+  async #resumeSuccessor(
+    binding: Binding,
+    snapshot: ScopeSnapshot,
+    handoff: StageHandoff,
+  ): Promise<Result<CreationResult>> {
+    if (binding.checkout === null)
+      return failure("runtime_unavailable", "Successor checkout is missing");
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    try {
+      const state = await herdr.snapshot();
+      if (
+        binding.workspaceId !== null &&
+        !state.workspaces.some(
+          (workspace) =>
+            workspace.workspaceId === binding.workspaceId && workspace.cwd === binding.cwd,
+        )
+      )
+        return failure("runtime_unavailable", "Successor workspace is missing");
+      if (binding.paneId !== null) {
+        const pane = state.panes.find(
+          (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
+        );
+        if (pane === undefined) return failure("runtime_unavailable", "Successor pane is missing");
+        let session: NativeSession | undefined;
+        let available = false;
+        try {
+          session = await this.#deps.attachBinding(binding);
+          const identity = await session.describe();
+          if (!identity.ok) return identity;
+          if (binding.launchState === "ready" && !matchesRuntime(binding, identity.value))
+            return failure("identity_mismatch", "Execute runtime identity changed");
+          available = true;
+        } catch {
+          /* A missing native session is relaunched from the retained seed. */
+        } finally {
+          await session?.close();
+        }
+        if (available) {
+          if (binding.launchState === "ready" && binding.initialization.state === "accepted")
+            return ok(this.#creationResult(binding));
+          const provisioning = this.#withRegistry((registry) =>
+            registry.setLaunchState(binding.id, "provisioning"),
+          );
+          if (!provisioning.ok) return provisioning;
+          const activated = await this.#verifyAndActivate(provisioning.value);
+          if (!activated.ok) return activated;
+          const initialized = await this.#initialize(activated.value, snapshot, {
+            planPath: handoff.planPath,
+            head: handoff.head,
+          });
+          return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
+        }
+      }
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Could not inspect execute workspace",
+        messageOf(cause),
+      );
+    } finally {
+      herdr.close();
+    }
+    return this.#launchSuccessor(binding, snapshot, handoff);
+  }
+
+  async #launchSuccessor(
+    binding: Binding,
+    snapshot: ScopeSnapshot,
+    handoff: StageHandoff,
+  ): Promise<Result<CreationResult>> {
+    const checkout = binding.checkout;
+    if (checkout === null) return failure("invalid_stage", "Successor has no checkout");
+    let managedPath: string;
+    try {
+      const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+      managedPath = managedHerdrPath(artifact.artifactDir);
+      await this.#deps.checkHostProfile?.(
+        this.#root,
+        binding.omoSocket,
+        launchEnvironment(this.#root, managedPath),
+      );
+      await this.#deps.ensureHost(
+        this.#root,
+        binding.omoSocket,
+        launchEnvironment(this.#root, managedPath),
+      );
+      if ((await this.#deps.gitTip(checkout.path, "HEAD")) !== handoff.head)
+        return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
+    } catch (cause) {
+      if (cause instanceof HostProfileMismatchError)
+        return failure("runtime_unavailable", cause.message, {
+          reason: "host_profile_mismatch",
+          ...cause.details,
+        });
+      return failure("runtime_unavailable", "Successor host unavailable", messageOf(cause));
+    }
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    let stop: (() => void) | undefined;
+    let stopReadiness: (() => void) | undefined;
+    try {
+      const readySignal = Promise.withResolvers<string>();
+      const outcome = readySignal.promise.then(
+        (path) => ({ ok: true, path }) as const,
+        (reason: unknown) => ({ ok: false, reason }) as const,
+      );
+      stop = await herdr.subscribe((event) => {
+        const disconnected = herdrConnectionErrorSchema.safeParse(event);
+        if (disconnected.success) readySignal.reject(new Error(disconnected.data.data.message));
+      });
+      let current = binding;
+      let paneId = current.paneId;
+      if (paneId === null) {
+        const predecessor = this.#withRegistry((registry) => registry.stageOf(current.id));
+        if (
+          !predecessor.ok ||
+          predecessor.value?.previousBindingId === null ||
+          predecessor.value?.previousBindingId === undefined
+        )
+          throw new Error("Successor predecessor missing");
+        const previous = this.#binding(predecessor.value.previousBindingId);
+        if (!previous.ok) return previous;
+        const workspaceId = previous.value.workspaceId;
+        // The predecessor's workspace is supplied by the caller when reservation has no pane yet.
+        if (workspaceId === null) throw new Error("Successor workspace is missing");
+        paneId = (await herdr.createTab(workspaceId, checkout.path, "execute")).rootPaneId;
+        const provisioned = this.#withRegistry((registry) =>
+          registry.provision(current.id, workspaceId, paneId ?? ""),
+        );
+        if (!provisioned.ok) return provisioned;
+        current = provisioned.value;
+      }
+      if (current.launchState !== "provisioning") {
+        const resumed = this.#withRegistry((registry) =>
+          registry.setLaunchState(current.id, "provisioning"),
+        );
+        if (!resumed.ok) return resumed;
+        current = resumed.value;
+      }
+      const model = modelForLaunch("child", "execute");
+      let seedPath = current.sessionPath;
+      if (seedPath === null) {
+        const manager = SessionManager.create(
+          checkout.path,
+          join(this.#root, ".omo/state/sessions"),
+          { id: current.durableSessionId },
+        );
+        manager.appendModelChange(model.provider, model.modelId);
+        manager.appendThinkingLevelChange(model.thinking);
+        seedPath = manager.getSessionFile() ?? null;
+        const header = manager.getHeader();
+        if (seedPath === undefined || seedPath === null || header === null)
+          throw new Error("Native session seed missing");
+        await writeFile(
+          seedPath,
+          `${[header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+          { mode: 0o600, flag: "wx" },
+        );
+        const observed = this.#withRegistry((registry) =>
+          registry.observeSession(current.id, seedPath ?? ""),
+        );
+        if (!observed.ok) return observed;
+        current = observed.value;
+      }
+      await removeReadiness(this.#root, current.id);
+      const readiness = await subscribeReadiness(this.#root, current);
+      stopReadiness = readiness.close;
+      void readiness.promise.then(
+        (receipt) => readySignal.resolve(receipt.sessionPath),
+        (cause: unknown) => readySignal.reject(cause),
+      );
+      const label = roleLabel(current.assignment, snapshot, current.id);
+      await herdr.run(
+        paneId,
+        [
+          "env",
+          "-u",
+          "OMO_INITIATIVE_HOST",
+          "OMO_ENABLE_SHARED_HOST=1",
+          `OMO_RPC_SOCKET=${binding.omoSocket}`,
+          `OMO_INITIATIVE_ROOT=${this.#root}`,
+          join(this.#root, "node_modules/.bin/omo"),
+          "-e",
+          join(this.#root, "dist/extension/index.js"),
+          "-e",
+          join(this.#root, "dist/extension/model-catalog.js"),
+          "--session",
+          seedPath,
+          "--name",
+          label,
+          "--model",
+          `${model.provider}/${model.modelId}`,
+          "--thinking",
+          model.thinking,
+          "--no-model-fallback",
+          "--no-recommended-models",
+        ],
+        { PATH: managedPath, ...runtimeCacheEnvironment(this.#root) },
+      );
+      const timeout = setTimeout(
+        () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),
+        15_000,
+      );
+      timeout.unref();
+      try {
+        const received = await outcome;
+        if (!received.ok) throw received.reason;
+        const observed = this.#withRegistry((registry) =>
+          registry.observeSession(current.id, received.path),
+        );
+        if (!observed.ok) return observed;
+        current = observed.value;
+      } finally {
+        clearTimeout(timeout);
+      }
+      const activated = await this.#verifyAndActivate(current);
+      if (!activated.ok) return activated;
+      const initialized = await this.#initialize(activated.value, snapshot, {
+        planPath: handoff.planPath,
+        head: handoff.head,
+      });
+      return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
+    } catch (cause) {
+      const current = this.#binding(binding.id);
+      if (current.ok && current.value.launchState !== "reserved")
+        this.#withRegistry((registry) => registry.setLaunchState(binding.id, "uncertain"));
+      return failure(
+        "runtime_unavailable",
+        "Successor launch incomplete; retry stage start",
+        messageOf(cause),
+      );
+    } finally {
+      stopReadiness?.();
+      stop?.();
+      herdr.close();
+    }
+  }
+
+  #creationResult(binding: Binding): CreationResult {
+    return {
+      binding,
+      expectedModel: modelForLaunch("child", "execute"),
+      readiness: "ready",
+      execution: "brief_accepted",
+      stage: "execute",
+      mode: "planned",
+      ancestry:
+        binding.checkout === null
+          ? null
+          : {
+              branch: binding.checkout.branch,
+              baseBranch: binding.checkout.baseBranch,
+              baseCommit: binding.checkout.baseCommit,
+            },
+    };
   }
 
   public async send(input: SendInput): Promise<Result<unknown>> {
@@ -1124,6 +1606,12 @@ export class Orchestrator {
       readonly grouping?: WorktreeGrouping | undefined;
       readonly stage?: ChildStage;
       readonly mode?: ChildCreateMode;
+      readonly successor?: {
+        readonly previousId: string;
+        readonly workspaceId: string;
+        readonly head: string;
+        readonly planPath: string;
+      };
     },
   ): Promise<Result<CreationResult>> {
     let managedPath: string;
@@ -1139,6 +1627,32 @@ export class Orchestrator {
     }
     const environment = launchEnvironment(this.#root, managedPath);
     const bindingId = target?.bindingId ?? this.#deps.uuid();
+    if (target?.successor !== undefined) {
+      const reserved = this.#withRegistry((registry) =>
+        registry.successorReservation(
+          target.successor?.previousId ?? "",
+          {
+            bindingId,
+            durableSessionId: this.#deps.uuid(),
+            designation,
+            snapshot,
+            assignment,
+            cwd,
+            checkout,
+            herdrSocket: this.#herdrSocket,
+            omoSocket: this.#omoSocket,
+          },
+          "execute",
+        ),
+      );
+      if (!reserved.ok) return reserved;
+      return this.#launchSuccessor(reserved.value, snapshot, {
+        planPath: target.successor.planPath,
+        head: target.successor.head,
+        planSha256: "",
+        completedAt: "",
+      });
+    }
     const reserved = this.#withRegistry((registry) =>
       registry.reserve({
         bindingId,
@@ -1154,7 +1668,11 @@ export class Orchestrator {
     );
     if (!reserved.ok) return reserved;
     const launchStage = target?.stage;
-    if (launchStage !== undefined && assignment.role === "child") {
+    if (
+      launchStage !== undefined &&
+      assignment.role === "child" &&
+      target?.successor === undefined
+    ) {
       const recorded = this.#withRegistry((registry) =>
         registry.recordStage(bindingId, assignment.issueId, launchStage, 0, null),
       );
@@ -1170,10 +1688,11 @@ export class Orchestrator {
       await this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment);
       await this.#deps.ensureHost(this.#root, this.#omoSocket, environment);
     } catch (cause) {
-      this.#withRegistry((registry) => {
-        const closing = registry.beginClose(bindingId);
-        return closing.ok ? registry.finishClose(bindingId) : closing;
-      });
+      if (target?.successor === undefined)
+        this.#withRegistry((registry) => {
+          const closing = registry.beginClose(bindingId);
+          return closing.ok ? registry.finishClose(bindingId) : closing;
+        });
       if (cause instanceof HostProfileMismatchError)
         return failure("runtime_unavailable", cause.message, {
           reason: "host_profile_mismatch",
@@ -1223,7 +1742,8 @@ export class Orchestrator {
           );
           rootTabId = observed?.rootTabId;
         }
-        if (rootTabId !== undefined) await herdr.renameTab(rootTabId, "plan");
+        if (rootTabId !== undefined && target?.successor === undefined)
+          await herdr.renameTab(rootTabId, "plan");
       }
       if (checkout !== null) {
         const observedHead = await this.#deps.gitTip(checkout.path, "HEAD");
@@ -1308,7 +1828,7 @@ export class Orchestrator {
         }
         return activated;
       }
-      const initialized = await this.#initialize(activated.value, snapshot);
+      const initialized = await this.#initialize(activated.value, snapshot, target?.successor);
       if (!initialized.ok) return initialized;
       return ok({
         binding: initialized.value,
@@ -1411,8 +1931,24 @@ export class Orchestrator {
     );
   }
 
-  async #initialize(binding: Binding, snapshot: ScopeSnapshot): Promise<Result<Binding>> {
-    const text = binding.initialization.text ?? buildRoleBrief(binding, snapshot);
+  async #initialize(
+    binding: Binding,
+    snapshot: ScopeSnapshot,
+    successor?: { readonly planPath: string; readonly head: string },
+  ): Promise<Result<Binding>> {
+    const text =
+      binding.initialization.text ??
+      [
+        buildRoleBrief(binding, snapshot),
+        ...(successor === undefined
+          ? []
+          : [
+              `stage: execute`,
+              `plan_path: ${successor.planPath}`,
+              `plan_head: ${successor.head}`,
+              "Use the plan with the ulw-execute skill to implement this issue.",
+            ]),
+      ].join("\n");
     const claim = this.#withRegistry((registry) => registry.beginInitialization(binding.id, text));
     if (!claim.ok) return claim;
     if (claim.value.disposition === "replay") return ok(claim.value.binding);

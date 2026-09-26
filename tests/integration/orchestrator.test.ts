@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@code-yeongyu/senpi";
@@ -21,6 +21,7 @@ import { roleLabel } from "../../src/linear";
 import {
   Orchestrator,
   type OrchestratorDependencies,
+  planPaneExited,
   readSessionPath,
 } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
@@ -63,6 +64,8 @@ test("CLI help exits successfully without creating runtime state", async () => {
         "supervisor create",
         "parent create",
         "child create",
+        "stage complete",
+        "stage start",
         "reconcile",
       ]),
     },
@@ -102,6 +105,27 @@ describe("host profile", () => {
     });
     await rm(root, { recursive: true, force: true });
   });
+});
+
+test("real Herdr exit variants identify only the plan pane", () => {
+  const updated = { event: "pane.updated", data: { type: "pane_updated", pane: { pane_id: "p" } } };
+  const exited = {
+    event: "pane.exited",
+    data: { type: "pane_exited", pane_id: "p", workspace_id: "w" },
+  };
+  expect(planPaneExited(updated, "p")).toBe(true);
+  expect(planPaneExited(exited, "p")).toBe(true);
+  expect(planPaneExited(updated, "other")).toBe(false);
+  expect(planPaneExited(exited, "other")).toBe(false);
+  expect(
+    planPaneExited(
+      {
+        event: "pane.updated",
+        data: { pane: { pane_id: "p", agent_session: { kind: "path", value: "/s" } } },
+      },
+      "p",
+    ),
+  ).toBe(false);
 });
 
 describe("Herdr readiness event", () => {
@@ -153,6 +177,8 @@ class FakeHerdr implements HerdrClient {
   protocol: 1 | 2 = 2;
   readonly emittedEvent: unknown;
   readonly tabCalls: unknown[] = [];
+  readonly extraPanes: Snapshot["panes"][number][] = [];
+  exitFrame: "updated" | "exited" = "updated";
   lastArgv: readonly string[] = [];
   listener: ((event: unknown) => void) | undefined;
   verifyIdentity = false;
@@ -162,6 +188,7 @@ class FakeHerdr implements HerdrClient {
   root = "";
   readonly workspaces = new Map<string, Workspace>();
   readonly nativeIdentities = new Map<string, RuntimeIdentity>();
+  readonly paneSessions = new Map<string, string>();
   nextWorkspace = 0;
   constructor(
     events: string[],
@@ -198,6 +225,7 @@ class FakeHerdr implements HerdrClient {
   ): Promise<{ tabId: string; rootPaneId: string }> {
     const call = { tabId: `${workspaceId}:t2`, rootPaneId: `${workspaceId}:p2` };
     this.tabCalls.push({ method: "createTab", workspaceId, cwd: _cwd, label, ...call });
+    this.extraPanes.push({ paneId: call.rootPaneId, workspaceId, revision: 1, sessionPath: null });
     return call;
   }
   async renameTab(tabId: string, label: string): Promise<void> {
@@ -205,6 +233,16 @@ class FakeHerdr implements HerdrClient {
   }
   async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
     this.tabCalls.push({ method: "sendKeys", paneId, text, keys });
+    this.events.push(`sendKeys:${paneId}`);
+    this.paneSessions.delete(paneId);
+    this.listener?.(
+      this.exitFrame === "updated"
+        ? { event: "pane.updated", data: { type: "pane_updated", pane: { pane_id: paneId } } }
+        : {
+            event: "pane.exited",
+            data: { type: "pane_exited", pane_id: paneId, workspace_id: "worktree-2" },
+          },
+    );
   }
   rootTabFromCreate = true;
   async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
@@ -266,6 +304,7 @@ class FakeHerdr implements HerdrClient {
     this.listener?.(this.emittedEvent);
     const path = argv[argv.indexOf("--session") + 1];
     if (!path) throw new Error("Native session path is required");
+    this.paneSessions.set(_pane, path);
     const manager = SessionManager.open(path, join(this.cwd, "sessions"), this.cwd);
     const registry = openRegistry(join(this.root, ".omo/state/registry.sqlite"));
     try {
@@ -311,12 +350,19 @@ class FakeHerdr implements HerdrClient {
       focusedTabId: null,
       focusedPaneId: null,
       workspaces,
-      panes: [...this.workspaces.values()].map((workspace) => ({
-        paneId: workspace.rootPaneId,
-        workspaceId: workspace.workspaceId,
-        revision: 1,
-        sessionPath: null,
-      })),
+      panes: [...this.workspaces.values()]
+        .map((workspace): Snapshot["panes"][number] => ({
+          paneId: workspace.rootPaneId,
+          workspaceId: workspace.workspaceId,
+          revision: 1,
+          sessionPath: this.paneSessions.get(workspace.rootPaneId) ?? null,
+        }))
+        .concat(
+          this.extraPanes.map((pane) => ({
+            ...pane,
+            sessionPath: this.paneSessions.get(pane.paneId) ?? null,
+          })),
+        ),
     };
   }
   async reportSession(): Promise<void> {}
@@ -834,6 +880,340 @@ describe("orchestrator startup", () => {
       await rm(root, { recursive: true, force: true });
     },
   );
+
+  test("plan handoff stops the TUI and atomically succeeds it in the same checkout", async () => {
+    const root = await ownedRoot("omo-stage-handoff-");
+    const events: string[] = [];
+    const herdr = new FakeHerdr(events);
+    const prompts = new Map<string, Set<string>>();
+    let nextId = 0;
+    let tip = "commit";
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async (controlRoot) => ({
+        artifactDir: join(controlRoot, ".managed-herdr"),
+      }),
+      ensureHost: async () => {},
+      gitTip: async () => tip,
+      now: () => "2026-09-26T00:00:00.000Z",
+      uuid: () => `stage-id-${++nextId}`,
+      attachBinding: async (binding) => {
+        const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+        if (!identity) throw new Error("Missing native session");
+        const messages = prompts.get(binding.durableSessionId) ?? new Set<string>();
+        prompts.set(binding.durableSessionId, messages);
+        const session = new FakeNative(identity, events, messages);
+        session.onConfigure = (current) =>
+          herdr.nativeIdentities.set(binding.durableSessionId, current);
+        return session;
+      },
+      terminateBinding: async (binding) => {
+        events.push(`terminate:${binding.id}`);
+        herdr.nativeIdentities.delete(binding.durableSessionId);
+      },
+      prompt: async (binding, brief) => {
+        const messages = prompts.get(binding.durableSessionId);
+        if (!messages) throw new Error("Missing prompt target");
+        messages.add(brief);
+      },
+    };
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+      projects: [
+        {
+          project: { id: "project", url: "https://linear.test/p", revision: "r1" },
+          issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+        },
+      ],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(scope));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const supervisor = await orchestrator.createSupervisor({
+      initiativeId: "initiative",
+      scopeDigest: imported.value.digest,
+      designationId: "designation",
+      execute: true,
+      fixture: true,
+    });
+    if (!supervisor.ok) throw new Error(supervisor.error.message);
+    const parent = await orchestrator.createParent({
+      supervisorId: supervisor.value.binding.id,
+      projectId: "project",
+      repo: root,
+      base: "main",
+    });
+    if (!parent.ok) throw new Error(parent.error.message);
+    const plan = await orchestrator.createChild({
+      parentId: parent.value.binding.id,
+      issueId: "issue",
+      mode: "planned",
+    });
+    if (!plan.ok || plan.value.binding.checkout === null) throw new Error("Missing plan checkout");
+    const binding = plan.value.binding;
+    const checkout = binding.checkout;
+    if (checkout === null) throw new Error("Missing plan checkout");
+    const live = () => {
+      const status = orchestrator.status({ projectId: "project" });
+      if (!status.ok) throw new Error(status.error.message);
+      return status.value.filter(
+        (item) => item.assignment.role === "child" && item.launchState !== "closed",
+      );
+    };
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const missing = await orchestrator.stageStart({
+      fromId: binding.id,
+      stage: "execute",
+      parentId: parent.value.binding.id,
+      messageId: "start",
+    });
+    expect(missing).toMatchObject({ ok: false, error: { code: "handoff_missing" } });
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const path = join(checkout.path, "plan.md");
+    await mkdir(checkout.path, { recursive: true });
+    await Bun.write(path, "Plan content");
+    const wrong = await orchestrator.stageComplete({
+      fromId: binding.id,
+      planPath: path,
+      head: "wrong",
+      messageId: "report",
+      text: "done",
+    });
+    expect(wrong).toMatchObject({ ok: false, error: { code: "head_mismatch" } });
+    const completed = await orchestrator.stageComplete({
+      fromId: binding.id,
+      planPath: path,
+      head: tip,
+      messageId: "report",
+      text: "done",
+    });
+    expect(completed).toMatchObject({ ok: true, value: { state: "accepted" } });
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      expect(registry.stageOf(binding.id)).toMatchObject({
+        ok: true,
+        value: { handoff: { planPath: path, head: tip } },
+      });
+    } finally {
+      registry.close();
+    }
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    tip = "changed";
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        stage: "execute",
+        parentId: parent.value.binding.id,
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "head_mismatch" } });
+    tip = "commit";
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const fake = herdr.nativeIdentities.get(parent.value.binding.durableSessionId);
+    if (!fake) throw new Error("Missing owner");
+    herdr.nativeIdentities.set(parent.value.binding.durableSessionId, { ...fake, cwd: "/wrong" });
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        stage: "execute",
+        parentId: parent.value.binding.id,
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "identity_mismatch" } });
+    herdr.nativeIdentities.set(parent.value.binding.durableSessionId, fake);
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const wrongParent = await orchestrator.stageStart({
+      fromId: binding.id,
+      parentId: supervisor.value.binding.id,
+      stage: "execute",
+      messageId: "start",
+    });
+    expect(wrongParent).toMatchObject({ ok: false, error: { code: "owner_mismatch" } });
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const hostMismatch = new Orchestrator(root, "/fake/herdr.sock", {
+      ...dependencies,
+      checkHostProfile: async () => {
+        throw new Error("host profile mismatch");
+      },
+    });
+    expect(
+      await hostMismatch.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    expect(
+      herdr.tabCalls.filter(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          "method" in call &&
+          call.method === "sendKeys",
+      ),
+    ).toHaveLength(0);
+    const beforeStart = events.length;
+    const stopped = herdr.sendKeys.bind(herdr);
+    herdr.sendKeys = async (paneId, text, keys) => {
+      await stopped(paneId, text, keys);
+      throw new Error("interrupted after quit");
+    };
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+    herdr.sendKeys = stopped;
+    expect(events.slice(beforeStart)).toContain(`sendKeys:${binding.paneId}`);
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    expect(herdr.nativeIdentities.has(binding.durableSessionId)).toBe(true);
+    const quitCount = herdr.tabCalls.filter(
+      (call) =>
+        typeof call === "object" && call !== null && "method" in call && call.method === "sendKeys",
+    ).length;
+    const originalTerminate = dependencies.terminateBinding;
+    let stoppedOnce = false;
+    const interruptedDependencies: OrchestratorDependencies = {
+      ...dependencies,
+      terminateBinding: async (child) => {
+        await originalTerminate(child);
+        if (!stoppedOnce) {
+          stoppedOnce = true;
+          throw new Error("interrupted after termination");
+        }
+      },
+    };
+    expect(
+      await new Orchestrator(root, "/fake/herdr.sock", interruptedDependencies).stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    expect(
+      herdr.tabCalls.filter(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          "method" in call &&
+          call.method === "sendKeys",
+      ),
+    ).toHaveLength(quitCount);
+    expect(herdr.nativeIdentities.has(binding.durableSessionId)).toBe(false);
+    const originalTab = herdr.createTab.bind(herdr);
+    let failedTab = false;
+    herdr.createTab = async (workspaceId, cwd, label) => {
+      if (!failedTab) {
+        failedTab = true;
+        throw new Error("interrupted after reservation");
+      }
+      return originalTab(workspaceId, cwd, label);
+    };
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+    expect(live()).toHaveLength(1);
+    expect(live()[0]?.id).not.toBe(binding.id);
+    const originalRun = herdr.run.bind(herdr);
+    let interruptedRun = false;
+    herdr.run = async (paneId, argv, env) => {
+      await originalRun(paneId, argv, env);
+      if (!interruptedRun) {
+        interruptedRun = true;
+        throw new Error("interrupted after launch before init");
+      }
+    };
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+    expect(live()).toHaveLength(1);
+    const worktreesBefore = herdr.nextWorkspace;
+    const started = await orchestrator.stageStart({
+      fromId: binding.id,
+      stage: "execute",
+      parentId: parent.value.binding.id,
+      messageId: "start",
+    });
+    if (!started.ok) throw new Error(JSON.stringify(started.error));
+    expect(live().map((item) => item.id)).toEqual([started.value.binding.id]);
+    expect(started.value.binding.checkout?.path).toBe(checkout.path);
+    expect(started.value.binding.checkout?.branch).toBe(checkout.branch);
+    expect(herdr.nextWorkspace).toBe(worktreesBefore);
+    expect(herdr.tabCalls).toContainEqual({
+      method: "createTab",
+      workspaceId: binding.workspaceId,
+      cwd: checkout.path,
+      label: "execute",
+      tabId: `${binding.workspaceId}:t2`,
+      rootPaneId: `${binding.workspaceId}:p2`,
+    });
+    expect(herdr.tabCalls).toContainEqual({
+      method: "sendKeys",
+      paneId: binding.paneId,
+      text: "/quit",
+      keys: ["Enter"],
+    });
+    expect(events.indexOf(`sendKeys:${binding.paneId}`)).toBeLessThan(
+      events.indexOf(`terminate:${binding.id}`),
+    );
+    expect(events).not.toContain(`close-workspace:${binding.workspaceId}`);
+    expect(herdr.lastArgv[herdr.lastArgv.indexOf("--model") + 1]).toBe(
+      "opencodex/anthropic/claude-opus-5-5",
+    );
+    expect(herdr.lastArgv[herdr.lastArgv.indexOf("--thinking") + 1]).toBe("medium");
+    expect(started.value.binding.initialization.text).toContain(path);
+    expect(started.value.binding.initialization.text).toContain(tip);
+    const sessionPath = herdr.lastArgv[herdr.lastArgv.indexOf("--session") + 1];
+    if (!sessionPath) throw new Error("Missing session seed");
+    const seed = SessionManager.open(sessionPath, join(root, ".omo/state/sessions"), checkout.path);
+    expect(seed.buildSessionContext().thinkingLevel).toBe("medium");
+    expect(seed.buildSessionContext().model?.modelId).toBe("anthropic/claude-opus-5-5");
+    expect(await Bun.file(binding.sessionPath ?? "").exists()).toBe(true);
+    herdr.nativeIdentities.delete(started.value.binding.durableSessionId);
+    const recovered = await orchestrator.stageStart({
+      fromId: binding.id,
+      parentId: parent.value.binding.id,
+      stage: "execute",
+      messageId: "start",
+    });
+    expect(recovered).toMatchObject({
+      ok: true,
+      value: { binding: { id: started.value.binding.id } },
+    });
+    expect(live()).toHaveLength(1);
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        stage: "execute",
+        parentId: parent.value.binding.id,
+        messageId: "start",
+      }),
+    ).toEqual(started);
+    expect(live().map((item) => item.id)).toEqual([started.value.binding.id]);
+  });
 
   test.each([
     ["direct", "direct", "opencodex/anthropic/claude-opus-5-5", "xhigh", false],

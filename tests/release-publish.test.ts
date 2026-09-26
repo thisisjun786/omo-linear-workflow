@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 const projectRoot = join(import.meta.dir, "..");
+const releaseWorkflow = await readFile(join(projectRoot, ".github/workflows/release.yml"), "utf8");
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -78,6 +79,7 @@ fi
     RELEASE_NOTES_FILE: notes,
     GH_LOG: ghLog,
     CI_CASE: "success",
+    RELEASE_TOKEN: "fixture-release-token",
   };
   await git(root, env, "init", "--bare", "--initial-branch=main", remote);
   await git(root, env, "clone", remote, checkout);
@@ -118,15 +120,14 @@ fi
 async function release(
   f: Fixture,
   phase: "validate" | "publish",
-  overrides: Record<string, string> = {},
+  overrides: Record<string, string | undefined> = {},
 ) {
-  return command(
-    f.checkout,
-    { ...f.env, ...overrides },
-    "bash",
-    "scripts/release-publish.sh",
-    phase,
-  );
+  const env: Record<string, string> = { ...f.env };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return command(f.checkout, env, "bash", "scripts/release-publish.sh", phase);
 }
 
 async function remoteRef(f: Fixture, ref: string) {
@@ -177,11 +178,38 @@ test("release validation rejects a non-fast-forward main update", async () => {
   expect(result.stderr).toContain("cannot fast-forward origin/main");
 });
 
-test("happy path creates an annotated tag, source release, and fast-forwards main", async () => {
+test("tag bootstrap uses the same validated publication path", async () => {
+  expect(releaseWorkflow).toContain("push:\n    tags: ['v*']");
+  expect(releaseWorkflow).toContain("github.event_name == 'push' && github.sha || inputs.sha");
+  expect(releaseWorkflow).toContain(
+    "github.event_name == 'push' && github.ref_name || inputs.version",
+  );
+
   const f = await fixture();
-  const validated = await release(f, "validate");
-  expect(validated.exitCode, validated.stderr).toBe(0);
-  const published = await release(f, "publish");
+  await git(f.checkout, f.env, "tag", "-a", "v1.2.3", "-m", "bootstrap", f.candidate);
+  await git(f.checkout, f.env, "push", "origin", "refs/tags/v1.2.3");
+  const published = await release(f, "publish", { RELEASE_VERSION: "v1.2.3" });
+  expect(published.exitCode, published.stderr).toBe(0);
+  expect(await remoteRef(f, "refs/heads/main")).toBe(f.candidate);
+});
+
+test("publish revalidates and rejects an unverified SHA", async () => {
+  const f = await fixture();
+  const published = await release(f, "publish", { CI_CASE: "missing" });
+  expect(published.exitCode).not.toBe(0);
+  expect(published.stderr).toContain("No successful CI push run");
+  expect(await remoteRef(f, "refs/heads/main")).toBe(f.base);
+});
+
+test("happy path creates an annotated tag without git identity or persisted credentials", async () => {
+  const f = await fixture();
+  const published = await release(f, "publish", {
+    HOME: join(f.root, "empty-home"),
+    GIT_AUTHOR_NAME: undefined,
+    GIT_AUTHOR_EMAIL: undefined,
+    GIT_COMMITTER_NAME: undefined,
+    GIT_COMMITTER_EMAIL: undefined,
+  });
   expect(published.exitCode, published.stderr).toBe(0);
   expect(await remoteRef(f, "refs/tags/v1.2.3^{commit}")).toBe(f.candidate);
   expect(await remoteRef(f, "refs/heads/main")).toBe(f.candidate);
@@ -191,4 +219,7 @@ test("happy path creates an annotated tag, source release, and fast-forwards mai
   expect(await readFile(f.ghLog, "utf8")).toContain(
     `release create v1.2.3 --verify-tag --target ${f.candidate}`,
   );
+  const config = await readFile(join(f.checkout, ".git/config"), "utf8");
+  expect(config).not.toContain(f.env.RELEASE_TOKEN);
+  expect(config).not.toContain("http.extraheader");
 });

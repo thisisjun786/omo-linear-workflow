@@ -1,6 +1,6 @@
 # Continuous Integration
 
-The [CI workflow](../../.github/workflows/ci.yml) runs its main job, `validate`, on Linux x64. It runs the same commands a contributor runs locally, plus the native Herdr build and an installer smoke test. A metadata-only policy job separately rejects pull requests into `main`.
+The [CI workflow](../../.github/workflows/ci.yml) runs its required job, `validate`, on Linux x64. It runs the same commands a contributor runs locally, plus the native Herdr build and an installer smoke test. Its first, metadata-only step rejects pull requests into `main` before contributor code is checked out.
 
 ## When it runs
 
@@ -11,7 +11,7 @@ The [CI workflow](../../.github/workflows/ci.yml) runs its main job, `validate`,
 | Push to `main` | The released source after a release advances `main`. |
 | Manual dispatch | The same checks on any branch. |
 
-Every PR runs the full `validate` job. There's no path-based selection: a documentation-only PR still installs dependencies and builds Herdr. New runs cancel obsolete runs for the same PR or branch, except reusable workflow calls. The job has a 60 minute timeout. A separate metadata-only `reject-main-pr` job fails when a PR targets `main`; it does not check out or execute contributor code.
+Every PR runs the required `validate` job. When a PR targets `main`, its first step fails with the branch-policy message before checkout, so the required check cannot pass and contributor code is not executed. Other PRs run every validation step. There's no path-based selection: a documentation-only PR still installs dependencies and builds Herdr. New runs cancel obsolete runs for the same PR or branch, except reusable workflow calls. The job has a 60 minute timeout.
 
 A merge into `dev` starts a push run for the exact merge commit. The release workflow requires a completed, successful `CI` push run on `dev` whose `head_sha` is exactly the requested release SHA; a PR run or a successful run for another commit is not release evidence.
 

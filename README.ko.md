@@ -46,13 +46,16 @@ TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하
 ## 기여와 릴리즈
 
 [CONTRIBUTING.md](CONTRIBUTING.md)는 이슈, 변경 단위별 PR, 검증과 리뷰 규칙을
-설명합니다. GitHub에는 버그·기능 요청 양식과 PR 템플릿이 제공됩니다.
-[버전·릴리즈 정책](docs/releases.md)은 SemVer, `vVERSION` 태그, 소스 배포,
+설명합니다. [docs/policy](docs/policy/pull-requests.md)의 정책은 브랜치 규칙을
+정합니다. PR은 `dev`를 대상으로 하고 merge commit으로 병합하며, `main`은 릴리즈된
+소스이고 소유자가 승인한 릴리즈만 `main`을 전진시킵니다. GitHub에는 버그·제안
+양식과 PR 템플릿이 제공됩니다.
+[버전·릴리즈 정책](docs/policy/releases.md)은 SemVer, `vVERSION` 태그, 소스 배포,
 업그레이드와 롤백을 다룹니다. 릴리즈 노트는 [CHANGELOG.md](CHANGELOG.md)에
 기록하며, `bun run release:check`로 패키지 버전과 노트를 검증합니다.
 CI는 제공자 인증 없이 필수 네이티브 Herdr 빌드와 격리 설치 검사까지 실행합니다.
-관리자가 버전 태그를 푸시하면 이 검사들이 통과한 뒤 GitHub 릴리즈를 발행합니다.
-위 clone 명령은 `main`을 설치합니다. 첫 릴리즈를 설치하려면 `--branch v0.1.0`을
+소유자가 버전 태그를 푸시하면 이 검사들이 통과한 뒤 GitHub 릴리즈를 발행합니다.
+위 clone 명령은 최신 릴리즈 커밋인 `main`을 설치합니다. 첫 릴리즈를 설치하려면 `--branch v0.1.0`을
 추가합니다. 발행된 버전과 소스 압축 파일은
 [GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)에서 확인합니다.
 

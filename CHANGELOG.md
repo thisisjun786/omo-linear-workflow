@@ -2,7 +2,7 @@
 
 All notable changes to OMO Linear Workflow (OLW) are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions
-follow the rules in [docs/releases.md](docs/releases.md). `package.json`
+follow the rules in [docs/policy/releases.md](docs/policy/releases.md). `package.json`
 `version` is the canonical version; the matching `## [VERSION]` section below is
 what `bun run release:check` reads when a release is prepared.
 

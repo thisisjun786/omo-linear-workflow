@@ -244,6 +244,7 @@ class FakeHerdr implements HerdrClient {
           },
     );
   }
+  async focusWorkspace(): Promise<void> {}
   rootTabFromCreate = true;
   async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
     this.cwd = checkout.path;

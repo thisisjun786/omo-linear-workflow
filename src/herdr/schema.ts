@@ -52,6 +52,7 @@ export const snapshotResultSchema = z.object({
         tab_id: identifierSchema,
         cwd: z.string().min(1).nullish(),
         revision: z.number().int().nonnegative(),
+        agent: z.string().nullish(),
         agent_session: agentSessionSchema.nullish(),
       }),
     ),
@@ -66,6 +67,7 @@ export const snapshotResultSchema = z.object({
 });
 export const okResultSchema = z.object({ type: z.literal("ok") });
 export const tabRenameResultSchema = z.object({ type: z.literal("tab_info") });
+export const workspaceInfoResultSchema = z.object({ type: z.literal("workspace_info") });
 export const worktreeRemovedSchema = z.object({
   type: z.literal("worktree_removed"),
   workspace_id: identifierSchema,

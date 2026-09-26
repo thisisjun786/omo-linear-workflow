@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   Assignment,
   Binding,
@@ -11,6 +11,7 @@ import type {
   Envelope,
   InitializationClaim,
   NativeReceipt,
+  ReattachClaim,
   Registry,
   ReserveInput,
   Result,
@@ -159,6 +160,11 @@ export function openRegistry(
     db.run(
       "CREATE UNIQUE INDEX IF NOT EXISTS bindings_live_owner ON bindings(ownership_key) WHERE launch_state <> 'closed'",
     );
+    db.run(`CREATE TABLE IF NOT EXISTS manager_reattach (
+    binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+    claimed_at TEXT NOT NULL,
+    owner TEXT NOT NULL
+  )`);
     db.run(`CREATE TABLE IF NOT EXISTS deliveries (
     message_id TEXT PRIMARY KEY,
     envelope_json TEXT NOT NULL,
@@ -586,6 +592,98 @@ export function openRegistry(
         return error("identity_conflict", "Observed session path is immutable");
       return saveBinding({ ...binding.value, sessionPath });
     });
+  }
+
+  function readyManager(id: string): Result<Binding> {
+    const binding = get(id);
+    if (!binding.ok) return binding;
+    return binding.value.assignment.role === "manager" && binding.value.launchState === "ready"
+      ? binding
+      : error("invalid_transition", "Only a ready manager can move to a new TUI pane");
+  }
+
+  function reattachClaim(
+    id: string,
+  ): { readonly claimed_at: string; readonly owner: string } | null {
+    return db
+      .query<{ readonly claimed_at: string; readonly owner: string }, [string]>(
+        "SELECT claimed_at, owner FROM manager_reattach WHERE binding_id = ?",
+      )
+      .get(id);
+  }
+
+  function ownsReattach(id: string, token: string): Result<boolean> {
+    try {
+      return ok(reattachClaim(id)?.owner === token);
+    } catch (cause) {
+      return error("storage_error", "Could not read manager reattachment", messageOf(cause));
+    }
+  }
+
+  function beginReattach(
+    id: string,
+    expectedPaneId: string | null,
+    claimedAt: string,
+    staleBefore: string,
+  ): Result<ReattachClaim> {
+    return transaction<ReattachClaim>(() => {
+      const binding = readyManager(id);
+      if (!binding.ok) return binding;
+      const held = reattachClaim(id);
+      // Compare-and-set: a changed pane or a live claim means another caller owns reattachment.
+      if (
+        binding.value.paneId !== expectedPaneId ||
+        (held !== null && held.claimed_at >= staleBefore)
+      )
+        return ok({ claimed: false, binding: binding.value });
+      const token = randomUUID();
+      db.query(
+        "INSERT INTO manager_reattach (binding_id, claimed_at, owner) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner",
+      ).run(id, claimedAt, token);
+      return ok({ claimed: true, binding: binding.value, token });
+    });
+  }
+
+  function recordReattachPane(id: string, token: string, paneId: string): Result<Binding> {
+    if (paneId.length === 0) return error("invalid_input", "Pane ID is required");
+    return transaction(() => {
+      const binding = readyManager(id);
+      if (!binding.ok) return binding;
+      if (reattachClaim(id)?.owner !== token)
+        return error("lease_lost", "Manager reattachment is owned by another caller");
+      return saveBinding({ ...binding.value, paneId });
+    });
+  }
+
+  function reattachPending(id: string): Result<boolean> {
+    try {
+      return ok(reattachClaim(id) !== null);
+    } catch (cause) {
+      return error("storage_error", "Could not read manager reattachment", messageOf(cause));
+    }
+  }
+
+  function releaseReattach(id: string, token: string): Result<boolean> {
+    try {
+      // An empty timestamp precedes every lease cutoff, so the next caller can claim at once.
+      const released = db
+        .query("UPDATE manager_reattach SET claimed_at = '' WHERE binding_id = ? AND owner = ?")
+        .run(id, token);
+      return ok(released.changes === 1);
+    } catch (cause) {
+      return error("storage_error", "Could not release manager reattachment", messageOf(cause));
+    }
+  }
+
+  function finishReattach(id: string, token: string): Result<boolean> {
+    try {
+      const finished = db
+        .query("DELETE FROM manager_reattach WHERE binding_id = ? AND owner = ?")
+        .run(id, token);
+      return ok(finished.changes === 1);
+    } catch (cause) {
+      return error("storage_error", "Could not release manager reattachment", messageOf(cause));
+    }
   }
 
   function activate(id: string, identityValue: RuntimeIdentity): Result<Binding> {
@@ -1556,6 +1654,12 @@ export function openRegistry(
     },
     provision,
     observeSession,
+    beginReattach,
+    ownsReattach,
+    recordReattachPane,
+    reattachPending,
+    releaseReattach,
+    finishReattach,
     activate,
     setLaunchState,
     setContactState,

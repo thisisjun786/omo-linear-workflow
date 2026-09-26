@@ -246,6 +246,18 @@ describe("HerdrClient", () => {
     ]);
   });
 
+  test("focuses a workspace only on explicit request", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, { type: "workspace_info", workspace: workspace("ws", "ws:t1") }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    await client.focusWorkspace("ws");
+    expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      { method: "workspace.focus", params: { workspace_id: "ws" } },
+    ]);
+  });
+
   test("rejects tab.create replies that omit root_pane", async () => {
     const server = await fixture((socket, request) =>
       ok(socket, request.id, {
@@ -471,6 +483,31 @@ describe("HerdrClient", () => {
       ]);
     },
   );
+
+  test("snapshot exposes the detected foreground agent of a pane", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, {
+        type: "session_snapshot",
+        snapshot: {
+          focused_workspace_id: null,
+          focused_tab_id: null,
+          focused_pane_id: null,
+          workspaces: [workspace("ws", "tab")],
+          panes: [
+            { ...pane("tui", "ws", "tab", "/cwd"), agent: "omo" },
+            pane("shell", "ws", "tab", "/cwd"),
+          ],
+          layouts: [{ workspace_id: "ws", tab_id: "tab", panes: [{ pane_id: "tui" }] }],
+        },
+      }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    expect((await client.snapshot()).panes).toEqual([
+      { paneId: "tui", workspaceId: "ws", revision: 0, sessionPath: null, agent: "omo" },
+      { paneId: "shell", workspaceId: "ws", revision: 0, sessionPath: null },
+    ]);
+  });
 
   test("preserves upstream errors and rejects disconnects", async () => {
     let first = true;

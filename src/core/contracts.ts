@@ -108,6 +108,10 @@ export interface Binding {
     | { readonly state: "pending"; readonly text: null }
     | { readonly state: "sending" | "accepted" | "rejected" | "uncertain"; readonly text: string };
 }
+export type ReattachClaim =
+  | { readonly claimed: false; readonly binding: Binding }
+  /** `token` fences this caller: every later step compares it, so an expired owner cannot act. */
+  | { readonly claimed: true; readonly binding: Binding; readonly token: string };
 export interface InitializationClaim {
   readonly disposition: "new" | "replay" | "in_progress";
   readonly binding: Binding;
@@ -267,6 +271,23 @@ export interface Registry {
   list(): Result<Binding[]>;
   provision(id: string, workspaceId: string, paneId: string): Result<Binding>;
   observeSession(id: string, sessionPath: string): Result<Binding>;
+  /** Claim the single manager TUI reattachment if the binding still records `expectedPaneId`. */
+  beginReattach(
+    id: string,
+    expectedPaneId: string | null,
+    claimedAt: string,
+    staleBefore: string,
+  ): Result<ReattachClaim>;
+  /** True only while `token` still owns the binding's reattachment claim. */
+  ownsReattach(id: string, token: string): Result<boolean>;
+  /** Point the claimed manager at the pane its TUI is launched into; a retry reuses it. */
+  recordReattachPane(id: string, token: string, paneId: string): Result<Binding>;
+  /** True while a reattachment is claimed or was interrupted before its TUI was verified. */
+  reattachPending(id: string): Result<boolean>;
+  /** Give up the claim after a failure; the reattachment stays pending for the next caller. */
+  releaseReattach(id: string, token: string): Result<boolean>;
+  /** Clear the claim once its TUI is verified; false if `token` no longer owns it. */
+  finishReattach(id: string, token: string): Result<boolean>;
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;
   setLaunchState(id: string, state: Binding["launchState"]): Result<Binding>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;

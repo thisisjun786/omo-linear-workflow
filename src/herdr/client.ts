@@ -14,6 +14,7 @@ import {
   tabCreatedResultSchema,
   tabRenameResultSchema,
   upstreamErrorSchema,
+  workspaceInfoResultSchema,
   workspaceResultSchema,
   worktreeRemovedSchema,
 } from "./schema";
@@ -60,6 +61,8 @@ export interface Pane {
   readonly workspaceId: string;
   readonly revision: number;
   readonly sessionPath: string | null;
+  /** Herdr's detected foreground agent label (the OMO TUI reports `omo`). */
+  readonly agent?: string;
 }
 export interface Snapshot {
   readonly focusedWorkspaceId: string | null;
@@ -83,6 +86,7 @@ export interface HerdrClient {
     label: string,
   ): Promise<{ tabId: string; rootPaneId: string }>;
   renameTab(tabId: string, label: string): Promise<void>;
+  focusWorkspace(workspaceId: string): Promise<void>;
   sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void>;
   run(
     paneId: string,
@@ -191,6 +195,14 @@ class SocketHerdrClient implements HerdrClient {
     );
   }
 
+  public async focusWorkspace(workspaceId: string): Promise<void> {
+    workspaceInfoResultSchema.parse(
+      await this.#request("workspace.focus", {
+        workspace_id: nonEmptyStringSchema.parse(workspaceId),
+      }),
+    );
+  }
+
   public async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
     await this.#expectOk("pane.send_input", {
       pane_id: nonEmptyStringSchema.parse(paneId),
@@ -249,6 +261,7 @@ class SocketHerdrClient implements HerdrClient {
       workspaceId: source.workspace_id,
       revision: source.revision,
       sessionPath: source.agent_session?.kind === "path" ? source.agent_session.value : null,
+      ...(source.agent === null || source.agent === undefined ? {} : { agent: source.agent }),
     }));
     const workspaces = result.snapshot.workspaces.map((source): Workspace => {
       const layout = result.snapshot.layouts.find(

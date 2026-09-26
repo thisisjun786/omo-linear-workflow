@@ -38,7 +38,7 @@ import {
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting } from "./proxy/routing-launch";
-import { removeReadiness, subscribeReadiness } from "./readiness";
+import { type Readiness, removeReadiness, subscribeReadiness } from "./readiness";
 import { attachBinding, type NativeSession } from "./transport";
 
 const normalizedPaneSchema = z.strictObject({
@@ -102,9 +102,34 @@ const createParentInputSchema = z.union([
     designationId: z.string().min(1),
     execute: z.boolean(),
     fixture: z.boolean(),
+    noManager: z.boolean().optional(),
   }),
 ]);
 export type CreateParentInput = z.infer<typeof createParentInputSchema>;
+export const MANAGER_DESIGNATION_ID = "manager";
+/** A reattach claim older than this is presumed abandoned by a crashed `olw manage`. */
+const MANAGER_REATTACH_LEASE_MS = 120_000;
+const managerSnapshot: ScopeSnapshot = {
+  version: 1,
+  source: "linear-export",
+  initiative: null,
+  projects: [],
+  decisionRefs: [],
+};
+export type ManagerLinkReason =
+  | "linked"
+  | "opted_out"
+  | "no_manager"
+  | "manager_paused"
+  | "manager_closed"
+  | "manager_unavailable";
+export interface ManageResult {
+  /** `reattaching`: another `olw manage` call owns the in-flight reattachment. */
+  readonly action: "created" | "focused" | "reattached" | "reattaching";
+  readonly binding: Binding;
+  /** Reserved for the update check; `olw manage` does not run it yet. */
+  readonly updateCheck: null;
+}
 export type ChildCreateMode = "direct" | "planned" | "research";
 export interface CreateChildInput {
   readonly parentId: string;
@@ -181,6 +206,10 @@ export interface CreationResult {
   readonly execution: "not_started" | "brief_accepted";
   readonly stage?: ChildStage;
   readonly mode?: ChildCreateMode;
+  readonly managerLink?: {
+    readonly bindingId: string | null;
+    readonly reason: ManagerLinkReason;
+  };
   readonly ancestry: {
     readonly branch: string;
     readonly baseBranch: string;
@@ -205,6 +234,8 @@ export interface OrchestratorDependencies {
   ) => Promise<void>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
   readonly gitTip: (repo: string, revision: string) => Promise<string>;
+  /** Settings file read for the manager's default model; defaults to ~/.omo/agent/settings.json. */
+  readonly managerSettingsPath?: string;
   readonly now: () => string;
   readonly uuid: () => string;
 }
@@ -481,6 +512,7 @@ export class Orchestrator {
       );
     const input = parsed.data;
     let ownerId: string | null = null;
+    let managerLink: CreationResult["managerLink"];
     let context: Result<{ readonly designation: Designation; readonly snapshot: ScopeSnapshot }>;
     if ("supervisorId" in input) {
       const owner = this.#binding(input.supervisorId);
@@ -495,6 +527,10 @@ export class Orchestrator {
       if (!input.execute)
         return failure("execute_denied", "Standalone parent creation requires --execute");
       context = this.#approval(input);
+      const link = this.#managerLink(input.noManager === true);
+      if (!link.ok) return link;
+      managerLink = link.value;
+      ownerId = link.value.bindingId;
     }
     if (!context.ok) return context;
     if (!context.value.snapshot.projects.some((entry) => entry.project.id === input.projectId))
@@ -515,7 +551,7 @@ export class Orchestrator {
       projectId: input.projectId,
       ownerBindingId: ownerId,
     };
-    return this.#create(
+    const created = await this.#create(
       assignment,
       context.value.designation,
       context.value.snapshot,
@@ -523,6 +559,265 @@ export class Orchestrator {
       checkout,
       { bindingId },
     );
+    return created.ok && managerLink !== undefined
+      ? ok({ ...created.value, managerLink })
+      : created;
+  }
+
+  /** The one live manager, or the reason a standalone parent stays unlinked. */
+  #managerLink(optedOut: boolean): Result<NonNullable<CreationResult["managerLink"]>> {
+    if (optedOut) return ok({ bindingId: null, reason: "opted_out" });
+    const listed = this.#withRegistry((registry) => registry.list());
+    if (!listed.ok) return listed;
+    const managers = listed.value.filter((binding) => binding.assignment.role === "manager");
+    const live = managers.find((binding) => binding.launchState !== "closed");
+    if (live === undefined)
+      return ok({ bindingId: null, reason: managers.length > 0 ? "manager_closed" : "no_manager" });
+    if (live.launchState !== "ready") return ok({ bindingId: null, reason: "manager_unavailable" });
+    if (live.contactState !== "active") return ok({ bindingId: null, reason: "manager_paused" });
+    return ok({ bindingId: live.id, reason: "linked" });
+  }
+
+  /** Open, focus or reattach the single management session; never adopts a non-host session. */
+  public async manage(): Promise<Result<ManageResult>> {
+    const listed = this.#withRegistry((registry) => registry.list());
+    if (!listed.ok) return listed;
+    const existing = listed.value.find(
+      (binding) => binding.assignment.role === "manager" && binding.launchState !== "closed",
+    );
+    if (existing !== undefined) return this.#reopenManager(existing);
+    const scope = this.#withRegistry((registry) => registry.importScope(managerSnapshot));
+    if (!scope.ok) return scope;
+    const previous = this.#withRegistry((registry) => registry.designation(MANAGER_DESIGNATION_ID));
+    if (!previous.ok && previous.error.code !== "not_found") return previous;
+    if (previous.ok && previous.value.snapshotDigest !== scope.value.digest)
+      return failure("designation_conflict", "Existing manager designation has a different scope");
+    const designation: Designation = previous.ok
+      ? previous.value
+      : {
+          id: MANAGER_DESIGNATION_ID,
+          snapshotDigest: scope.value.digest,
+          designatedBy: process.env["USER"] ?? "local-user",
+          designatedAt: this.#deps.now(),
+          execute: true,
+          create: true,
+          contact: true,
+        };
+    const created = await this.#create(
+      { role: "manager" },
+      designation,
+      managerSnapshot,
+      this.#root,
+      null,
+    );
+    return created.ok
+      ? ok({ action: "created", binding: created.value.binding, updateCheck: null })
+      : created;
+  }
+
+  async #reopenManager(binding: Binding): Promise<Result<ManageResult>> {
+    const closeInstruction = `run olw close --binding ${binding.id} first`;
+    if (binding.launchState === "uncertain")
+      return failure(
+        "manager_uncertain",
+        `The recorded manager is uncertain; inspect it, then ${closeInstruction}`,
+        { bindingId: binding.id },
+      );
+    if (
+      binding.launchState !== "ready" ||
+      binding.workspaceId === null ||
+      binding.sessionPath === null
+    )
+      return failure(
+        "manager_unavailable",
+        `The recorded manager is ${binding.launchState}; ${closeInstruction}`,
+        { bindingId: binding.id },
+      );
+    const host = await this.#checkHostProtocol(binding);
+    if (host !== undefined) return host;
+    const workspaceId = binding.workspaceId;
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    let token: string | undefined;
+    try {
+      const snapshot = await herdr.snapshot();
+      const workspace = snapshot.workspaces.find(
+        (candidate) => candidate.workspaceId === workspaceId,
+      );
+      if (workspace === undefined || workspace.cwd !== binding.cwd)
+        return failure(
+          "manager_unavailable",
+          `The manager workspace is gone or changed; ${closeInstruction}`,
+          { bindingId: binding.id, workspaceId },
+        );
+      // Herdr labels a pane whose foreground process is the OMO TUI with agent `omo`.
+      const recordedPane = snapshot.panes.find(
+        (pane) => pane.paneId === binding.paneId && pane.workspaceId === workspaceId,
+      );
+      const tuiRunning = recordedPane?.agent === "omo";
+      const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
+      if (!pending.ok) return pending;
+      if (tuiRunning && !pending.value) {
+        await herdr.focusWorkspace(workspaceId);
+        return ok({ action: "focused", binding, updateCheck: null });
+      }
+      const now = this.#deps.now();
+      const claim = this.#withRegistry((registry) =>
+        registry.beginReattach(
+          binding.id,
+          binding.paneId,
+          now,
+          new Date(Date.parse(now) - MANAGER_REATTACH_LEASE_MS).toISOString(),
+        ),
+      );
+      if (!claim.ok) return claim;
+      if (!claim.value.claimed) {
+        await herdr.focusWorkspace(workspaceId);
+        return ok({ action: "reattaching", binding: claim.value.binding, updateCheck: null });
+      }
+      const owner = claim.value.token;
+      token = owner;
+      // Every Herdr side effect and the final clear re-check the token, so a caller whose lease
+      // expired while it was suspended can neither launch a second TUI nor clear the new owner.
+      const leaseLost = () =>
+        failure<never>(
+          "runtime_unavailable",
+          "Another olw manage call took over this manager reattachment; nothing was launched",
+          { reason: "lease_lost", bindingId: binding.id },
+        );
+      const stillOwner = (): Result<boolean> =>
+        this.#withRegistry((registry) => registry.ownsReattach(binding.id, owner));
+      const finish = (): Result<boolean> =>
+        this.#withRegistry((registry) => registry.finishReattach(binding.id, owner));
+      if (tuiRunning) {
+        // An interrupted attempt's TUI did come up in the recorded pane; adopt it, launch nothing.
+        const verified = await this.#verifyManagerSession(binding);
+        if (!verified.ok) return verified;
+        const finished = finish();
+        if (!finished.ok) return finished;
+        token = undefined;
+        if (!finished.value) return leaseLost();
+        await herdr.focusWorkspace(workspaceId);
+        return ok({ action: "focused", binding, updateCheck: null });
+      }
+      const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+      const managedPath = managedHerdrPath(artifact.artifactDir);
+      const beforeTab = stillOwner();
+      if (!beforeTab.ok) return beforeTab;
+      if (!beforeTab.value) return leaseLost();
+      // A pending attempt's pane that is still a plain shell is reused instead of adding a tab.
+      const paneId =
+        pending.value && recordedPane !== undefined && recordedPane.agent === undefined
+          ? recordedPane.paneId
+          : (await herdr.createTab(workspaceId, binding.cwd, "manager")).rootPaneId;
+      // The TUI publishes readiness for the binding's recorded pane, so record it before launch;
+      // the pending claim keeps later calls from reporting this pane as focused until verified.
+      const moved = this.#withRegistry((registry) =>
+        registry.recordReattachPane(binding.id, owner, paneId),
+      );
+      if (!moved.ok) return moved.error.code === "lease_lost" ? leaseLost() : moved;
+      await removeReadiness(this.#root, binding.id);
+      const readiness = await subscribeReadiness(this.#root, moved.value);
+      try {
+        const beforeRun = stillOwner();
+        if (!beforeRun.ok) return beforeRun;
+        if (!beforeRun.value) return leaseLost();
+        await herdr.run(
+          paneId,
+          this.#tuiArgv(moved.value, binding.sessionPath, "manager", null),
+          this.#tuiEnvironment(managedPath),
+        );
+        const expired = Promise.withResolvers<never>();
+        const timeout = setTimeout(
+          () => expired.reject(new Error("Timed out awaiting manager TUI readiness")),
+          15_000,
+        );
+        timeout.unref();
+        let receipt: Readiness;
+        try {
+          receipt = await Promise.race([readiness.promise, expired.promise]);
+        } finally {
+          clearTimeout(timeout);
+        }
+        if (receipt.sessionPath !== binding.sessionPath)
+          throw new Error("Reattached TUI opened a different session");
+      } finally {
+        readiness.close();
+      }
+      const verified = await this.#verifyManagerSession(moved.value);
+      if (!verified.ok) return verified;
+      const finished = finish();
+      if (!finished.ok) return finished;
+      token = undefined;
+      if (!finished.value) return leaseLost();
+      await herdr.focusWorkspace(workspaceId);
+      return ok({ action: "reattached", binding: moved.value, updateCheck: null });
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Manager workspace could not be focused or reattached",
+        messageOf(cause),
+      );
+    } finally {
+      const owner = token;
+      if (owner !== undefined)
+        this.#withRegistry((registry) => registry.releaseReattach(binding.id, owner));
+      herdr.close();
+    }
+  }
+
+  async #verifyManagerSession(binding: Binding): Promise<Result<true>> {
+    let session: NativeSession | undefined;
+    try {
+      session = await this.#deps.attachBinding(binding);
+      const identity = await session.describe();
+      if (!identity.ok) return identity;
+      return matchesRuntime(binding, identity.value)
+        ? ok(true)
+        : failure("identity_mismatch", "Manager TUI does not match the recorded native session");
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Could not verify the manager's native session",
+        messageOf(cause),
+      );
+    } finally {
+      await session?.close();
+    }
+  }
+
+  #tuiEnvironment(managedPath: string): Readonly<Record<string, string>> {
+    return { PATH: managedPath, ...runtimeCacheEnvironment(this.#root) };
+  }
+
+  #tuiArgv(
+    binding: Pick<Binding, "id" | "assignment">,
+    sessionPath: string,
+    label: string,
+    model: RoleModel | null,
+  ): string[] {
+    const manager = binding.assignment.role === "manager";
+    return [
+      "env",
+      "-u",
+      "OMO_INITIATIVE_HOST",
+      `OMO_ENABLE_SHARED_HOST=1`,
+      `OMO_RPC_SOCKET=${this.#omoSocket}`,
+      `OMO_INITIATIVE_ROOT=${this.#root}`,
+      ...(manager ? [`OLW_MANAGER_BINDING=${binding.id}`] : []),
+      join(this.#root, "node_modules/.bin/omo"),
+      "-e",
+      join(this.#root, "dist/extension/index.js"),
+      "-e",
+      join(this.#root, "dist/extension/model-catalog.js"),
+      "--session",
+      sessionPath,
+      "--name",
+      label,
+      ...(model === null
+        ? []
+        : ["--model", `${model.provider}/${model.modelId}`, "--thinking", model.thinking]),
+      ...(manager || model === null ? [] : ["--no-model-fallback", "--no-recommended-models"]),
+    ];
   }
 
   public async createChild(input: CreateChildInput): Promise<Result<CreationResult>> {
@@ -1921,7 +2216,10 @@ export class Orchestrator {
           );
         }
       }
-      const model = modelForLaunch(assignment.role, target?.stage ?? null);
+      const model =
+        assignment.role === "manager" && this.#deps.managerSettingsPath !== undefined
+          ? modelForLaunch("manager", null, this.#deps.managerSettingsPath)
+          : modelForLaunch(assignment.role, target?.stage ?? null);
       const manager = SessionManager.create(cwd, join(this.#root, ".omo/state/sessions"), {
         id: reserved.value.durableSessionId,
       });
@@ -1946,31 +2244,8 @@ export class Orchestrator {
       );
       await herdr.run(
         workspace.rootPaneId,
-        [
-          "env",
-          "-u",
-          "OMO_INITIATIVE_HOST",
-          `OMO_ENABLE_SHARED_HOST=1`,
-          `OMO_RPC_SOCKET=${this.#omoSocket}`,
-          `OMO_INITIATIVE_ROOT=${this.#root}`,
-          join(this.#root, "node_modules/.bin/omo"),
-          "-e",
-          join(this.#root, "dist/extension/index.js"),
-          "-e",
-          join(this.#root, "dist/extension/model-catalog.js"),
-          "--session",
-          seedPath,
-          "--name",
-          label,
-          "--model",
-          `${model.provider}/${model.modelId}`,
-          "--thinking",
-          model.thinking,
-          ...(assignment.role === "manager"
-            ? []
-            : ["--no-model-fallback", "--no-recommended-models"]),
-        ],
-        { PATH: managedPath, ...runtimeCacheEnvironment(this.#root) },
+        this.#tuiArgv(reserved.value, seedPath, label, model),
+        this.#tuiEnvironment(managedPath),
       );
       const timeout = setTimeout(
         () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),

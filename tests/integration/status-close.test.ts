@@ -111,6 +111,7 @@ async function world() {
     createWorktree: unused,
     createTab: unused,
     renameTab: unused,
+    focusWorkspace: unused,
     run: unused,
     reportSession: unused,
     removeWorktree: unused,

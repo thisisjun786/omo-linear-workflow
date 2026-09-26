@@ -48,6 +48,7 @@ const booleanFlags = new Set([
   "confirm-absent",
   "to-user",
   "as-user",
+  "no-manager",
 ]);
 
 function parseArguments(
@@ -276,6 +277,7 @@ export async function runCli(
           usage: "olw [--root PATH] [--herdr-socket PATH] COMMAND [OPTIONS] [--json]",
           commands: [
             "doctor",
+            "manage",
             "scope import",
             "supervisor create",
             "parent create",
@@ -298,12 +300,13 @@ export async function runCli(
             "reconcile",
           ],
           options: {
+            manage: "[--json]",
             "scope import": "--file PATH [--fixture]",
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
             "parent create":
-              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture]) --project ID --repo PATH --base REF",
-            "parent link": "--parent BINDING --supervisor BINDING",
+              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID --repo PATH --base REF (standalone parents link to the ready manager unless --no-manager)",
+            "parent link": "--parent BINDING --supervisor BINDING (supervisor or manager)",
             "parent unlink": "--parent BINDING",
             "child create": "--parent BINDING --issue ID [--mode direct|planned|research]",
             "stage complete":
@@ -340,6 +343,8 @@ export async function runCli(
   try {
     if (command === "doctor") {
       result = await doctorWithChains(root, stringOption(options, "herdr-socket"));
+    } else if (command === "manage") {
+      result = await orchestrator.manage();
     } else if (command === "scope import") {
       const values = requireOptions(options, ["file"]);
       result = values.ok
@@ -358,9 +363,13 @@ export async function runCli(
         : values;
     } else if (command === "parent create") {
       const supervisorId = stringOption(options, "supervisor");
-      const standaloneFlags = ["scope-digest", "designation", "execute", "fixture"].some(
-        (key) => options[key] !== undefined,
-      );
+      const standaloneFlags = [
+        "scope-digest",
+        "designation",
+        "execute",
+        "fixture",
+        "no-manager",
+      ].some((key) => options[key] !== undefined);
       const values = requireOptions(options, [
         "project",
         "repo",
@@ -385,6 +394,7 @@ export async function runCli(
                 designationId: values.value["designation"] ?? "",
                 execute: has(options, "execute"),
                 fixture: has(options, "fixture"),
+                ...(has(options, "no-manager") ? { noManager: true } : {}),
               },
         );
       }
@@ -577,7 +587,7 @@ export async function runCli(
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, manage, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {

@@ -79,23 +79,43 @@ const herdrConnectionErrorSchema = z.strictObject({
 });
 
 const paneUpdatedExitSchema = z.object({
-  event: z.literal("pane.updated"),
+  event: z.enum(["pane.updated", "pane_updated"]),
   data: z.object({
-    pane: z.object({ pane_id: z.string(), agent_session: z.unknown().optional() }),
+    pane: z.object({
+      pane_id: z.string(),
+      agent: z.string().nullish(),
+      agent_session: z.unknown().optional(),
+    }),
   }),
 });
 const paneExitedSchema = z.object({
-  event: z.literal("pane.exited"),
+  event: z.enum(["pane.exited", "pane_exited"]),
   data: z.object({ pane_id: z.string() }),
 });
+function hasLiveTui(pane: {
+  readonly agent?: string | null | undefined;
+  readonly sessionPath?: unknown;
+}): boolean {
+  return pane.agent === "omo" || pane.agent === "pi" || pane.sessionPath != null;
+}
+
+const paneAgentReleasedSchema = z.object({
+  event: z.enum(["pane.agent_detected", "pane_agent_detected"]),
+  data: z.object({ pane_id: z.string(), released: z.literal(true) }),
+});
 export function planPaneExited(event: unknown, paneId: string): boolean {
+  const released = paneAgentReleasedSchema.safeParse(event);
+  if (released.success) return released.data.data.pane_id === paneId;
   const exited = paneExitedSchema.safeParse(event);
   if (exited.success) return exited.data.data.pane_id === paneId;
   const updated = paneUpdatedExitSchema.safeParse(event);
   return (
     updated.success &&
     updated.data.data.pane.pane_id === paneId &&
-    updated.data.data.pane.agent_session == null
+    !hasLiveTui({
+      agent: updated.data.data.pane.agent,
+      sessionPath: updated.data.data.pane.agent_session,
+    })
   );
 }
 
@@ -887,7 +907,7 @@ export class Orchestrator {
       const recordedPane = snapshot.panes.find(
         (pane) => pane.paneId === binding.paneId && pane.workspaceId === workspaceId,
       );
-      const tuiRunning = recordedPane?.agent === "omo";
+      const tuiRunning = recordedPane !== undefined && hasLiveTui(recordedPane);
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
@@ -1321,7 +1341,7 @@ export class Orchestrator {
         return failure("runtime_unavailable", "Plan workspace or pane is missing");
       // The retained native engine may still be open after its TUI has exited.
       // Only the pane attachment determines whether another /quit is needed.
-      if (pane.sessionPath !== null) {
+      if (hasLiveTui(pane)) {
         const native = await this.#deps.attachBinding(plan.value);
         try {
           const identity = await native.describe();
@@ -2258,7 +2278,7 @@ export class Orchestrator {
         const pane = snapshot.panes.find(
           (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
         );
-        if (workspace !== undefined && pane !== undefined && pane.sessionPath !== null) {
+        if (workspace !== undefined && pane !== undefined && hasLiveTui(pane)) {
           const stopped = await this.#stopStageSession(binding, herdr);
           if (!stopped.ok) return stopped;
         } else {

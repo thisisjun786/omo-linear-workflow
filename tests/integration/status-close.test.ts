@@ -253,6 +253,122 @@ async function world() {
   };
 }
 
+test.each(["stage", "close"] as const)(
+  "%s waits for a live omo pane with no session path to exit",
+  async (operation) => {
+    const w = await world();
+    const quit = Promise.withResolvers<void>();
+    const exit = Promise.withResolvers<void>();
+    const timeout = setTimeout(() => quit.reject(new Error("Expected /quit")), 2000);
+    try {
+      const plan = w.ready(w.reserve("plan"), "childws", "childws:plan");
+      value(
+        w.registry.recordHandoff(plan.id, {
+          planPath: join(w.root, "plan.md"),
+          planSha256: "a".repeat(64),
+          head: "commit",
+          completedAt: "now",
+        }),
+      );
+      const snapshot = w.herdr.snapshot;
+      w.herdr.snapshot = async () => ({
+        ...(await snapshot()),
+        panes: [
+          {
+            paneId: "childws:plan",
+            workspaceId: "childws",
+            revision: 1,
+            sessionPath: null,
+            agent: "omo",
+          },
+        ],
+      });
+      let listener: ((event: unknown) => void) | undefined;
+      w.herdr.subscribe = async (cb) => {
+        listener = cb;
+        return () => {
+          listener = undefined;
+        };
+      };
+      w.herdr.sendKeys = async (pane, text, keys) => {
+        expect([pane, text, keys]).toEqual(["childws:plan", "/quit", ["Enter"]]);
+        w.events.push("quit");
+        listener?.({
+          event: "pane.updated",
+          data: { pane: { pane_id: pane, agent: "omo", agent_session: null } },
+        });
+        quit.resolve();
+      };
+      const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+        ...w.dependencies,
+        attachBinding: async (binding) => ({
+          configure: async () => {},
+          hasUserMessage: async () => false,
+          describe: async () => ({
+            ok: true,
+            value: {
+              durableSessionId: binding.durableSessionId,
+              sessionPath: binding.sessionPath ?? "",
+              cwd: binding.cwd,
+              ...modelForRole(binding.assignment.role),
+              extensionProtocol: 2,
+            },
+          }),
+          send: async () => {
+            throw new Error("Unexpected send");
+          },
+          deliverUserAnswer: async () => {
+            throw new Error("Unexpected answer");
+          },
+          onEvent: () => () => {},
+          close: async () => {},
+        }),
+        terminateBinding: async () => {
+          w.events.push("terminate");
+          await exit.promise;
+          throw new Error("Verified exit-before-terminate boundary");
+        },
+      });
+      const pending =
+        operation === "stage"
+          ? orchestrator.stageStart({
+              fromId: plan.id,
+              parentId: "parent",
+              stage: "execute",
+              messageId: "start",
+            })
+          : orchestrator.close(plan.id);
+      await Promise.race([
+        quit.promise,
+        pending.then((result) => {
+          throw new Error(`Ended before quit: ${JSON.stringify(result)}`);
+        }),
+      ]);
+      expect(w.events).not.toContain("terminate");
+      listener?.({
+        event: "pane_agent_detected",
+        data: {
+          type: "pane_agent_detected",
+          pane_id: "childws:plan",
+          agent: "omo",
+          released: true,
+          final_status: "idle",
+        },
+      });
+      exit.resolve();
+      expect(await pending).toMatchObject({
+        ok: false,
+        error: { code: "runtime_unavailable", details: "Verified exit-before-terminate boundary" },
+      });
+      expect(w.events.indexOf("quit")).toBeLessThan(w.events.indexOf("terminate"));
+    } finally {
+      clearTimeout(timeout);
+      exit.resolve();
+      w.cleanup();
+    }
+  },
+);
+
 test.each(["plan", "execute"])(
   "status/close: close by %s stops live stage before workspace and unblocks parent",
   async (id) => {

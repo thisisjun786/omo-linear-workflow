@@ -106,10 +106,35 @@ describe("readScopeSnapshot", () => {
     expect(snapshot.initiative?.id).toBe("initiative-omo-1");
     expect(snapshot.projects).toHaveLength(1);
     expect(snapshot.projects[0]?.project.id).toBe("project-omo-1");
+    expect(snapshot.projects[0]?.repository).toEqual({
+      remote: "https://github.com/example/target.git",
+      defaultBranch: "main",
+    });
     expect(snapshot.projects[0]?.issues.map((issue) => issue.id)).toEqual([
       "issue-omo-1",
       "issue-omo-2",
     ]);
+  });
+
+  test("keeps the legacy fixture digest and includes repository mapping in new digests", async () => {
+    const legacy = value(
+      await readScopeSnapshot(join(import.meta.dir, "fixtures", "scope-legacy.json")),
+    );
+    expect(digestOf(legacy)).toBe(
+      "ddaa32029cdfb8e7959462a0903a9c8de6e98f0cd42cae2394a48ed294447fe7",
+    );
+    const project = legacy.projects[0];
+    if (project === undefined) throw new Error("fixture project is missing");
+    const mapped: ScopeSnapshot = {
+      ...legacy,
+      projects: [
+        {
+          ...project,
+          repository: { remote: "ssh://git@example.test/team/repo.git", defaultBranch: "main" },
+        },
+      ],
+    };
+    expect(digestOf(mapped)).not.toBe(digestOf(legacy));
   });
 
   test("imports a project-only snapshot with explicit null initiative", async () => {

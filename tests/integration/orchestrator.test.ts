@@ -62,6 +62,8 @@ test("CLI help exits successfully without creating runtime state", async () => {
     ok: true,
     value: {
       commands: expect.arrayContaining([
+        "repo list",
+        "repo fetch",
         "supervisor create",
         "parent create",
         "child create",

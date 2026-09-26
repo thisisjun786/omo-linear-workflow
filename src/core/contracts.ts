@@ -22,7 +22,11 @@ export interface ScopeSnapshot {
   readonly version: 1;
   readonly source: "linear-export" | "fixture";
   readonly initiative: Ref | null;
-  readonly projects: Array<{ readonly project: Ref; readonly issues: Ref[] }>;
+  readonly projects: Array<{
+    readonly project: Ref;
+    readonly issues: Ref[];
+    readonly repository?: { readonly remote: string; readonly defaultBranch: string } | undefined;
+  }>;
   readonly decisionRefs: Ref[];
 }
 export interface Designation {

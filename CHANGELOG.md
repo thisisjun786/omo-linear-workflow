@@ -15,6 +15,9 @@ published.
 
 ### Added
 
+- Scope projects can declare a target Git remote and default branch. OLW maintains one locked,
+  fetch-only mirror per remote and exposes mirror status and explicit fetching through `olw doctor`
+  and `olw repo list|fetch`.
 - User-managed opencodex model metadata catalog (`MODEL_CATALOG` in
   `src/proxy/model-catalog.ts`). It overrides the context window, output limit,
   input modalities and reasoning flag that ocx exports late or wrong, for example

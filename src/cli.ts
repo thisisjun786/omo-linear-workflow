@@ -9,6 +9,7 @@ import { answerFieldsSchema, deliveryRecordSchema, questionPayloadSchema } from 
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
+import { fetchMirror, listMirrors, MirrorError } from "./repo/mirror";
 
 type Options = Readonly<Record<string, string | true | readonly string[]>>;
 const valueFlags = new Set([
@@ -241,7 +242,7 @@ async function doctorWithChains(root: string, herdrSocket?: string): Promise<Res
   const result = await doctor(root, herdrSocket);
   if (!result.ok) return result;
   const home = process.env["HOME"] ?? homedir();
-  const value = { ...result.value, chains: {} as unknown };
+  const value = { ...result.value, repositories: await listMirrors(root), chains: {} as unknown };
   try {
     const chains = await readChainReport({
       configPath: join(home, ".omo/omo.jsonc"),
@@ -284,6 +285,8 @@ export async function runCli(
             "update check",
             "update prepare",
             "scope import",
+            "repo list",
+            "repo fetch",
             "supervisor create",
             "parent create",
             "parent link",
@@ -310,6 +313,8 @@ export async function runCli(
             "update prepare":
               "[--remote NAME|URL] [--json] (PR to dev for the latest check's versions; OLW_GH_BIN overrides gh)",
             "scope import": "--file PATH [--fixture]",
+            "repo list": "[--json]",
+            "repo fetch": "--remote URL [--json]",
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
             "parent create":
@@ -381,6 +386,13 @@ export async function runCli(
       result = await orchestrator.updatePrepare(remote === undefined ? {} : { remote });
     } else if (command === "doctor") {
       result = await doctorWithChains(root, stringOption(options, "herdr-socket"));
+    } else if (command === "repo list") {
+      result = { ok: true, value: await listMirrors(root) };
+    } else if (command === "repo fetch") {
+      const values = requireOptions(options, ["remote"]);
+      result = values.ok
+        ? { ok: true, value: await fetchMirror(root, values.value["remote"] ?? "") }
+        : values;
     } else if (command === "manage") {
       result = await orchestrator.manage();
     } else if (command === "scope import") {
@@ -625,15 +637,18 @@ export async function runCli(
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, manage, update check/prepare, scope import, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, manage, update check/prepare, scope import, repo list/fetch, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {
     result = {
       ok: false,
       error: {
-        code: "runtime_unavailable",
+        code: cause instanceof MirrorError ? cause.code : "runtime_unavailable",
         message: cause instanceof Error ? cause.message : String(cause),
+        ...(cause instanceof MirrorError && cause.details !== undefined
+          ? { details: cause.details }
+          : {}),
       },
     };
   }

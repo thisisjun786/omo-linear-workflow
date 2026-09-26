@@ -7,7 +7,18 @@ export const scopeSnapshotSchema = z.strictObject({
   version: z.literal(1),
   source: z.enum(["linear-export", "fixture"]),
   initiative: refSchema.nullable(),
-  projects: z.array(z.strictObject({ project: refSchema, issues: z.array(refSchema) })),
+  projects: z.array(
+    z.strictObject({
+      project: refSchema,
+      issues: z.array(refSchema),
+      repository: z
+        .strictObject({
+          remote: z.url({ protocol: /^(https|ssh|file)$/ }),
+          defaultBranch: text,
+        })
+        .optional(),
+    }),
+  ),
   decisionRefs: z.array(refSchema),
 });
 export const designationSchema = z.strictObject({

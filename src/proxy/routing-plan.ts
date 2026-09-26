@@ -22,6 +22,8 @@ const ROUTING_KEYS = [
   "fallback_models",
 ] as const;
 export const ROUTING_PROVIDER = "opencodex";
+// Bump when the mapping rules change, so adopted installs re-plan on their next ordinary start.
+export const ROUTING_PLAN_REVISION = 2;
 // opencodex publishes OpenAI (ChatGPT) models bare and every other service as
 // `<ocx provider>/<model>`. Keys are the upstream OMO providers for the same service.
 const OPENCODEX_NAMESPACES: Readonly<Record<string, string>> = {
@@ -50,6 +52,9 @@ const CONTEXT_MARKER = /\[1m\]$/i;
 // opencodex's priority-tier row; Senpi spells the same selector with a single hyphen.
 const FAST_SELECTOR = "-fast";
 const OPENCODEX_FAST_ROW = "--fast";
+// User decision (2026-09-26): Sol's priority tier costs too much for its speed gain, so an
+// upstream Sol Fast selector is served at standard tier. Luna keeps its Fast row.
+const STANDARD_TIER_ONLY = /-sol-fast$/;
 // User decision (2026-09-25): Cursor serves the same xAI model as the next lane after xAI.
 // Other same-model hosts are deliberately not mirrored (for example K3 on Ollama Cloud
 // exhausts that quota), so this is an explicit per-namespace list.
@@ -76,7 +81,10 @@ function opencodexResolver(available: ReadonlySet<string>): (rung: RouteRung) =>
   const hosted = [...byName.keys()].filter((name) => name.includes("/")).sort();
   const withSecondaries = (id: string) => [id, ...secondaryIds(id, byName)];
   return (rung) => {
-    const names = [rung.model, ROLLING_MODEL_IDS[rung.model]].filter(
+    const requested = rung.model.replace(STANDARD_TIER_ONLY, (match) =>
+      match.slice(0, -FAST_SELECTOR.length),
+    );
+    const names = [requested, ROLLING_MODEL_IDS[requested]].filter(
       (name): name is string => name !== undefined,
     );
     for (const provider of rung.providers) {

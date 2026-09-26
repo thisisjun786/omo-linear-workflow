@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Read before filing
+  - name: Security and sensitive reports
+    url: https://github.com/thisisjun786/omo-linear-workflow/blob/main/SECURITY.md
+    about: Find a private reporting route before sharing sensitive details.
+  - name: Contributing guide
     url: https://github.com/thisisjun786/omo-linear-workflow/blob/main/CONTRIBUTING.md
-    about: Setup, verification commands and what a useful report contains.
+    about: Setup, verification commands, and the project policies.

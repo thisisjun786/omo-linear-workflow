@@ -2,7 +2,7 @@
 
 All notable changes to OMO Linear Workflow (OLW) are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions
-follow the rules in [docs/releases.md](docs/releases.md). `package.json`
+follow the rules in [docs/policy/releases.md](docs/policy/releases.md). `package.json`
 `version` is the canonical version; the matching `## [VERSION]` section below is
 what `bun run release:check` reads when a release is prepared.
 
@@ -35,6 +35,9 @@ published.
 
 ### Changed
 
+- Repository policies follow `docs/policy/`: PRs target `dev` and merge with a merge
+  commit, `main` only advances to released commits, and issue and PR text is in
+  English. Issue forms are now `bug` and `proposal`.
 - Models route through opencodex. The routing synchronizer reads the
   opencodex-owned catalog in `models.json`, and OLW role pins use `opencodex`.
 - Child fixture standby permits internal workers only after explicit instruction;
@@ -58,6 +61,8 @@ published.
 
 ### Fixed
 
+- Upstream Sol Fast selectors are routed to standard-tier Sol through opencodex;
+  Luna keeps its Fast row. Sol's priority tier cost too much for its speed gain.
 - The managed `omo` launcher works with omo-ai installed through bun (5.0.0 and
   later). It finds the omo-ai package from its manifest instead of assuming a
   symlinked bin, so the generated bun launcher script no longer fails the routing

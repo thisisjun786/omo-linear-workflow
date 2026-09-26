@@ -13,6 +13,8 @@ export const receiptSchema = z.object({
   generation: z.string(),
   // A receipt without a provider predates opencodex routing and is re-planned.
   provider: z.string().optional(),
+  // Absent in receipts written before mapping revisions; such receipts are re-planned.
+  planRevision: z.number().int().optional(),
   version: z.string(),
   digest: z.string(),
   upstream: z.string(),

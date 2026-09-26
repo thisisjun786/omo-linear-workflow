@@ -43,7 +43,10 @@ each choice to an opencodex model ID:
   kept.
 - `…-fast` is Senpi's priority-tier selector. opencodex publishes the same tier as
   `<model>--fast`. Without that row, the choice is skipped rather than served at
-  the standard tier.
+  the standard tier. Exception (owner decision): a Sol Fast selector always uses
+  standard-tier Sol, because Sol's priority tier costs too much for its speed gain.
+- Routing receipts record the mapping revision. When the rules change, the next
+  ordinary start re-plans untouched routes without `--force`.
 - DeepSeek's rolling `deepseek-flash` ID currently identifies V4.1 Flash according
   to [the official model table](https://api-docs.deepseek.com/quick_start/pricing),
   so `deepseek-v4.1-flash` is used. Recheck this if the rolling ID changes.

@@ -11,7 +11,13 @@ import {
   receiptSchema,
   recoverRouting,
 } from "./routing-config";
-import { fields, planRouting, ROUTING_PROVIDER, RoutingError } from "./routing-plan";
+import {
+  fields,
+  planRouting,
+  ROUTING_PLAN_REVISION,
+  ROUTING_PROVIDER,
+  RoutingError,
+} from "./routing-plan";
 
 const configSchema = groupsSchema.partial().passthrough();
 const packageSchema = z.object({ name: z.literal("omo-ai"), version: z.string().min(1) });
@@ -115,6 +121,7 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   const unchanged =
     !options.force &&
     previous?.provider === ROUTING_PROVIDER &&
+    previous.planRevision === ROUTING_PLAN_REVISION &&
     previous.digest === sourceDigest &&
     previous.version === identity.version &&
     previous.configDigest === digest(configText) &&
@@ -153,6 +160,7 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   const receipt: RoutingReceipt = {
     generation: crypto.randomUUID(),
     provider: ROUTING_PROVIDER,
+    planRevision: ROUTING_PLAN_REVISION,
     version: policy.version,
     digest: policy.digest,
     upstream: options.upstream,

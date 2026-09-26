@@ -2,6 +2,8 @@
 
 Development changes integrate into `dev` through [pull requests](pull-requests.md). The owner authorizes a release of one exact, verified commit on `dev`; that commit is tagged, published as a source-only GitHub release, and `main` is fast-forwarded to it. There's no `dev`-to-`main` promotion PR, and `main` never moves to a commit that wasn't released.
 
+Transition: `main` currently carries `855fd21` (PR #1) beyond the `v0.1.0` tag, because it predates this policy. `v0.2.0` will be released from a `dev` commit that already contains it, and `main` fast-forwards to that release. From then on, every `main` commit is a released commit.
+
 This document also explains how versions are numbered and how a user installs, upgrades or rolls back a source checkout. Nothing here runs on your machine by itself; the steps are written so they can be reviewed before anyone follows them.
 
 The GitHub repository is public. `private: true` in `package.json` prevents npm publication. Releases provide no prebuilt binary and no artifact signing. A release is a reviewed, tagged source tree plus a GitHub release entry that points at it.

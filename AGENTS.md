@@ -66,3 +66,23 @@ Do not push during QA. Use explicit temporary fixtures; a live Linear write chec
 requires separate user approval for its target, operations and cleanup. Preserve
 its receipts, never repeat an uncertain create, and close only QA-created
 workspaces/worktrees/processes.
+
+## Repository rules
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the policies under
+`docs/policy/`. The user's latest explicit instructions take precedence.
+
+- Branch from `dev` and target `dev` with PRs. Merge with a merge commit, never
+  squash or rebase. Write issue and PR titles and bodies in English as
+  Conventional Commit lines.
+- `main` is the released source. It accepts no development or promotion PRs;
+  only an owner-authorized release advances it, fast-forward, to one exact
+  verified commit. Never push to `main` or `dev` directly.
+- Single-owner repository: agent reviews are supporting evidence, the owner
+  authorizes every merge, tag and release. Record what a review checked and
+  what it could not establish.
+- Obtain explicit authorization before opening PRs, merging, tagging or
+  releasing. Preserve other contributors' branches and worktrees.
+- Keep secrets, proxy access files, SQLite registries, `.omo/state/` and other
+  runtime output out of commits. Report sensitive findings per
+  [SECURITY.md](SECURITY.md).

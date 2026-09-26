@@ -1,27 +1,13 @@
-<!-- Title must be a Conventional Commit line (feat:, fix:, docs:, ...). PRs are squash-merged and the title becomes the commit. -->
+<!-- Write the title and body in English. The title is a Conventional Commit line (feat:, fix:, docs:, ...). Target `dev`; PRs merge with a merge commit. -->
 
-## What
+## Summary
 
-<!-- One focused change. What does this PR do? Link the issue if there is one. -->
+<!-- What problem does this solve, and what approach did you take? Link related issues when relevant. -->
 
-## Why
+## Verification
 
-<!-- The problem or contract this addresses. -->
+<!-- List the commands or manual checks you ran and their results. CI runs release:check, typecheck, lint, bun test, the native Herdr build on Linux and the installer smoke; anything beyond that (qa:events, qa:proxy, qa:routing, qa:child-workflow, a real-surface check) goes here. Note anything not checked. For documentation, describe the reading, link, and format checks. -->
 
-## How it was verified
+## Compatibility and recovery
 
-<!-- Commands you ran and what they showed. CI runs bun test, typecheck, lint, the native Herdr build on Linux and the installer smoke; anything beyond that (qa:events, qa:proxy, a real-surface check) goes here. -->
-
-## Compatibility
-
-<!-- Does this change a documented contract, stored state, the SQLite schema, CLI flags or exit codes? If so, describe the migration and note it in the changelog. Write "none" if not. -->
-
-## Checklist
-
-- [ ] Focused on one change; unrelated refactors left out
-- [ ] Behavioral changes have a test that fails without the fix (machine behavior, not prose)
-- [ ] No sleeps or timing-based waits in tests
-- [ ] The user's opencodex model enable/disable choices are preserved
-- [ ] `CHANGELOG.md` `## [Unreleased]` updated if user-facing
-- [ ] `README.md` and `README.ko.md` both updated if the README is affected
-- [ ] No credentials, SQLite files or `.omo/` runtime artifacts included
+<!-- Describe changes to documented CLI flags or exit codes, the SQLite schema, stored state, the scope snapshot format, routing state files, permissions, or upgrade/rollback behavior, and the CHANGELOG entry that covers them. Confirm the user's opencodex enable/disable choices are preserved. Remove this section if it does not apply. -->

@@ -170,12 +170,23 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   return receipt;
 }
 
+const routedEntrySchema = z.union([z.string(), z.object({ model: z.string() }).passthrough()]);
+const routedSchema = z
+  .object({
+    model: z.string().optional(),
+    models: z.array(routedEntrySchema).optional(),
+    fallback_models: z.array(z.object({ provider: z.string(), model_id: z.string() })).optional(),
+  })
+  .passthrough();
+
+/** Every model a route can choose, qualified; throws on a shape the launcher cannot judge. */
 function routedModels(route: unknown): string[] {
-  if (typeof route === "string") return [route];
-  if (Array.isArray(route)) return route.flatMap(routedModels);
-  if (typeof route !== "object" || route === null) return [];
-  const { model, models, fallback_models } = route as Record<string, unknown>;
-  return [model, models, fallback_models].flatMap(routedModels);
+  const parsed = routedSchema.parse(route);
+  return [
+    ...(parsed.model === undefined ? [] : [parsed.model]),
+    ...(parsed.models ?? []).map((entry) => (typeof entry === "string" ? entry : entry.model)),
+    ...(parsed.fallback_models ?? []).map((entry) => `${entry.provider}/${entry.model_id}`),
+  ];
 }
 
 /**

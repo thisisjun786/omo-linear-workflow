@@ -112,6 +112,17 @@ describe("retained routing for a fail-open launch", () => {
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
     await writeFile(configPath, adopted.replace('"quick"', '"quick-renamed"'));
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+    const withFallback = (fallback: string) =>
+      adopted.replace(
+        /"quick": \{\n(\s*)"models"/,
+        `"quick": {\n$1"fallback_models": [${fallback}],\n$1"models"`,
+      );
+    await writeFile(configPath, withFallback('{"provider": "native", "model_id": "luna"}'));
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+    await writeFile(configPath, withFallback('{"provider": "opencodex", "model_id": "gpt-6-sol"}'));
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(true);
+    await writeFile(configPath, withFallback('{"provider": "native"}'));
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
     await rm(configPath);
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
     await writeFile(configPath, adopted);

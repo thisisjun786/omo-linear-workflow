@@ -32,7 +32,7 @@ import {
   readHostStatus,
   runtimeCacheEnvironment,
 } from "./host-profile";
-import { buildRoleBrief, readScopeSnapshot } from "./linear";
+import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting } from "./proxy/routing-launch";
 import { removeReadiness, subscribeReadiness } from "./readiness";
 import { attachBinding, type NativeSession } from "./transport";
@@ -651,12 +651,19 @@ export class Orchestrator {
     const closing = this.#withRegistry((registry) => registry.beginClose(bindingId));
     if (!closing.ok || closing.value.launchState === "closed") return closing;
     const binding = closing.value;
+    const context = await this.#context(binding);
+    // Bindings created before readable labels used the legacy `omo-<role>-<id>` name.
+    const launchLabels = new Set([
+      `omo-${binding.assignment.role}-${binding.id}`,
+      ...(context.ok ? [roleLabel(binding.assignment, context.value.snapshot, binding.id)] : []),
+    ]);
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     try {
       const snapshot = await herdr.snapshot();
       const workspaces = snapshot.workspaces.filter((workspace) =>
         binding.workspaceId === null
-          ? workspace.label === `omo-${binding.assignment.role}-${binding.id}` &&
+          ? workspace.label !== undefined &&
+            launchLabels.has(workspace.label) &&
             workspace.cwd === binding.cwd
           : workspace.workspaceId === binding.workspaceId,
       );
@@ -678,7 +685,7 @@ export class Orchestrator {
         if (
           workspace.cwd !== binding.cwd ||
           (binding.workspaceId === null &&
-            workspace.label !== `omo-${binding.assignment.role}-${binding.id}`)
+            (workspace.label === undefined || !launchLabels.has(workspace.label)))
         ) {
           return failure(
             "identity_mismatch",
@@ -900,12 +907,13 @@ export class Orchestrator {
           return;
         }
       });
+      const label = roleLabel(assignment, snapshot, bindingId);
       const workspace =
         checkout === null
-          ? await herdr.createWorkspace(cwd, `omo-${assignment.role}-${bindingId}`)
+          ? await herdr.createWorkspace(cwd, label)
           : await herdr.createWorktree(
               checkout,
-              `omo-${assignment.role}-${bindingId}`,
+              label,
               assignment.role === "parent" ? { head: true } : target?.grouping,
             );
       const provisioned = this.#withRegistry((registry) =>
@@ -960,7 +968,7 @@ export class Orchestrator {
           "--session",
           seedPath,
           "--name",
-          `omo-${assignment.role}-${bindingId}`,
+          label,
           "--model",
           `${model.provider}/${model.modelId}`,
           "--thinking",

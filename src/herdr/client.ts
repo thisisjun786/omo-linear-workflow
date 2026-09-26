@@ -11,6 +11,8 @@ import {
   snapshotResultSchema,
   subscriptionStartedSchema,
   successFrameSchema,
+  tabCreatedResultSchema,
+  tabRenameResultSchema,
   upstreamErrorSchema,
   workspaceResultSchema,
   worktreeRemovedSchema,
@@ -48,6 +50,7 @@ const SUBSCRIPTIONS = [
 export interface Workspace {
   readonly workspaceId: string;
   readonly rootPaneId: string;
+  readonly rootTabId?: string;
   readonly cwd: string;
   readonly label?: string;
   readonly groupHeadWorkspaceId?: string;
@@ -74,6 +77,13 @@ export interface HerdrClient {
     label: string,
     grouping?: WorktreeGrouping,
   ): Promise<Workspace>;
+  createTab(
+    workspaceId: string,
+    cwd: string,
+    label: string,
+  ): Promise<{ tabId: string; rootPaneId: string }>;
+  renameTab(tabId: string, label: string): Promise<void>;
+  sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void>;
   run(
     paneId: string,
     argv: readonly string[],
@@ -118,9 +128,11 @@ class SocketHerdrClient implements HerdrClient {
     const replyCwd = result.root_pane.cwd;
     if (replyCwd === null || replyCwd === undefined)
       throw new HerdrError("invalid_response", "workspace reply omitted root pane cwd");
+    const rootTabId = result.tab?.tab_id ?? result.workspace.active_tab_id;
     return {
       workspaceId: result.workspace.workspace_id,
       rootPaneId: result.root_pane.pane_id,
+      ...(rootTabId === undefined ? {} : { rootTabId }),
       cwd: replyCwd,
     };
   }
@@ -145,11 +157,46 @@ class SocketHerdrClient implements HerdrClient {
     );
     if (result.worktree === undefined)
       throw new HerdrError("invalid_response", "worktree reply omitted worktree data");
+    const rootTabId = result.tab?.tab_id ?? result.workspace.active_tab_id;
     return {
       workspaceId: result.workspace.workspace_id,
       rootPaneId: result.root_pane.pane_id,
+      ...(rootTabId === undefined ? {} : { rootTabId }),
       cwd: result.worktree.path,
     };
+  }
+
+  public async createTab(
+    workspaceId: string,
+    cwd: string,
+    label: string,
+  ): Promise<{ tabId: string; rootPaneId: string }> {
+    const result = tabCreatedResultSchema.parse(
+      await this.#request("tab.create", {
+        workspace_id: nonEmptyStringSchema.parse(workspaceId),
+        cwd: absolutePathSchema.parse(cwd),
+        label: nonEmptyStringSchema.parse(label),
+        focus: false,
+      }),
+    );
+    return { tabId: result.tab.tab_id, rootPaneId: result.root_pane.pane_id };
+  }
+
+  public async renameTab(tabId: string, label: string): Promise<void> {
+    tabRenameResultSchema.parse(
+      await this.#request("tab.rename", {
+        tab_id: nonEmptyStringSchema.parse(tabId),
+        label: nonEmptyStringSchema.parse(label),
+      }),
+    );
+  }
+
+  public async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
+    await this.#expectOk("pane.send_input", {
+      pane_id: nonEmptyStringSchema.parse(paneId),
+      text: z.string().parse(text),
+      keys: z.array(z.string()).parse(keys),
+    });
   }
 
   public async run(

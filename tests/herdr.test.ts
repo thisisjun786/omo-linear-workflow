@@ -180,6 +180,7 @@ describe("HerdrClient", () => {
     await expect(client.createWorkspace("/requested", "supervisor")).resolves.toEqual({
       workspaceId: "ws-reply",
       rootPaneId: "pane-reply",
+      rootTabId: "tab-reply",
       cwd: "/reply/path",
     });
     const checkout = {
@@ -192,6 +193,7 @@ describe("HerdrClient", () => {
     await expect(client.createWorktree(checkout, "child")).resolves.toEqual({
       workspaceId: "ws-reply",
       rootPaneId: "pane-reply",
+      rootTabId: "tab-reply",
       cwd: "/reply/path",
     });
     expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
@@ -212,6 +214,48 @@ describe("HerdrClient", () => {
         },
       },
     ]);
+  });
+
+  test("creates and renames tabs and sends raw pane input", async () => {
+    const server = await fixture((socket, request) => {
+      if (request.method === "tab.create") {
+        ok(socket, request.id, {
+          type: "tab_created",
+          tab: { tab_id: "ws:t2", workspace_id: "ws", label: "plan" },
+          root_pane: { pane_id: "ws:p2", tab_id: "ws:t2" },
+        });
+      } else if (request.method === "tab.rename") {
+        ok(socket, request.id, { type: "tab_info" });
+      } else ok(socket, request.id);
+    });
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    await expect(client.createTab("ws", "/tmp", "plan")).resolves.toEqual({
+      tabId: "ws:t2",
+      rootPaneId: "ws:p2",
+    });
+    await client.renameTab("ws:t2", "execute");
+    await client.sendKeys("ws:p2", "/quit", ["Enter"]);
+    expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: "tab.create",
+        params: { workspace_id: "ws", cwd: "/tmp", label: "plan", focus: false },
+      },
+      { method: "tab.rename", params: { tab_id: "ws:t2", label: "execute" } },
+      { method: "pane.send_input", params: { pane_id: "ws:p2", text: "/quit", keys: ["Enter"] } },
+    ]);
+  });
+
+  test("rejects tab.create replies that omit root_pane", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, {
+        type: "tab_created",
+        tab: { tab_id: "ws:t2", workspace_id: "ws", label: "plan" },
+      }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    await expect(client.createTab("ws", "/tmp", "plan")).rejects.toThrow();
   });
 
   test("grouped worktrees address an exact head with a versioned RPC", async () => {

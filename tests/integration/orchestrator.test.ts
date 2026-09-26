@@ -148,6 +148,7 @@ describe("Herdr readiness event", () => {
 class FakeHerdr implements HerdrClient {
   readonly events: string[];
   readonly emittedEvent: unknown;
+  readonly tabCalls: unknown[] = [];
   listener: ((event: unknown) => void) | undefined;
   verifyIdentity = false;
   holdSnapshot = false;
@@ -178,6 +179,21 @@ class FakeHerdr implements HerdrClient {
     const workspace = { workspaceId: "ws", rootPaneId: "pane", cwd, label: _label };
     this.workspaces.set(workspace.workspaceId, workspace);
     return workspace;
+  }
+  async createTab(
+    workspaceId: string,
+    _cwd: string,
+    label: string,
+  ): Promise<{ tabId: string; rootPaneId: string }> {
+    const call = { tabId: `${workspaceId}:t2`, rootPaneId: `${workspaceId}:p2` };
+    this.tabCalls.push({ method: "createTab", workspaceId, cwd: _cwd, label, ...call });
+    return call;
+  }
+  async renameTab(tabId: string, label: string): Promise<void> {
+    this.tabCalls.push({ method: "renameTab", tabId, label });
+  }
+  async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
+    this.tabCalls.push({ method: "sendKeys", paneId, text, keys });
   }
   async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
     this.cwd = checkout.path;

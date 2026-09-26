@@ -376,6 +376,7 @@ async function world() {
   const prompts = new Map<string, Set<string>>();
   const workspaces = new Map<string, Workspace>();
   const groupingRequests = new Map<string, WorktreeGrouping | undefined>();
+  const tabCalls: unknown[] = [];
   const sends: Envelope[] = [];
   const launches: string[] = [];
   let sequence = 0;
@@ -415,6 +416,17 @@ async function world() {
       };
       workspaces.set(workspace.workspaceId, grouped);
       return grouped;
+    },
+    async createTab(workspaceId, cwd, label) {
+      const call = { tabId: `${workspaceId}:t2`, rootPaneId: `${workspaceId}:p2` };
+      tabCalls.push({ method: "createTab", workspaceId, cwd, label, ...call });
+      return call;
+    },
+    async renameTab(tabId, label) {
+      tabCalls.push({ method: "renameTab", tabId, label });
+    },
+    async sendKeys(paneId, text, keys) {
+      tabCalls.push({ method: "sendKeys", paneId, text, keys });
     },
     async run(paneId, argv) {
       launches.push(paneId);

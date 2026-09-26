@@ -1,4 +1,4 @@
-import type { Binding, ScopeSnapshot } from "../core/contracts";
+import type { Binding, ChildStage, ScopeSnapshot } from "../core/contracts";
 import { digestOf } from "./scope";
 
 function scopeRefs(binding: Binding, snapshot: ScopeSnapshot): string {
@@ -67,8 +67,22 @@ function roleBehavior(role: Binding["assignment"]["role"]): string {
   return lines.join("\n");
 }
 
-export function buildRoleBrief(binding: Binding, snapshot: ScopeSnapshot): string {
+export interface RoleBriefOptions {
+  readonly stage?: ChildStage;
+  readonly planPath?: string;
+  readonly planHead?: string;
+  readonly updateCheckLine?: string;
+  readonly includeParentGuidance?: boolean;
+  readonly includeManagerGuidance?: boolean;
+}
+
+export function buildRoleBrief(
+  binding: Binding,
+  snapshot: ScopeSnapshot,
+  options: RoleBriefOptions = {},
+): string {
   const qaStandby = snapshot.source === "fixture";
+  const stage = binding.assignment.role === "child" ? options.stage : undefined;
   const parts: string[] = [
     `source: ${snapshot.source}`,
     `binding_id: ${binding.id}`,
@@ -76,6 +90,7 @@ export function buildRoleBrief(binding: Binding, snapshot: ScopeSnapshot): strin
     `snapshot_digest: ${digestOf(snapshot)}`,
     `durable_session_id: ${binding.durableSessionId}`,
     `role: ${binding.assignment.role}`,
+    ...(stage === undefined ? [] : [`stage: ${stage}`]),
     "scope_refs:",
     scopeRefs(binding, snapshot),
     roleBehavior(binding.assignment.role),
@@ -86,6 +101,57 @@ export function buildRoleBrief(binding: Binding, snapshot: ScopeSnapshot): strin
       `initial_manager_binding_id: ${binding.assignment.ownerBindingId ?? "null"}`,
       "user_contact: direct_prompt_in_this_session",
       "user_report_state: posted_not_native_acceptance",
+    );
+  }
+
+  if (stage !== undefined) {
+    parts.push(
+      "your_user: parent",
+      "questions: olw_ask only (batch up to 4 per call with options and a recommended default); prose in the pane reaches nobody",
+      "mode_mismatch: report blocked without work",
+    );
+    if (stage === "plan") {
+      parts.push(
+        "execution_skills: [olw-run, ulw-plan]",
+        "plan_review: plan-reviewer rounds as ulw-plan requires",
+        `plan_path: ${options.planPath ?? ".omo/plans/<issue-key>.md"}`,
+        ...(options.planHead === undefined ? [] : [`plan_head: ${options.planHead}`]),
+        "approval: ask the parent with olw_ask; never wait for a user",
+        "on_approval: olw stage complete",
+      );
+    } else if (stage === "execute") {
+      parts.push(
+        "execution_skills: [olw-run, ulw-execute, mass-ulw]",
+        `plan_path: ${options.planPath ?? ".omo/plans/<issue-key>.md"}`,
+        ...(options.planHead === undefined ? [] : [`plan_head: ${options.planHead}`]),
+        "report_once: report:<packet-id>",
+      );
+    } else if (stage === "direct") {
+      parts.push(
+        "execution_mode: mass-ulw",
+        "execution_trigger: explicit_issue_packet",
+        "execution_skills: [olw-run, mass-ulw]",
+        "internal_workers: native_workflow_nodes_not_roles",
+        "issue_goal: packet_bound",
+        "verify_artifacts_before_report: true",
+      );
+    } else {
+      parts.push("execution_skills: [olw-run, ulw-research, mass-ulw]");
+    }
+  } else if (binding.assignment.role === "parent" && options.includeParentGuidance === true) {
+    parts.push(
+      "child_modes: direct|planned|research (chosen at child create)",
+      "answer_child_questions: olw answer, one answer per question",
+      "approve_child_plans: true",
+      "start_execute_stage: olw stage start after approval",
+      "escalate_to: manager via olw ask (inbox when no ready manager)",
+    );
+  } else if (binding.assignment.role === "manager" && options.includeManagerGuidance === true) {
+    parts.push(
+      "role: manager",
+      "scope: unbound",
+      "ask_user_directly: true",
+      ...(options.updateCheckLine === undefined ? [] : [options.updateCheckLine]),
     );
   }
 

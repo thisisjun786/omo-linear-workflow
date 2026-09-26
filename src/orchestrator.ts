@@ -251,10 +251,17 @@ export interface OrchestratorDependencies {
 function ok<T>(value: T): Result<T> {
   return { ok: true, value };
 }
+
 function failure<T>(code: string, message: string, details?: unknown): Result<T> {
   return details === undefined
     ? { ok: false, error: { code, message } }
     : { ok: false, error: { code, message, details } };
+}
+
+export function planPathForIssueKey(key: string | undefined): Result<string> {
+  return key === undefined || !/^[A-Z][A-Z0-9]*-\d+$/.test(key)
+    ? failure("invalid_input", "Planned children require a valid Linear issue key")
+    : ok(`.omo/plans/${key}.md`);
 }
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -949,6 +956,9 @@ export class Orchestrator {
       return failure("owner_mismatch", "Child owner must be a parent worktree");
     if (owner.value.launchState !== "ready" || owner.value.contactState !== "active")
       return failure("owner_unavailable", "Parent is not available for role creation");
+    if (owner.value.assignment.role !== "parent")
+      return failure("owner_mismatch", "Owner is not a parent");
+    const parentAssignment = owner.value.assignment;
     const context = await this.#context(owner.value);
     if (!context.ok) return context;
     let grouping: WorktreeGrouping | undefined;
@@ -993,6 +1003,20 @@ export class Orchestrator {
       ownerBindingId: owner.value.id,
     };
     const mode = input.mode ?? "direct";
+    let planPath: string | undefined;
+    if (mode === "planned") {
+      const issue = context.value.snapshot.projects
+        .find((entry) => entry.project.id === parentAssignment.projectId)
+        ?.issues.find((entry) => entry.id === input.issueId);
+      if (issue === undefined)
+        return failure(
+          "invalid_input",
+          "Planned child issue is outside the approved project snapshot",
+        );
+      const resolved = planPathForIssueKey(issue.key);
+      if (!resolved.ok) return resolved;
+      planPath = resolved.value;
+    }
     const stage: ChildStage =
       mode === "planned" ? "plan" : mode === "research" ? "research" : "direct";
     return this.#create(
@@ -1001,7 +1025,13 @@ export class Orchestrator {
       context.value.snapshot,
       checkout.path,
       checkout,
-      { bindingId, grouping, stage, mode },
+      {
+        bindingId,
+        grouping,
+        stage,
+        mode,
+        ...(planPath === undefined ? {} : { planPath }),
+      },
     );
   }
 
@@ -1221,10 +1251,7 @@ export class Orchestrator {
           if (!provisioning.ok) return provisioning;
           const activated = await this.#verifyAndActivate(provisioning.value);
           if (!activated.ok) return activated;
-          const initialized = await this.#initialize(activated.value, snapshot, {
-            planPath: handoff.planPath,
-            head: handoff.head,
-          });
+          const initialized = await this.#initialize(activated.value, snapshot);
           return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
         }
       }
@@ -1391,10 +1418,7 @@ export class Orchestrator {
       }
       const activated = await this.#verifyAndActivate(current);
       if (!activated.ok) return activated;
-      const initialized = await this.#initialize(activated.value, snapshot, {
-        planPath: handoff.planPath,
-        head: handoff.head,
-      });
+      const initialized = await this.#initialize(activated.value, snapshot);
       return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
     } catch (cause) {
       const current = this.#binding(binding.id);
@@ -2191,6 +2215,7 @@ export class Orchestrator {
       readonly grouping?: WorktreeGrouping | undefined;
       readonly stage?: ChildStage;
       readonly mode?: ChildCreateMode;
+      readonly planPath?: string;
       readonly successor?: {
         readonly previousId: string;
         readonly workspaceId: string;
@@ -2258,15 +2283,19 @@ export class Orchestrator {
       assignment.role === "child" &&
       target?.successor === undefined
     ) {
-      const recorded = this.#withRegistry((registry) =>
-        registry.recordStage(bindingId, assignment.issueId, launchStage, 0, null),
-      );
-      if (!recorded.ok) {
-        this.#withRegistry((registry) => {
-          const closing = registry.beginClose(bindingId);
-          return closing.ok ? registry.finishClose(bindingId) : closing;
-        });
-        return recorded;
+      const existingStage = this.#withRegistry((registry) => registry.stageOf(bindingId));
+      if (!existingStage.ok) return existingStage;
+      if (existingStage.value === null) {
+        const recorded = this.#withRegistry((registry) =>
+          registry.recordStage(bindingId, assignment.issueId, launchStage, 0, null),
+        );
+        if (!recorded.ok) {
+          this.#withRegistry((registry) => {
+            const closing = registry.beginClose(bindingId);
+            return closing.ok ? registry.finishClose(bindingId) : closing;
+          });
+          return recorded;
+        }
       }
     }
     try {
@@ -2496,27 +2525,78 @@ export class Orchestrator {
     );
   }
 
+  #planPathForChild(
+    assignment: Extract<Assignment, { readonly role: "child" }>,
+    snapshot: ScopeSnapshot,
+  ): Result<string> {
+    const issue = snapshot.projects
+      .find((entry) => entry.project.id === assignment.projectId)
+      ?.issues.find((entry) => entry.id === assignment.issueId);
+    return planPathForIssueKey(issue?.key);
+  }
+
   async #initialize(
     binding: Binding,
     snapshot: ScopeSnapshot,
     successor?: { readonly planPath: string; readonly head: string },
   ): Promise<Result<Binding>> {
+    const lineage =
+      binding.assignment.role === "child"
+        ? this.#withRegistry((registry) => registry.lineageFor(binding.id))
+        : undefined;
+    if (lineage !== undefined && !lineage.ok) return lineage;
+    const latest = lineage?.value.stages.at(-1);
+    const currentStage = latest?.bindingId === binding.id ? latest.stage : undefined;
+    const predecessor =
+      latest?.bindingId === binding.id && latest.ordinal > 0
+        ? lineage?.value.stages.find((stage) => stage.ordinal === latest.ordinal - 1)
+        : undefined;
+    let planPath: string | undefined;
+    let planHead: string | undefined;
+    if (currentStage === "plan") {
+      if (binding.assignment.role !== "child")
+        return failure("invalid_input", "Planned issue key requires a child binding");
+      const resolved = this.#planPathForChild(binding.assignment, snapshot);
+      if (!resolved.ok) return resolved;
+      planPath = resolved.value;
+    } else if (currentStage === "execute") {
+      if (successor !== undefined) {
+        planPath = successor.planPath;
+        planHead = successor.head;
+      } else if (predecessor?.stage === "plan") {
+        const predecessorRecord = this.#withRegistry((registry) =>
+          registry.stageOf(predecessor.bindingId),
+        );
+        if (!predecessorRecord.ok) return predecessorRecord;
+        if (
+          predecessorRecord.value?.handoff === null ||
+          predecessorRecord.value?.handoff === undefined
+        )
+          return failure("invalid_input", "Execute stage has no recorded plan handoff");
+        planPath = predecessorRecord.value.handoff.planPath;
+        planHead = predecessorRecord.value.handoff.head;
+      } else {
+        return failure("invalid_input", "Execute stage has no recorded plan handoff");
+      }
+    }
     const text =
       binding.initialization.text ??
-      [
-        buildRoleBrief(binding, snapshot),
-        ...(successor === undefined
-          ? []
-          : [
-              `stage: execute`,
-              `plan_path: ${successor.planPath}`,
-              `plan_head: ${successor.head}`,
-              "Use the plan with the ulw-execute skill to implement this issue.",
-            ]),
-      ].join("\n") +
-        (binding.assignment.role === "manager"
-          ? `\nupdate_check: ${this.#managerUpdateLine()}`
-          : "");
+      buildRoleBrief(binding, snapshot, {
+        ...(binding.assignment.role === "child"
+          ? {
+              ...(currentStage === undefined ? {} : { stage: currentStage }),
+            }
+          : {}),
+        ...(binding.assignment.role === "parent" ? { includeParentGuidance: true } : {}),
+        ...(binding.assignment.role === "manager"
+          ? {
+              includeManagerGuidance: true,
+              updateCheckLine: `update_check: ${this.#managerUpdateLine()}`,
+            }
+          : {}),
+        ...(planPath === undefined ? {} : { planPath }),
+        ...(planHead === undefined ? {} : { planHead }),
+      });
     const claim = this.#withRegistry((registry) => registry.beginInitialization(binding.id, text));
     if (!claim.ok) return claim;
     if (claim.value.disposition === "replay") return ok(claim.value.binding);

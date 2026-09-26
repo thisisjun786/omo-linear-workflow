@@ -3,8 +3,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import type { Binding, Result, ScopeSnapshot } from "../src/core/contracts";
+import type { Binding, ChildStage, Result, ScopeSnapshot } from "../src/core/contracts";
 import { buildRoleBrief, readScopeSnapshot } from "../src/linear";
+import { digestOf } from "../src/linear/scope";
+import { planPathForIssueKey } from "../src/orchestrator";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -57,22 +59,24 @@ function makeBinding(
   overrides: Partial<Binding> = {},
 ): Binding {
   const assignment: Binding["assignment"] =
-    role === "parent"
-      ? {
-          role: "parent",
-          initiativeId: "initiative-omo-1",
-          projectId: "project-omo-1",
-          ownerBindingId: "binding-supervisor",
-        }
-      : role === "child"
+    role === "manager"
+      ? { role: "manager" }
+      : role === "parent"
         ? {
-            role: "child",
+            role: "parent",
             initiativeId: "initiative-omo-1",
             projectId: "project-omo-1",
-            issueId: "issue-omo-1",
-            ownerBindingId: "binding-parent",
+            ownerBindingId: "binding-supervisor",
           }
-        : { role: "supervisor", initiativeId: "initiative-omo-1" };
+        : role === "child"
+          ? {
+              role: "child",
+              initiativeId: "initiative-omo-1",
+              projectId: "project-omo-1",
+              issueId: "issue-omo-1",
+              ownerBindingId: "binding-parent",
+            }
+          : { role: "supervisor", initiativeId: "initiative-omo-1" };
   const base: Binding = {
     id: `binding-${role}`,
     designationId: "designation-1",
@@ -218,6 +222,46 @@ describe("readScopeSnapshot", () => {
 describe("buildRoleBrief", () => {
   const snapshot = fixtureSnapshot();
 
+  test("plan path only uses a validated issue key, distinct from issue identity", () => {
+    expect(planPathForIssueKey("JUN-274")).toEqual({ ok: true, value: ".omo/plans/JUN-274.md" });
+    expect(planPathForIssueKey("../../outside")).toMatchObject({
+      ok: false,
+      error: { code: "invalid_input" },
+    });
+  });
+
+  test("legacy briefs remain byte-for-byte unchanged", () => {
+    const oldOutput = [
+      "source: fixture",
+      "binding_id: binding-child",
+      "designation_id: designation-1",
+      `snapshot_digest: ${digestOf(snapshot)}`,
+      "durable_session_id: session-child",
+      "role: child",
+      "scope_refs:",
+      "  initiative_id: initiative-omo-1",
+      "  project_id: project-omo-1",
+      "  issue_id: issue-omo-1",
+      "behavior:",
+      "  scope: one designated issue",
+      "  report_to_parent: true",
+      "  implement_only_this_issue: true",
+      "  execution_mode: mass-ulw",
+      "  execution_trigger: explicit_issue_packet",
+      "  execution_skills: [olw-run, mass-ulw]",
+      "  internal_workers: native_workflow_nodes_not_roles",
+      "  issue_goal: packet_bound",
+      "  verify_artifacts_before_report: true",
+      "  wait_for_explicit_instruction: true",
+      "qa_standby: true",
+      "respond_only_to_explicit_messages: true",
+      "never_fetch_live_linear: true",
+      "never_create_additional_olw_roles: true",
+      "never_implement_repository_work_autonomously: true",
+    ].join("\n");
+    expect(buildRoleBrief(makeBinding("child"), snapshot)).toBe(oldOutput);
+  });
+
   test("supervisor brief embeds machine bindings and scope refs", () => {
     const binding = makeBinding("supervisor", {
       id: "binding-supervisor",
@@ -232,6 +276,38 @@ describe("buildRoleBrief", () => {
     expect(brief).toContain("role: supervisor");
     expect(brief).toContain("initiative_id: initiative-omo-1");
     expect(brief).toContain("source: fixture");
+  });
+
+  test("parent runtime brief exposes child workflow and question controls", () => {
+    const parsed = z
+      .record(z.string(), z.unknown())
+      .parse(
+        Bun.YAML.parse(
+          buildRoleBrief(makeBinding("parent"), snapshot, { includeParentGuidance: true }),
+        ),
+      );
+    expect(parsed).toMatchObject({
+      child_modes: "direct|planned|research (chosen at child create)",
+      answer_child_questions: "olw answer, one answer per question",
+      approve_child_plans: true,
+      start_execute_stage: "olw stage start after approval",
+      escalate_to: "manager via olw ask (inbox when no ready manager)",
+    });
+  });
+
+  test("manager runtime brief exposes manager keys and optional update check", () => {
+    const brief = buildRoleBrief(makeBinding("manager"), snapshot, {
+      includeManagerGuidance: true,
+      updateCheckLine: "update_check: pinned 1.0 available 2.0",
+    });
+    const parsed = z.record(z.string(), z.unknown()).parse(Bun.YAML.parse(brief));
+    expect(parsed).toMatchObject({
+      role: "manager",
+      scope: "unbound",
+      ask_user_directly: true,
+      update_check: "pinned 1.0 available 2.0",
+      qa_standby: true,
+    });
   });
 
   test("parent brief embeds project scope ref", () => {
@@ -278,6 +354,45 @@ describe("buildRoleBrief", () => {
     expect(brief).toContain("role: child");
     expect(brief).toContain("project_id: project-omo-1");
     expect(brief).toContain("issue_id: issue-omo-1");
+  });
+
+  test.each([
+    ["direct", ["olw-run", "mass-ulw"]],
+    ["plan", ["olw-run", "ulw-plan"]],
+    ["execute", ["olw-run", "ulw-execute", "mass-ulw"]],
+    ["research", ["olw-run", "ulw-research", "mass-ulw"]],
+  ] as const)("child stage %s exposes its machine brief keys", (stage, skills) => {
+    const brief = buildRoleBrief(makeBinding("child"), snapshot, {
+      stage: stage as ChildStage,
+      ...(stage === "execute" ? { planPath: ".omo/plans/ISS-1.md", planHead: "abc123" } : {}),
+    });
+    const parsed = z.record(z.string(), z.unknown()).parse(Bun.YAML.parse(brief));
+    expect(parsed["stage"]).toBe(stage);
+    expect(parsed["your_user"]).toBe("parent");
+    expect(parsed["questions"]).toBe(
+      "olw_ask only (batch up to 4 per call with options and a recommended default); prose in the pane reaches nobody",
+    );
+    expect(parsed["mode_mismatch"]).toBe("report blocked without work");
+    expect(parsed["execution_skills"]).toEqual(skills);
+    if (stage === "direct") {
+      expect(parsed["execution_mode"]).toBe("mass-ulw");
+      expect(parsed["execution_trigger"]).toBe("explicit_issue_packet");
+      expect(parsed["internal_workers"]).toBe("native_workflow_nodes_not_roles");
+      expect(parsed["issue_goal"]).toBe("packet_bound");
+      expect(parsed["verify_artifacts_before_report"]).toBe(true);
+    }
+    if (stage === "plan") {
+      expect(parsed["plan_review"]).toBe("plan-reviewer rounds as ulw-plan requires");
+      expect(parsed["plan_path"]).toBe(".omo/plans/<issue-key>.md");
+      expect(parsed["approval"]).toBe("ask the parent with olw_ask; never wait for a user");
+      expect(parsed["on_approval"]).toBe("olw stage complete");
+    }
+    if (stage === "execute") {
+      expect(parsed["plan_path"]).toBe(".omo/plans/ISS-1.md");
+      expect(parsed["plan_head"]).toBe("abc123");
+      expect(parsed["report_once"]).toBe("report:<packet-id>");
+    }
+    expect(brief).toContain("qa_standby: true");
   });
 
   test.each(["fixture", "linear-export"] as const)(

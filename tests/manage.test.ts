@@ -340,6 +340,38 @@ test("a hanging injected update check cannot delay manager creation or focus", a
   expect(second.action).toBe("focused");
 });
 
+test("manager create passes real-shaped update versions once into its brief", async () => {
+  const w = await world();
+  w.hooks.updateCheck = async () => ({
+    checkedAt: "2026-09-26T00:00:00.000Z",
+    state: "available",
+    packages: {
+      "omo-ai": {
+        state: "update_available",
+        pinned: "5.0.0-beta.84",
+        available: "5.0.0-beta.90",
+        tag: "beta",
+      },
+      "@code-yeongyu/senpi": {
+        state: "update_available",
+        pinned: "2026.9.22-4",
+        available: "2026.9.25-1",
+        tag: "latest",
+      },
+    },
+    globalOmo: "5.0.0-beta.84",
+  });
+
+  const first = value(await w.orchestrator.manage());
+  const managerBrief = w.prompts.get(first.binding.id)?.values().next().value;
+  if (managerBrief === undefined) throw new Error("Manager brief was not initialized");
+  const updateLines = managerBrief.split("\n").filter((line) => line.startsWith("update_check: "));
+  expect(updateLines).toHaveLength(1);
+  expect(updateLines[0]).toContain("omo-ai pinned 5.0.0-beta.84, beta 5.0.0-beta.90");
+  expect(updateLines[0]).toContain("@code-yeongyu/senpi pinned 2026.9.22-4, latest 2026.9.25-1");
+  expect(updateLines[0]).not.toContain("undefined");
+});
+
 test("first manage creates one manager labeled manager; second focuses it and launches nothing", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage());
@@ -359,7 +391,13 @@ test("first manage creates one manager labeled manager; second focuses it and la
   expect(argv[argv.indexOf("--model") + 1]).toBe("fixture-provider/fixture-model");
   expect(argv[argv.indexOf("--thinking") + 1]).toBe("high");
   expect(argv).not.toContain("--no-model-fallback");
-  expect(w.prompts.get(first.binding.id)?.values().next().value).toContain("update_check:");
+  const managerBrief = w.prompts.get(first.binding.id)?.values().next().value;
+  if (managerBrief === undefined) throw new Error("Manager brief was not initialized");
+  const updateLines = managerBrief.split("\n").filter((line) => line.startsWith("update_check: "));
+  expect(updateLines).toHaveLength(1);
+  expect(updateLines[0]).toContain("omo-ai pinned 1.0.0, beta 1.0.0");
+  expect(updateLines[0]).toContain("@code-yeongyu/senpi pinned 1.0.0, latest 1.0.0");
+  expect(updateLines[0]).not.toContain("undefined");
   expect(w.focused).toEqual([]);
 
   w.hooks.hangingUpdateCheck = false;

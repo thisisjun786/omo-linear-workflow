@@ -22,6 +22,7 @@ import {
   Orchestrator,
   type OrchestratorDependencies,
   planPaneExited,
+  planPathForIssueKey,
   readSessionPath,
 } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
@@ -926,7 +927,9 @@ describe("orchestrator startup", () => {
       projects: [
         {
           project: { id: "project", url: "https://linear.test/p", revision: "r1" },
-          issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+          issues: [
+            { id: "issue", key: "JUN-274", url: "https://linear.test/issue", revision: "r1" },
+          ],
         },
       ],
       decisionRefs: [],
@@ -1216,6 +1219,249 @@ describe("orchestrator startup", () => {
     expect(live().map((item) => item.id)).toEqual([started.value.binding.id]);
   });
 
+  test("reconcile restores execute brief path and head from durable handoff", async () => {
+    const root = await ownedRoot("omo-orchestrator-execute-reconcile-");
+    const events: string[] = [];
+    const prompts = new Map<string, Set<string>>();
+    const herdr = new FakeHerdr(events);
+    let sequence = 0;
+    let failExecuteRun = false;
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async (controlRoot) => ({
+        artifactDir: join(controlRoot, ".managed-herdr"),
+      }),
+      ensureHost: async () => {},
+      gitTip: async () => "handoff-head-123",
+      now: () => "2026-09-26T00:00:00.000Z",
+      uuid: () => `execute-reconcile-${++sequence}`,
+      attachBinding: async (binding) => {
+        const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+        if (identity === undefined) throw new Error("Exact native session is not open");
+        let messages = prompts.get(binding.durableSessionId);
+        if (messages === undefined) {
+          messages = new Set();
+          prompts.set(binding.durableSessionId, messages);
+        }
+        const session = new FakeNative(identity, events, messages);
+        session.onConfigure = (current) =>
+          herdr.nativeIdentities.set(binding.durableSessionId, current);
+        return session;
+      },
+      terminateBinding: async () => {},
+      prompt: async (binding, text) => {
+        prompts.get(binding.durableSessionId)?.add(text);
+      },
+    };
+    const originalRun = herdr.run.bind(herdr);
+    herdr.run = async (paneId, argv, env) => {
+      await originalRun(paneId, argv, env);
+      const sessionIndex = argv.indexOf("--session");
+      const sessionPath = argv[sessionIndex + 1];
+      if (!failExecuteRun || sessionPath === undefined) return;
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      let stage: ReturnType<typeof registry.stageOf>;
+      try {
+        const listed = registry.list();
+        if (!listed.ok) throw new Error(listed.error.message);
+        const launched = listed.value.find((item) => item.sessionPath === sessionPath);
+        if (launched === undefined) throw new Error("Missing launched execute binding");
+        stage = registry.stageOf(launched.id);
+      } finally {
+        registry.close();
+      }
+      if (!stage?.ok || stage.value?.stage !== "execute") return;
+      failExecuteRun = false;
+      throw new Error("interrupted after execute readiness before initialization");
+    };
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative-execute", url: "https://linear.test/i", revision: "r1" },
+      projects: [
+        {
+          project: { id: "project-execute", url: "https://linear.test/p", revision: "r1" },
+          issues: [
+            {
+              id: "issue-uuid-123",
+              key: "JUN-274",
+              url: "https://linear.test/issue/JUN-274/title",
+              revision: "r1",
+            },
+          ],
+        },
+      ],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(scope));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const supervisor = await orchestrator.createSupervisor({
+      initiativeId: "initiative-execute",
+      scopeDigest: imported.value.digest,
+      designationId: "designation-execute",
+      execute: true,
+      fixture: true,
+    });
+    if (!supervisor.ok) throw new Error(supervisor.error.message);
+    const parent = await orchestrator.createParent({
+      supervisorId: supervisor.value.binding.id,
+      projectId: "project-execute",
+      repo: root,
+      base: "main",
+    });
+    if (!parent.ok) throw new Error(parent.error.message);
+    const plan = await orchestrator.createChild({
+      parentId: parent.value.binding.id,
+      issueId: "issue-uuid-123",
+      mode: "planned",
+    });
+    if (!plan.ok || plan.value.binding.checkout === null) throw new Error("Missing plan child");
+    const planBinding = plan.value.binding;
+    const planCheckout = planBinding.checkout;
+    if (planCheckout === null) throw new Error("Missing plan checkout");
+    const alternatePath = join(planCheckout.path, "approved-alternate.md");
+    await mkdir(planCheckout.path, { recursive: true });
+    await Bun.write(alternatePath, "Approved alternate plan");
+    const completed = await orchestrator.stageComplete({
+      fromId: planBinding.id,
+      planPath: alternatePath,
+      head: "handoff-head-123",
+      messageId: "complete-plan",
+      text: "Plan approved for execution",
+    });
+    expect(completed).toMatchObject({ ok: true, value: { state: "accepted" } });
+    failExecuteRun = true;
+    const interrupted = await orchestrator.stageStart({
+      fromId: planBinding.id,
+      parentId: parent.value.binding.id,
+      stage: "execute",
+      messageId: "start-execute",
+    });
+    expect(interrupted).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+
+    const restarted = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const reconciled = await restarted.reconcile({ projectId: "project-execute" });
+    expect(reconciled.ok).toBe(true);
+    if (!reconciled.ok) throw new Error(JSON.stringify(reconciled.error));
+    const executeBinding = reconciled.value.bindings.find(
+      (item) => item.assignment.role === "child" && item.id !== planBinding.id,
+    );
+    if (executeBinding === undefined) throw new Error("Reconcile omitted execute binding");
+    expect(executeBinding.initialization.state).toBe("accepted");
+    const executeBrief = executeBinding.initialization.text;
+    expect(executeBrief).toContain(`plan_path: ${alternatePath}`);
+    expect(executeBrief).toContain("plan_head: handoff-head-123");
+    expect(executeBrief).not.toContain(".omo/plans/JUN-274.md");
+    expect(executeBrief).not.toContain("<issue-key>");
+  });
+
+  test("reconcile rebuilds a planned brief with its scoped issue key after startup interruption", async () => {
+    const root = await ownedRoot("omo-orchestrator-plan-reconcile-");
+    const events: string[] = [];
+    const prompts = new Map<string, Set<string>>();
+    const herdr = new FakeHerdr(events);
+    let sequence = 0;
+    let failAfterRun = false;
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async (controlRoot) => ({
+        artifactDir: join(controlRoot, ".managed-herdr"),
+      }),
+      ensureHost: async () => {},
+      gitTip: async () => "commit",
+      now: () => "2026-09-26T00:00:00.000Z",
+      uuid: () => `reconcile-${++sequence}`,
+      attachBinding: async (binding) => {
+        const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+        if (identity === undefined) throw new Error("Exact native session is not open");
+        let messages = prompts.get(binding.durableSessionId);
+        if (messages === undefined) {
+          messages = new Set();
+          prompts.set(binding.durableSessionId, messages);
+        }
+        const session = new FakeNative(identity, events, messages);
+        session.onConfigure = (current) =>
+          herdr.nativeIdentities.set(binding.durableSessionId, current);
+        return session;
+      },
+      terminateBinding: async () => {},
+      prompt: async (binding, text) => {
+        prompts.get(binding.durableSessionId)?.add(text);
+      },
+    };
+    herdr.run = async function run(paneId, argv, env) {
+      await FakeHerdr.prototype.run.call(this, paneId, argv, env);
+      if (failAfterRun) {
+        failAfterRun = false;
+        throw new Error("interrupted after startup before initialization");
+      }
+    };
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative-reconcile", url: "https://linear.test/i", revision: "r1" },
+      projects: [
+        {
+          project: { id: "project-reconcile", url: "https://linear.test/p", revision: "r1" },
+          issues: [
+            {
+              id: "issue-uuid-123",
+              key: "JUN-274",
+              url: "https://linear.test/issue/JUN-274/title",
+              revision: "r1",
+            },
+          ],
+        },
+      ],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(scope));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const supervisor = await orchestrator.createSupervisor({
+      initiativeId: "initiative-reconcile",
+      scopeDigest: imported.value.digest,
+      designationId: "designation-reconcile",
+      execute: true,
+      fixture: true,
+    });
+    if (!supervisor.ok) throw new Error(supervisor.error.message);
+    const parent = await orchestrator.createParent({
+      supervisorId: supervisor.value.binding.id,
+      projectId: "project-reconcile",
+      repo: root,
+      base: "main",
+    });
+    if (!parent.ok) throw new Error(parent.error.message);
+
+    failAfterRun = true;
+    const created = await orchestrator.createChild({
+      parentId: parent.value.binding.id,
+      issueId: "issue-uuid-123",
+      mode: "planned",
+    });
+    expect(created).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+
+    const reconciled = await orchestrator.reconcile({ projectId: "project-reconcile" });
+    expect(reconciled.ok).toBe(true);
+    if (!reconciled.ok) throw new Error(JSON.stringify(reconciled.error));
+    const child = reconciled.value.bindings.find((binding) => binding.assignment.role === "child");
+    if (child === undefined)
+      throw new Error(`Reconcile omitted child: ${JSON.stringify(reconciled.value.bindings)}`);
+    const acceptedBrief = child.initialization.text;
+    expect(acceptedBrief).toContain("stage: plan");
+    expect(acceptedBrief).toContain("plan_path: .omo/plans/JUN-274.md");
+    expect(acceptedBrief).not.toContain("<issue-key>");
+    expect(acceptedBrief).not.toContain(".omo/plans/issue-uuid-123.md");
+  });
+
   test.each([
     ["direct", "direct", "opencodex/anthropic/claude-opus-5-5", "xhigh", false],
     ["planned", "plan", "opencodex/anthropic/claude-fable-5-1", "xhigh", true],
@@ -1276,7 +1522,14 @@ describe("orchestrator startup", () => {
         projects: [
           {
             project: { id: "project", url: "https://linear.test/p", revision: "r1" },
-            issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+            issues: [
+              {
+                id: "issue",
+                ...(mode === "planned" ? { key: "JUN-274" } : {}),
+                url: "https://linear.test/issue",
+                revision: "r1",
+              },
+            ],
           },
         ],
         decisionRefs: [],
@@ -1315,6 +1568,21 @@ describe("orchestrator startup", () => {
       expect(created.value.stage).toBe(stage);
       expect(created.value.mode).toBe(mode);
       expect(created.value.expectedModel).toEqual(modelForLaunch("child", stage));
+      if (mode === "planned") {
+        expect(created.value.binding.assignment.role).toBe("child");
+        expect(created.value.binding.initialization.text).toContain(
+          "plan_path: .omo/plans/JUN-274.md",
+        );
+        expect(created.value.binding.initialization.text).not.toContain(".omo/plans/issue.md");
+        expect(planPathForIssueKey("../../unsafe")).toMatchObject({
+          ok: false,
+          error: { code: "invalid_input" },
+        });
+        expect(planPathForIssueKey("../../unsafe")).toMatchObject({
+          ok: false,
+          error: { code: "invalid_input" },
+        });
+      }
       const childRuns = events.filter((event) => event === "run").length - runsBefore;
       expect(childRuns).toBe(1);
       const argv = herdr.lastArgv;
@@ -1342,6 +1610,11 @@ describe("orchestrator startup", () => {
         modelId: modelArg.slice("opencodex/".length),
       });
       expect(seed.buildSessionContext().thinkingLevel).toBe(thinking);
+      if (mode === "planned") {
+        expect(created.value.binding.initialization.text).toContain(
+          "plan_path: .omo/plans/JUN-274.md",
+        );
+      }
       const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
       try {
         const lineage = registry.lineageFor(created.value.binding.id);
@@ -1447,7 +1720,9 @@ describe("orchestrator startup", () => {
       projects: [
         {
           project: { id: "project", url: "https://linear.test/p", revision: "r1" },
-          issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+          issues: [
+            { id: "issue", key: "JUN-274", url: "https://linear.test/issue", revision: "r1" },
+          ],
         },
       ],
       decisionRefs: [],
@@ -1544,7 +1819,9 @@ describe("orchestrator startup", () => {
         projects: [
           {
             project: { id: "project", url: "https://linear.test/p", revision: "r1" },
-            issues: [{ id: "issue", url: "https://linear.test/issue", revision: "r1" }],
+            issues: [
+              { id: "issue", key: "JUN-274", url: "https://linear.test/issue", revision: "r1" },
+            ],
           },
         ],
         decisionRefs: [],

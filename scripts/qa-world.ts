@@ -4,6 +4,7 @@ import { RpcClient } from "@code-yeongyu/senpi";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
 import { loadHerdrBuild, resolveHerdrArtifact } from "../src/herdr/artifact";
+import { qaTempFiles, reapQaDaemons } from "./qa-cleanup";
 import { QaError } from "./qa-rpc";
 
 export async function runQaCommand(
@@ -66,6 +67,13 @@ export async function prepareQaWorld() {
     // The host strips BUN_* but retains XDG_CACHE_HOME.
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(scratch, "bun-cache"),
     XDG_CACHE_HOME: join(scratch, "xdg-cache"),
+    TMPDIR: join(scratch, "tmp"),
+  };
+  await mkdir(environment.TMPDIR);
+  const cleanup = {
+    daemons: [] as Awaited<ReturnType<typeof reapQaDaemons>>,
+    tempFiles: [] as string[],
+    tempFilesRemoved: false,
   };
   await mkdir(controlRoot);
   await mkdir(repository);
@@ -169,6 +177,7 @@ export async function prepareQaWorld() {
     repository,
     herdrSocket,
     environment,
+    cleanup,
     worktrees,
     workspaces,
     async cli(args: readonly string[]) {
@@ -210,16 +219,19 @@ export async function prepareQaWorld() {
           for (const binding of bindings.value) {
             ownedSessions.add(binding.durableSessionId);
             if (binding.workspaceId === null) continue;
-            if (
-              binding.checkout !== null &&
-              (binding.checkout.originalRepoRoot !== repository ||
-                !binding.cwd.startsWith(`${controlRoot}/.omo/worktrees/`))
-            ) {
+            const ownedClone =
+              binding.checkout?.kind === "owned-clone" &&
+              binding.cwd.startsWith(`${controlRoot}/.omo/checkouts/`);
+            const linkedWorktree =
+              binding.cwd.startsWith(`${controlRoot}/.omo/worktrees/`) &&
+              (binding.checkout?.originalRepoRoot === repository ||
+                binding.checkout?.originalRepoRoot.startsWith(`${controlRoot}/.omo/checkouts/`));
+            if (binding.checkout !== null && !ownedClone && !linkedWorktree) {
               throw new QaError(
                 `Refusing to remove a worktree outside the QA fixture: ${binding.cwd}`,
               );
             }
-            const ledger = binding.checkout === null ? workspaces : worktrees;
+            const ledger = binding.checkout === null || ownedClone ? workspaces : worktrees;
             if (!ledger.includes(binding.workspaceId)) ledger.push(binding.workspaceId);
           }
         } finally {
@@ -252,7 +264,8 @@ export async function prepareQaWorld() {
               (session.durableSessionId !== undefined &&
                 ownedSessions.has(session.durableSessionId)) ||
               session.cwd === controlRoot ||
-              session.cwd.startsWith(`${controlRoot}/.omo/worktrees/`);
+              session.cwd.startsWith(`${controlRoot}/.omo/worktrees/`) ||
+              session.cwd.startsWith(`${controlRoot}/.omo/checkouts/`);
             if (session.status !== "open" || !owned || !session.sessionPath) continue;
             // Hold our attachment while Herdr closes the frontend; never reopen a deleted cwd.
             const opened = await client.openSession({
@@ -311,12 +324,15 @@ export async function prepareQaWorld() {
         if (stopped.code !== 0) failures.push(`OMO host stop: ${stopped.stdout} ${stopped.stderr}`);
       }
       await run(["session", "delete", sessionName, "--json"]);
+      cleanup.daemons = await reapQaDaemons(scratch);
+      cleanup.tempFiles = await qaTempFiles(environment.TMPDIR);
       if (failures.length) {
         throw new QaError(
           `Cleanup failures; fixture retained at ${scratch}:\n${failures.join("\n")}`,
         );
       }
       await rm(scratch, { recursive: true, force: true });
+      cleanup.tempFilesRemoved = true;
       console.log("CLEANUP: QA worktrees, workspaces, Herdr server, OMO host and fixture removed");
     },
   };

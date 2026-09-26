@@ -4,12 +4,12 @@ import { dirname, join } from "node:path";
 import type { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import { modelForRole } from "../src/core/policy";
-import { bindingSchema, runtimeIdentitySchema } from "../src/core/schema";
+import { bindingSchema, runtimeIdentitySchema, scopeSnapshotSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
 import { attach, idle } from "./qa-hierarchy";
 import { QaError } from "./qa-rpc";
-import { prepareQaWorld } from "./qa-world";
+import { prepareQaWorld, runQaCommand } from "./qa-world";
 
 const mode = process.argv[2];
 if (mode !== "happy" && mode !== "failed-node") {
@@ -83,6 +83,7 @@ const evidence: {
   result: string;
   scratch: string;
   cleanup: string;
+  ownedCleanup: typeof world.cleanup;
   bindings?: unknown;
   packet?: unknown;
   key?: unknown;
@@ -102,6 +103,7 @@ const evidence: {
   result: "FAILED",
   scratch: world.scratch,
   cleanup: "pending",
+  ownedCleanup: world.cleanup,
 };
 let failure: unknown;
 let stopEvents: (() => void) | undefined;
@@ -115,13 +117,46 @@ const invoke = async (args: readonly string[]): Promise<unknown> => {
   return success.parse(JSON.parse(result.stdout)).value;
 };
 try {
+  const guidance =
+    "# Isolated OLW workflow QA\nA role initialization brief is not a task. Acknowledge it in one sentence and end the turn without tools, todos, goals, onboarding or discovery. Act only on the explicit issue packet. No live Linear, GitHub, remote or global-settings writes. Model-created temporary files must stay under TMPDIR. Workers use only their explicitly assigned file scope.\n";
+  await writeFile(join(world.controlRoot, "AGENTS.md"), guidance);
+  await writeFile(join(world.repository, "AGENTS.md"), guidance);
+  const guidanceCommit = await runQaCommand(
+    ["git", "add", "AGENTS.md"],
+    world.repository,
+    world.environment,
+  );
+  if (guidanceCommit.code !== 0) throw new QaError(guidanceCommit.stderr);
+  const committed = await runQaCommand(
+    [
+      "git",
+      "-c",
+      "user.name=OLW QA",
+      "-c",
+      "user.email=qa@localhost",
+      "commit",
+      "-m",
+      "test: isolate workflow QA guidance",
+    ],
+    world.repository,
+    world.environment,
+  );
+  if (committed.code !== 0) throw new QaError(committed.stderr);
   const anchor = await herdr.createWorkspace(world.repository, "QA focus anchor");
   world.workspaces.push(anchor.workspaceId);
   const baseline = await herdr.snapshot();
   const fixturePath = join(world.scratch, "scope.json");
+  const fixture = scopeSnapshotSchema.parse(
+    JSON.parse(await readFile(join(world.installRoot, "tests/fixtures/scope.json"), "utf8")),
+  );
+  // This regression exercises the explicit local --repo route, not owned remote
+  // clones. Never inherit the shared fixture's example GitHub repository mapping.
   await writeFile(
     fixturePath,
-    await readFile(join(world.installRoot, "tests/fixtures/scope.json"), "utf8"),
+    JSON.stringify({
+      ...fixture,
+      projects: fixture.projects.map(({ repository: _repository, ...project }) => project),
+    }),
   );
   const { digest } = z
     .object({ digest: z.string() })
@@ -210,7 +245,9 @@ try {
       state.model?.id !== tuple[1] ||
       state.thinkingLevel !== tuple[2]
     ) {
-      throw new QaError(`Wrong startup model or non-idle role: ${binding.assignment.role}`);
+      throw new QaError(
+        `Wrong startup model or non-idle role: ${binding.assignment.role}: ${JSON.stringify({ isStreaming: state.isStreaming, provider: state.model?.provider, model: state.model?.id, thinking: state.thinkingLevel, expected: tuple })}`,
+      );
     }
     const identity = requireValue(
       runtimeIdentitySchema,

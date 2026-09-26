@@ -38,12 +38,16 @@ export async function attach(binding: Binding): Promise<RpcClient> {
 export async function idle(client: RpcClient): Promise<void> {
   const settled = Promise.withResolvers<void>();
   const timer = setTimeout(() => settled.reject(new QaError("Role did not settle")), 120000);
+  const inspect = async () => {
+    const state = await client.getState();
+    if (!state.isStreaming && state.pendingMessageCount === 0) settled.resolve();
+  };
   const stop = client.onEvent((event) => {
-    if (event.type === "agent_end") settled.resolve();
+    if (event.type === "agent_end" || event.type === "agent_settled" || event.type === "agent_idle")
+      void inspect().catch(settled.reject);
   });
   try {
-    const state = await client.getState();
-    if (!state.isStreaming) settled.resolve();
+    await inspect();
     await settled.promise;
   } finally {
     clearTimeout(timer);

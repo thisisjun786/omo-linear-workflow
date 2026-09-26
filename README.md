@@ -50,14 +50,17 @@ copy provider credentials. Account logins are managed in opencodex.
 ## Contributing and releases
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers issues, focused PRs, verification and
-review expectations; GitHub supplies bug/feature forms and a PR template.
-[Version and release policy](docs/releases.md) defines SemVer, `vVERSION` tags,
+review expectations; the policies under [docs/policy](docs/policy/pull-requests.md)
+state the branch rules: PRs target `dev` and merge with a merge commit, `main`
+is the released source, and only an owner-authorized release advances it.
+GitHub supplies bug/proposal forms and a PR template.
+[Version and release policy](docs/policy/releases.md) defines SemVer, `vVERSION` tags,
 source-only releases, upgrades and rollback. [CHANGELOG.md](CHANGELOG.md) holds
 release notes. `bun run release:check` validates the package version and notes.
 CI runs without provider credentials and includes the required native Herdr
-build and an isolated installation smoke test. A maintainer-pushed version tag
+build and an isolated installation smoke test. An owner-pushed version tag
 runs those checks before publishing a GitHub release. The clone above installs
-`main`; add `--branch v0.1.0` to install the first release instead. See
+`main`, the latest released commit; add `--branch v0.1.0` to install the first release instead. See
 [GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)
 for published versions and source archives.
 

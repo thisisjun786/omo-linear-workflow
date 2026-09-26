@@ -1,0 +1,27 @@
+name: Feature or design proposal
+description: Describe a problem worth solving and the outcome you want.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Write the title and body in English.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+      description: Describe who is affected and what is difficult or missing today. Concrete situations beat abstract ones.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What would a good outcome look like?
+      description: Explain what the operator could do and how we would know the change helped. Describe behavior, not implementation, unless you already have a design.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Approaches and constraints
+      description: Which part of OLW this touches (CLI, Herdr runtime, model routing, skills, docs), anything it must not change, alternatives, or related issues. Check AGENTS.md if you are unsure whether it conflicts with an existing contract.

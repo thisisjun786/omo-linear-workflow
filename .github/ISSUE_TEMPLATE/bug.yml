@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a problem with behavior, documentation, or configuration.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write the title and body in English.
+
+        Search existing issues first. Strip API keys, OAuth tokens and anything from `~/.opencodex/` before pasting logs or config. For sensitive findings, follow [Security](https://github.com/thisisjun786/omo-linear-workflow/blob/main/SECURITY.md) instead of posting details here.
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Describe the actual result and how it affects you. Include the exit code if the CLI returned one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: And where it's documented, if you know.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: Exact commands in order. Use `--fixture` and the QA scripts where possible so nobody has to touch a real Linear workspace. If it is intermittent or you cannot reproduce it, say so.
+      placeholder: |
+        1. bun run build
+        2. bun run cli -- scope import --file tests/fixtures/scope.json --fixture --json
+        3. Observe...
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Version and environment
+      description: OLW version (`package.json` or commit SHA), OS and architecture, and Bun/pnpm/Node/git versions. Add Rust and Zig versions for Herdr build problems, OMO and opencodex versions for routing problems.
+      placeholder: "0.1.0, Linux x64, bun 1.4.0, pnpm 10.33.3, node 24.20.0"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Relevant terminal output, `doctor --json` or `status --json` output, links or screenshots. Remove secrets and personal data.
+      render: shell

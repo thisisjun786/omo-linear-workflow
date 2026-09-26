@@ -22,6 +22,17 @@ const catalogSchema = z.object({
 const providerCatalogSchema = z.object({
   models: z.array(z.object({ id: z.string().min(1) })).min(1),
 });
+
+// omo-ai installs under bun as a generated shell shim that records its entry script.
+const SHIM_ENTRY = /^# entry: (\/\S+\/bin\/omo\.js)$/m;
+
+/** Package root of the global omo-ai install, through a symlinked bin or bun's launcher shim. */
+export async function upstreamPackageRoot(upstream: string): Promise<string> {
+  const target = await realpath(upstream);
+  const head = (await readFile(target, "utf8")).slice(0, 1024);
+  const entry = head.startsWith("#!/bin/sh") ? SHIM_ENTRY.exec(head)?.[1] : undefined;
+  return dirname(dirname(entry === undefined ? target : await realpath(entry)));
+}
 export interface SyncOptions {
   readonly upstream: string;
   readonly configPath: string;
@@ -49,7 +60,7 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   if (!options.check) await recoverRouting(options.stateDir);
   else if (await optionalText(join(options.stateDir, "pending.json")))
     throw new RoutingError("An interrupted publication needs sync before a read-only check");
-  const root = dirname(dirname(await realpath(options.upstream)));
+  const root = await upstreamPackageRoot(options.upstream);
   const [packageText, source, configText, previousText] = await Promise.all([
     readFile(join(root, "package.json"), "utf8"),
     readFile(join(root, "plugin/extensions/omo-task.js"), "utf8"),

@@ -170,9 +170,18 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   return receipt;
 }
 
+function routedModels(route: unknown): string[] {
+  if (typeof route === "string") return [route];
+  if (Array.isArray(route)) return route.flatMap(routedModels);
+  if (typeof route !== "object" || route === null) return [];
+  const { model, models, fallback_models } = route as Record<string, unknown>;
+  return [model, models, fallback_models].flatMap(routedModels);
+}
+
 /**
- * Whether the routing a failed preflight would fall back to is actually installed: an
- * opencodex receipt whose managed routes (user overrides aside) are all still in the config.
+ * Whether a failed preflight may fall back to the installed routing: an opencodex receipt,
+ * and every route it manages still present and choosing only opencodex models (manual
+ * opencodex edits made since the last sync are fine).
  */
 export async function retainedRoutingInstalled(
   configPath: string,
@@ -187,14 +196,15 @@ export async function retainedRoutingInstalled(
     const receipt = receiptSchema.parse(JSON.parse(receiptText));
     if (receipt.provider !== ROUTING_PROVIDER) return false;
     const config = configSchema.parse(Bun.JSON5.parse(configText));
-    const overridden = new Set(receipt.overrides);
-    return (["categories", "agents"] as const).every((scope) =>
-      Object.entries(receipt.managed[scope]).every(([name, route]) => {
-        if (overridden.has(`${scope}.${name}`)) return true;
+    return (Object.keys(receipt.managed) as Array<keyof typeof receipt.managed>).every((scope) =>
+      Object.entries(receipt.managed[scope]).every(([name, managed]) => {
         const actual = config[scope]?.[name];
-        return (
-          actual !== undefined && JSON.stringify(fields(actual)) === JSON.stringify(fields(route))
-        );
+        if (actual === undefined) return false;
+        const models = routedModels(fields(actual));
+        // A route that inherits (managed without models) may stay empty; any chosen model
+        // must still go through opencodex.
+        if (models.length === 0) return routedModels(fields(managed)).length === 0;
+        return models.every((model) => model.startsWith(`${ROUTING_PROVIDER}/`));
       }),
     );
   } catch {

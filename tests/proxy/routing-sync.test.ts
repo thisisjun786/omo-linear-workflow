@@ -96,14 +96,21 @@ async function fixture() {
 }
 
 describe("retained routing for a fail-open launch", () => {
-  test("is installed only while every managed route is still in the configuration", async () => {
+  test("is installed only while every managed route still routes through opencodex", async () => {
     const world = await fixture();
     const { configPath, stateDir } = world.options;
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
     await syncRouting(world.options);
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(true);
     const adopted = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      adopted.replace(/"opencodex\/gpt-6-luna"/g, '"opencodex/gpt-6-sol"'),
+    );
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(true);
     await writeFile(configPath, adopted.replace(/"opencodex\/gpt-6-luna"/g, '"native/luna"'));
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+    await writeFile(configPath, adopted.replace('"quick"', '"quick-renamed"'));
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
     await rm(configPath);
     expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);

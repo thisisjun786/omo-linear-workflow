@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { runCli } from "../src/cli";
 import type {
   Assignment,
   Binding,
@@ -577,6 +578,7 @@ async function world() {
   };
   return {
     control,
+    deps,
     orchestrator,
     registry,
     create,
@@ -598,6 +600,166 @@ async function world() {
     },
   };
 }
+
+test.each(["manager", "same-designation supervisor", "cross-designation supervisor"] as const)(
+  "initialization uses the %s owner's real authorization, including reconcile",
+  async (kind) => {
+    const w = await world();
+    let owner: Binding;
+    if (kind === "manager") {
+      owner = w.registry((r) =>
+        activate(
+          r,
+          value(
+            reserve(
+              r,
+              "scope-free-manager",
+              {
+                version: 1,
+                source: "linear-export",
+                initiative: null,
+                projects: [],
+                decisionRefs: [],
+              },
+              { role: "manager" },
+              { id: "scope-free-approval" },
+            ),
+          ),
+        ),
+      );
+      w.identities.set(owner.id, {
+        durableSessionId: owner.durableSessionId,
+        sessionPath: owner.sessionPath ?? "",
+        cwd: owner.cwd,
+        ...modelForRole("manager"),
+        extensionProtocol: 2,
+      });
+      w.workspaces.set(owner.workspaceId ?? "", {
+        workspaceId: owner.workspaceId ?? "",
+        rootPaneId: owner.paneId ?? "",
+        cwd: owner.cwd,
+      });
+      // This fixture's owner shares the same native host as launched parents.
+      const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+      db.query("UPDATE bindings SET json = json_set(json, '$.omoSocket', ?) WHERE id = ?").run(
+        join(w.control, ".omo/state/omo.sock"),
+        owner.id,
+      );
+      db.close();
+    } else {
+      owner = await w.createManager();
+    }
+    const parent = value(
+      kind === "same-designation supervisor"
+        ? await w.orchestrator.createParent({
+            supervisorId: owner.id,
+            projectId: "project",
+            repo: w.control,
+            base: "main",
+          })
+        : await w.create(),
+    ).binding;
+    expect(parent.initialization.state).toBe("accepted");
+    if (kind === "cross-designation supervisor") {
+      expect(
+        await runCli(
+          [
+            "--root",
+            w.control,
+            "--herdr-socket",
+            "/fixture/herdr",
+            "parent",
+            "link",
+            "--parent",
+            parent.id,
+            "--supervisor",
+            owner.id,
+            "--json",
+          ],
+          w.deps,
+        ),
+      ).toBe(0);
+    }
+    const linked = w.registry((r) => value(r.get(parent.id)));
+    expect(linked.assignment).toMatchObject({ ownerBindingId: owner.id });
+    expect(linked.designationId).toBe(parent.designationId);
+    expect(linked.designationId === owner.designationId).toBe(
+      kind === "same-designation supervisor",
+    );
+    const assertEnvelope = () => {
+      const record = w.registry((r) => value(r.delivery(`initialization:${parent.id}`)));
+      expect(record).toMatchObject({
+        state: "accepted",
+        envelope: {
+          fromBindingId: owner.id,
+          toBindingId: parent.id,
+          designationId: owner.designationId,
+          snapshotDigest: w.registry((r) => value(r.designation(owner.designationId)))
+            .snapshotDigest,
+        },
+      });
+      expect(w.registry((r) => r.authorize(owner.durableSessionId, record.envelope))).toMatchObject(
+        { ok: true },
+      );
+      expect(
+        w.registry((r) =>
+          r.authorize(owner.durableSessionId, {
+            ...record.envelope,
+            designationId: "forged-approval",
+          }),
+        ),
+      ).toMatchObject({ ok: false, error: { code: "foreign_designation" } });
+      expect(
+        w.registry((r) =>
+          r.authorize(owner.durableSessionId, {
+            ...record.envelope,
+            snapshotDigest: "forged-snapshot",
+          }),
+        ),
+      ).toMatchObject({ ok: false, error: { code: "digest_mismatch" } });
+    };
+    if (kind !== "cross-designation supervisor") assertEnvelope();
+    // Persist a pre-initialization recovery fixture with the actual management
+    // link. Reconcile must build a new envelope, not replay a stored receipt.
+    const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+    db.query("DELETE FROM delivery_attempts WHERE message_id = ?").run(
+      `initialization:${parent.id}`,
+    );
+    db.query("DELETE FROM deliveries WHERE message_id = ?").run(`initialization:${parent.id}`);
+    const recovering: Binding = {
+      ...linked,
+      launchState: "provisioning",
+      initialization: { state: "pending", text: null },
+    };
+    db.query("UPDATE bindings SET launch_state = ?, json = ? WHERE id = ?").run(
+      recovering.launchState,
+      JSON.stringify(recovering),
+      parent.id,
+    );
+    db.close();
+    const launchCount = w.launches.length;
+    expect(await w.orchestrator.reconcile({ projectId: "project" })).toMatchObject({
+      ok: true,
+      value: { observed: 1 },
+    });
+    assertEnvelope();
+    expect(w.launches).toHaveLength(launchCount);
+    expect(w.registry((r) => value(r.get(parent.id)))).toMatchObject({
+      launchState: "ready",
+      initialization: { state: "accepted" },
+    });
+    // Sender approval must not bypass the target's contact guard.
+    w.registry((r) => value(r.setContactState(parent.id, "paused")));
+    expect(
+      w.registry((r) =>
+        r.authorize(
+          owner.durableSessionId,
+          value(r.delivery(`initialization:${parent.id}`)).envelope,
+        ),
+      ),
+    ).toMatchObject({ ok: false, error: { code: "contact_paused" } });
+  },
+);
 
 test("already-activated protocol-1 bindings remain valid during reconciliation", async () => {
   const w = await world();

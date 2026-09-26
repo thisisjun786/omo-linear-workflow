@@ -2873,14 +2873,14 @@ export class Orchestrator {
       }
       const owner = this.#binding(binding.assignment.ownerBindingId);
       if (!owner.ok) return this.#finishInitialization(binding.id, "uncertain", owner.error);
-      const context = await this.#context(binding);
+      const context = await this.#context(owner.value);
       if (!context.ok) return this.#finishInitialization(binding.id, "uncertain", context.error);
       const delivery = await this.#deliver(owner.value, {
         version: 1,
         id: messageId,
         fromBindingId: owner.value.id,
         toBindingId: binding.id,
-        designationId: binding.designationId,
+        designationId: owner.value.designationId,
         snapshotDigest: context.value.designation.snapshotDigest,
         kind: "instruction",
         ...this.#packetDeliverable(binding.id, "instruction"),

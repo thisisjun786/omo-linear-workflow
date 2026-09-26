@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
-import type { Assignment, Binding, DeliveryRecord, RuntimeIdentity } from "./contracts";
+import type { Assignment, Binding, ChildStage, DeliveryRecord, RuntimeIdentity } from "./contracts";
 
 export function canRetryDelivery(record: DeliveryRecord): boolean {
   return (
@@ -18,13 +18,23 @@ export function initializationMessageId(bindingId: string): string {
 export interface RoleModel {
   readonly provider: string;
   readonly modelId: string;
-  readonly thinking: "high" | "max" | "xhigh";
+  readonly thinking: "medium" | "high" | "max" | "xhigh";
+}
+
+export function modelForLaunch(role: Assignment["role"], stage: ChildStage | null): RoleModel {
+  if (role === "supervisor")
+    return { provider: "opencodex", modelId: "gpt-6-astra", thinking: "high" };
+  if (role === "parent")
+    return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
+  if (stage === "plan")
+    return { provider: "opencodex", modelId: "anthropic/claude-fable-5-1", thinking: "xhigh" };
+  if (stage === "execute")
+    return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" };
+  return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
 }
 
 export function modelForRole(role: Assignment["role"]): RoleModel {
-  if (role === "supervisor")
-    return { provider: "opencodex", modelId: "gpt-6-astra", thinking: "high" };
-  return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
+  return modelForLaunch(role, null);
 }
 
 const seedEntrySchema = z.discriminatedUnion("type", [
@@ -35,7 +45,7 @@ const seedEntrySchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("thinking_level_change"),
-    thinkingLevel: z.enum(["high", "max", "xhigh"]),
+    thinkingLevel: z.enum(["medium", "high", "max", "xhigh"]),
   }),
 ]);
 

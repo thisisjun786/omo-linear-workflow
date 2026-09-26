@@ -1,3 +1,5 @@
+export type ChildStage = "direct" | "plan" | "execute" | "research";
+
 export type Result<T> =
   | { readonly ok: true; readonly value: T }
   | {

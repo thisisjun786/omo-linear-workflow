@@ -22,6 +22,8 @@ const ROUTING_KEYS = [
   "fallback_models",
 ] as const;
 export const ROUTING_PROVIDER = "opencodex";
+// Bump when the mapping rules change, so adopted installs re-plan on their next ordinary start.
+export const ROUTING_PLAN_REVISION = 2;
 // opencodex publishes OpenAI (ChatGPT) models bare and every other service as
 // `<ocx provider>/<model>`. Keys are the upstream OMO providers for the same service.
 const OPENCODEX_NAMESPACES: Readonly<Record<string, string>> = {

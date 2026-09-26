@@ -132,6 +132,18 @@ describe("retained routing for a fail-open launch", () => {
 });
 
 describe("routing synchronization real filesystem boundary", () => {
+  test("a receipt from an older mapping revision re-plans on an ordinary start", async () => {
+    const world = await fixture();
+    await syncRouting(world.options);
+    const statePath = join(world.options.stateDir, "state.json");
+    const receipt = JSON.parse(await world.state());
+    delete receipt.planRevision;
+    await writeFile(statePath, `${JSON.stringify(receipt, null, 2)}\n`);
+    const next = await syncRouting({ ...world.options, adopt: false });
+    expect(next.generation).not.toBe(receipt.generation);
+    expect(JSON.parse(await world.state()).planRevision).toBeGreaterThan(0);
+  });
+
   test.each(["entry record", "quoted exec"] as const)(
     "a package path with spaces resolves through the %s",
     async (form) => {

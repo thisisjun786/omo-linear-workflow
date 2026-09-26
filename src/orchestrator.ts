@@ -39,6 +39,14 @@ import {
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting } from "./proxy/routing-launch";
 import { type Readiness, removeReadiness, subscribeReadiness } from "./readiness";
+import {
+  checkoutGit,
+  cloneCheckout,
+  initializeCheckout,
+  ownedCheckoutPath,
+  unpushedCommits,
+} from "./repo/checkout";
+import { fetchMirror } from "./repo/mirror";
 import { attachBinding, type NativeSession } from "./transport";
 import {
   checkUpdates,
@@ -98,8 +106,8 @@ export interface CreateSupervisorInput {
 }
 const parentLocation = {
   projectId: z.string().min(1),
-  repo: z.string().min(1),
-  base: z.string().min(1),
+  repo: z.string().min(1).optional(),
+  base: z.string().min(1).optional(),
 };
 const createParentInputSchema = z.union([
   z.strictObject({ ...parentLocation, supervisorId: z.string().min(1) }),
@@ -549,18 +557,63 @@ export class Orchestrator {
       ownerId = link.value.bindingId;
     }
     if (!context.ok) return context;
-    if (!context.value.snapshot.projects.some((entry) => entry.project.id === input.projectId))
+    const project = context.value.snapshot.projects.find(
+      (entry) => entry.project.id === input.projectId,
+    );
+    if (project === undefined)
       return failure("scope_violation", "Project is outside the approved snapshot");
-    const originalRepoRoot = resolve(input.repo);
-    const baseCommit = await this.#deps.gitTip(originalRepoRoot, input.base);
+    if (project.repository !== undefined && input.repo !== undefined)
+      return failure(
+        "invalid_arguments",
+        "--repo cannot be combined with a scope repository mapping",
+      );
+    if (project.repository === undefined && (input.repo === undefined || input.base === undefined))
+      return failure(
+        "invalid_arguments",
+        "Without a repository mapping, --repo and --base are required",
+      );
     const bindingId = this.#deps.uuid();
-    const checkout: Checkout = {
-      originalRepoRoot,
-      path: join(this.#root, ".omo/worktrees", bindingId),
-      branch: `omo/${context.value.designation.id}/projects/${input.projectId}-${bindingId}`,
-      baseBranch: input.base,
-      baseCommit,
-    };
+    const branch = `omo/${context.value.designation.id}/projects/${input.projectId}-${bindingId}`;
+    let checkout: Checkout;
+    if (project.repository !== undefined) {
+      const repository = project.repository;
+      const mirror = await fetchMirror(this.#root, repository.remote);
+      const base = input.base ?? repository.base ?? `refs/heads/${repository.defaultBranch}`;
+      const revision = base.startsWith("origin/") ? `refs/heads/${base.slice(7)}` : base;
+      const baseCommit = await checkoutGit(mirror.path, [
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${revision}^{commit}`,
+      ]);
+      const path = ownedCheckoutPath(
+        this.#root,
+        repository.remote,
+        project.project.key ?? project.project.id,
+        bindingId,
+      );
+      checkout = {
+        kind: "owned-clone",
+        remote: repository.remote,
+        receiptPath: join(this.#root, ".omo/state/checkouts", `${bindingId}.json`),
+        originalRepoRoot: path,
+        path,
+        branch,
+        baseBranch: input.base ?? repository.base ?? `origin/${repository.defaultBranch}`,
+        baseCommit,
+      };
+    } else {
+      const originalRepoRoot = resolve(input.repo ?? "");
+      const baseBranch = input.base ?? "";
+      checkout = {
+        kind: "linked-worktree",
+        originalRepoRoot,
+        path: join(this.#root, ".omo/worktrees", bindingId),
+        branch,
+        baseBranch,
+        baseCommit: await this.#deps.gitTip(originalRepoRoot, baseBranch),
+      };
+    }
     const assignment: Assignment = {
       role: "parent",
       initiativeId: context.value.snapshot.initiative?.id ?? null,
@@ -969,7 +1022,10 @@ export class Orchestrator {
       );
       if (parentWorkspace === undefined || parentWorkspace.cwd !== owner.value.cwd)
         return failure("owner_unavailable", "Parent workspace identity does not match its binding");
-      if (parentWorkspace.groupHeadWorkspaceId !== undefined) {
+      if (
+        owner.value.checkout.kind !== "owned-clone" &&
+        parentWorkspace.groupHeadWorkspaceId !== undefined
+      ) {
         if (parentWorkspace.groupHeadWorkspaceId !== parentWorkspace.workspaceId)
           return failure("owner_unavailable", "Parent workspace is not its group's head");
         grouping = { parentWorkspaceId: parentWorkspace.workspaceId };
@@ -989,6 +1045,13 @@ export class Orchestrator {
     );
     const bindingId = this.#deps.uuid();
     const checkout: Checkout = {
+      kind: "linked-worktree",
+      ...(owner.value.checkout.kind === "owned-clone"
+        ? {
+            remote: owner.value.checkout.remote,
+            receiptPath: join(this.#root, ".omo/state/checkouts", `${bindingId}.json`),
+          }
+        : {}),
       originalRepoRoot: owner.value.checkout.originalRepoRoot,
       path: join(this.#root, ".omo/worktrees", bindingId),
       branch: `omo/${owner.value.designationId}/issues/${input.issueId}-${bindingId}`,
@@ -1876,16 +1939,43 @@ export class Orchestrator {
     );
   }
 
-  public async close(bindingId: string, confirmAbsent = false): Promise<Result<Binding>> {
+  public async close(
+    bindingId: string,
+    confirmAbsent = false,
+  ): Promise<Result<Binding & { readonly unpushedCommits?: readonly string[] }>> {
     const target = this.#binding(bindingId);
     if (!target.ok) return target;
+    const inspectUnpushed = async (): Promise<Result<readonly string[] | undefined>> => {
+      if (target.value.checkout?.kind !== "owned-clone") return ok(undefined);
+      if (confirmAbsent && !existsSync(target.value.checkout.path)) return ok([]);
+      try {
+        return ok(await unpushedCommits(target.value.checkout));
+      } catch (cause) {
+        return failure(
+          "runtime_unavailable",
+          "Could not inspect unpushed commits; checkout preserved",
+          messageOf(cause),
+        );
+      }
+    };
+    const withUnpushed = (
+      result: Result<Binding>,
+      commits: readonly string[] | undefined,
+    ): Result<Binding & { readonly unpushedCommits?: readonly string[] }> =>
+      result.ok && commits !== undefined
+        ? ok({ ...result.value, unpushedCommits: commits })
+        : result;
     if (target.value.assignment.role === "child") {
       const stage = this.#withRegistry((registry) => registry.stageOf(bindingId));
       if (!stage.ok) return stage;
       if (stage.value !== null) return this.#closeLineage(target.value, confirmAbsent);
     }
     const closing = this.#withRegistry((registry) => registry.beginClose(bindingId));
-    if (!closing.ok || closing.value.launchState === "closed") return closing;
+    if (!closing.ok) return closing;
+    if (closing.value.launchState === "closed") {
+      const inspected = await inspectUnpushed();
+      return inspected.ok ? withUnpushed(closing, inspected.value) : inspected;
+    }
     const binding = closing.value;
     const context = await this.#context(binding);
     // Bindings created before readable labels used the legacy `omo-<role>-<id>` name.
@@ -1941,7 +2031,12 @@ export class Orchestrator {
         await this.#deps.terminateBinding(binding);
       }
       await removeReadiness(this.#root, binding.id);
-      return this.#withRegistry((registry) => registry.finishClose(binding.id));
+      const inspected = await inspectUnpushed();
+      if (!inspected.ok) return inspected;
+      return withUnpushed(
+        this.#withRegistry((registry) => registry.finishClose(binding.id)),
+        inspected.value,
+      );
     } catch (cause) {
       return failure(
         "runtime_unavailable",
@@ -2336,8 +2431,9 @@ export class Orchestrator {
         }
       });
       const label = roleLabel(assignment, snapshot, bindingId);
+      if (checkout?.kind === "owned-clone") await cloneCheckout(this.#root, checkout);
       const workspace =
-        checkout === null
+        checkout === null || checkout.kind === "owned-clone"
           ? await herdr.createWorkspace(cwd, label)
           : await herdr.createWorktree(
               checkout,
@@ -2360,6 +2456,7 @@ export class Orchestrator {
           await herdr.renameTab(rootTabId, "plan");
       }
       if (checkout !== null) {
+        await initializeCheckout(this.#root, checkout);
         const observedHead = await this.#deps.gitTip(checkout.path, "HEAD");
         if (observedHead !== checkout.baseCommit) {
           throw new Error(

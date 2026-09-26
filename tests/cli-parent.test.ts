@@ -161,6 +161,14 @@ test("child create help JSON lists --mode", async () => {
   });
 });
 
+test("help exposes machine-readable --repo deprecation", async () => {
+  const result = await invoke(["--help"]);
+  expect(result.output).toMatchObject({
+    ok: true,
+    value: { deprecatedOptions: { "parent create": ["--repo"] } },
+  });
+});
+
 test("standalone CLI forwards explicit approval without adding a supervisor", async () => {
   const root = await mkdtemp(join(tmpdir(), "olw-cli-parent-"));
   roots.push(root);

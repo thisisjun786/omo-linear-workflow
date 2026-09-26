@@ -307,6 +307,7 @@ export async function runCli(
             "close",
             "reconcile",
           ],
+          deprecatedOptions: { "parent create": ["--repo"] },
           options: {
             manage: "[--json]",
             "update check": "[--tag omo-ai=beta] [--tag @code-yeongyu/senpi=latest] [--json]",
@@ -318,7 +319,7 @@ export async function runCli(
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
             "parent create":
-              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID --repo PATH --base REF (standalone parents link to the ready manager unless --no-manager)",
+              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID [--repo PATH (deprecated; unmapped projects only)] [--base REF] (mapped projects use an owned clone; standalone parents link to the ready manager unless --no-manager)",
             "parent link": "--parent BINDING --supervisor BINDING (supervisor or manager)",
             "parent unlink": "--parent BINDING",
             "child create": "--parent BINDING --issue ID [--mode direct|planned|research]",
@@ -422,8 +423,6 @@ export async function runCli(
       ].some((key) => options[key] !== undefined);
       const values = requireOptions(options, [
         "project",
-        "repo",
-        "base",
         ...(supervisorId === undefined ? ["scope-digest", "designation"] : []),
       ]);
       if (supervisorId !== undefined && standaloneFlags)
@@ -432,8 +431,12 @@ export async function runCli(
       else {
         const location = {
           projectId: values.value["project"] ?? "",
-          repo: values.value["repo"] ?? "",
-          base: values.value["base"] ?? "",
+          ...(stringOption(options, "repo") === undefined
+            ? {}
+            : { repo: stringOption(options, "repo") }),
+          ...(stringOption(options, "base") === undefined
+            ? {}
+            : { base: stringOption(options, "base") }),
         };
         result = await orchestrator.createParent(
           supervisorId !== undefined

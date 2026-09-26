@@ -25,7 +25,13 @@ export interface ScopeSnapshot {
   readonly projects: Array<{
     readonly project: Ref;
     readonly issues: Ref[];
-    readonly repository?: { readonly remote: string; readonly defaultBranch: string } | undefined;
+    readonly repository?:
+      | {
+          readonly remote: string;
+          readonly defaultBranch: string;
+          readonly base?: string | undefined;
+        }
+      | undefined;
   }>;
   readonly decisionRefs: Ref[];
 }
@@ -80,6 +86,11 @@ export interface StageLineage {
   }>;
 }
 export interface Checkout {
+  /** Missing on legacy callers; persisted rows decode as linked-worktree. */
+  readonly kind?: "linked-worktree" | "owned-clone";
+  readonly remote?: string | undefined;
+  readonly receiptPath?: string | undefined;
+  /** User repository for legacy bindings; owned clone root for new mapped bindings. */
   readonly originalRepoRoot: string;
   readonly path: string;
   readonly branch: string;

@@ -15,6 +15,7 @@ export const scopeSnapshotSchema = z.strictObject({
         .strictObject({
           remote: z.url({ protocol: /^(https|ssh|file)$/ }),
           defaultBranch: text,
+          base: text.optional(),
         })
         .optional(),
     }),
@@ -48,6 +49,9 @@ export const assignmentSchema = z.discriminatedUnion("role", [
   }),
 ]);
 export const checkoutSchema = z.strictObject({
+  kind: z.enum(["linked-worktree", "owned-clone"]).default("linked-worktree"),
+  remote: z.url({ protocol: /^(https|ssh|file)$/ }).optional(),
+  receiptPath: text.optional(),
   originalRepoRoot: text,
   path: text,
   branch: text,

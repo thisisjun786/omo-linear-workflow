@@ -15,6 +15,10 @@ published.
 
 ### Added
 
+- New mapped parents run in OLW-owned, hardlinked clones of repository mirrors, with readable
+  per-project Herdr groups and child worktrees owned by the parent clone. Explicit private local-file
+  copies, setup deadlines/logs/receipts, and close-time unpushed-commit reports are supported.
+  Legacy checkouts remain unchanged; `parent create --repo` is deprecated and conflicts with a mapping.
 - Scope projects can declare a target Git remote and default branch. OLW maintains one locked,
   fetch-only mirror per remote and exposes mirror status and explicit fetching through `olw doctor`
   and `olw repo list|fetch`.

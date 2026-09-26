@@ -1,6 +1,6 @@
 # Two-stage issue children and question escalation
 
-Status: design agreed with the user on 2026-09-26, except the manager launch path (see Open decisions). Not implemented.
+Status: design agreed with the user on 2026-09-26. Not implemented.
 
 ## What the user asked for
 
@@ -48,7 +48,7 @@ The parent picks the mode per issue packet with a new required field `execution_
 |---|---|---|
 | `direct` | Small, well-specified development work. JUN-273, 274 and 275 were all this size. | one tab: Opus 5.5 xhigh (today's model), mass-ulw |
 | `planned` | Large or ambiguous development work: several components, open design decisions, cross-module changes. | plan tab (Fable 5.1 xhigh, ulw-plan), then execute tab (Opus 5.5 medium, ulw-execute + mass-ulw) |
-| `research` | The deliverable is findings, not code. | one tab: Opus 5.5 xhigh, ulw-research |
+| `research` | The deliverable is findings, not code. | one tab: Opus 5.5 xhigh, ulw-research. Its collection can run as mass-ulw DAG waves (ulw-research Phase 1 "mass research" path) inside the same tab. |
 
 The child may push back: if the plan stage finds the work smaller than expected, it reports "no plan needed" and the parent resends as `direct`. The child never switches its own mode.
 
@@ -77,17 +77,29 @@ Rules:
 - **Answers go back down the same path, by question ID.** When the user replies in the parent session, the parent turns it into an `answer` to the child. One question ID gets one answer, and replays are deduplicated like reports.
 - **No waiting loops.** A role that asked ends its turn. It is woken by the `answer` delivery, which is the same event-driven model as today.
 
+### The OLW shared host
+
+An OMO session has two parts: the **agent engine** (model calls, tools, session history) and the **TUI** you type into. Normally each `omo` you start runs both itself.
+
+OLW starts one long-lived engine process, the **shared host**, on its own socket `<control root>/.omo/state/omo.sock` (`omo host ensure`, `src/orchestrator.ts` `defaultEnsureHost`; profile `src/host-profile.ts`). Every role session runs its engine inside that host. The Herdr pane only shows a TUI attached to it. On 2026-09-26 the host (pid 160596) reported 4 attached interactive sessions: the tally parent and its three children.
+
+This is what makes OLW messaging work:
+
+- A role's `send` or `report` becomes a native `thread_send` to the target session's durable ID. The host delivers it and wakes the target. The OLW extension in the host records the message ID, receipt and deduplication in the registry.
+- Delivery only reaches sessions in the same host. `src/core/store.ts` rejects other routes with `host_mismatch`.
+- Sessions survive a closed pane or a detached TUI, because the engine lives in the host rather than in the pane.
+
+An ordinary `omo` session, like the one the user directs today, runs its own engine. It is not in the OLW host (its environment has no `OMO_RPC_SOCKET`), so an OLW role cannot deliver a message to it.
+
 ### The management session
 
-The user's rule is: "the session I'm directing is the management session". Today that cannot be done directly, for two reasons found in the code:
+User decisions: the session the user directs is the management session. It is **not bound to one initiative**. The future LINA app is expected to manage several initiatives and many parent sessions from one conversation, so the manager's scope stays open-ended.
 
-- **Native delivery only works inside the OLW host.** `src/core/store.ts` rejects a route whose endpoints are on different native hosts (`host_mismatch`: `sender.omoSocket !== target.omoSocket`). Role sessions run on the OLW shared host (`OMO_RPC_SOCKET=<root>/.omo/state/omo.sock`). An ordinary `omo` session, like the one the user directs today, runs on its own host: its environment has no `OMO_RPC_SOCKET` and no `OMO_ENABLE_SHARED_HOST`. A parent's question cannot reach it natively.
-- **The supervisor role is bound to one Linear initiative.** `createSupervisor` requires a designated initiative (`src/orchestrator.ts`), and a project without an initiative cannot have a manager.
-
-Proposed change:
-
-- Generalize the supervisor into a **manager** binding whose scope is the set of projects (and optional initiative) it manages. `parent create` run from a manager links the new parent to it automatically.
-- Add `olw manage`. It opens the user's directing session as a manager TUI on the OLW host, in a Herdr workspace named for its scope, with the user's normal default model. From then on, the user directs work from that session. Parents' questions and reports arrive there as native messages, and the session answers or asks the user.
+- **`olw manage`** opens the user's directing session inside the OLW host: a TUI in a Herdr workspace named "manager", with the user's normal default model. The user directs work from it. Parents' questions and reports arrive there natively, and the manager answers what it can and asks the user the rest.
+- **Manager binding without a fixed scope.** It has no initiative or project assignment. It gains a management link to each parent when that parent is created from it (`parent create` run by the manager links automatically) or linked explicitly. The one-supervisor-per-initiative rule does not apply to it.
+- **Authority stays with each parent's own approval.** A manager link grants contact (questions, answers, reports and instructions to linked parents). It never widens a parent's scope: approval stays on the parent's designation and snapshot digest, as `parent link` already works today.
+- **One manager at a time, by default.** A second `olw manage` reattaches to the existing manager session instead of creating another. Several managers can be allowed later if LINA needs them.
+- **Existing initiative supervisors** remain valid, and existing bindings are not migrated. A manager is a new, more general form of the same role.
 - An arbitrary running `omo` session cannot be adopted as the manager without restarting it inside the OLW host. Relaying through `herdr agent prompt` into a foreign session was considered and rejected: it has no delivery receipt and no deduplication.
 
 ## Implementation units (in dependency order)
@@ -97,7 +109,7 @@ Proposed change:
 3. **Orchestrator:** add `stage start` to launch a stage in the existing child worktree. It creates a new Herdr tab in the child workspace, a new session, the stage model and the first prompt. Close the previous stage's contact after its hand-off and keep its tab.
 4. **Messages:** add the `question` and `answer` kinds, their authorization routes, and IDs and deduplication. Add the CLI commands `ask` and `answer`.
 5. **Extension:** in bound children and parents, intercept `ask_user_question` and turn it into a `question`.
-6. **Manager:** generalize the supervisor into a project-scoped manager binding, add `olw manage`, and link new parents to the calling manager.
+6. **Manager:** add a scope-free manager binding and `olw manage` (open or reattach the directing session on the OLW host), link parents created from it, and route parent questions and reports to it.
 7. **Brief and skills:** add `execution_mode` to the packet. Add mode-specific child briefs and update `olw-run` for the parent's mode choice, answering duties and escalation.
 8. **Tests** for each unit, plus one real run: a `planned` issue whose plan stage asks one question the parent must escalate.
 
@@ -114,7 +126,4 @@ Checked on 2026-09-26 through the opencodex loopback `/v1/chat/completions`: `an
 3. The parent approves child plans by itself.
 4. Stages share one worktree and split into Herdr tabs (plan, execute).
 5. A management session always exists: it is the session the user directs.
-
-## Open decisions
-
-1. The management session must run on the OLW host. Is it acceptable that the user starts the directing session with `olw manage`, rather than any ordinary `omo` session becoming the manager?
+6. The manager is not bound to an initiative. It can manage several initiatives and parents; `olw manage` opens it.

@@ -1,41 +1,104 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA on dev with successful push CI
+        required: true
+        type: string
+      version:
+        description: Version without v prefix, such as 0.2.0 or 0.2.0-rc.1
+        required: true
+        type: string
+      dry_run:
+        description: Validate only; do not create a tag, release, or update main
+        default: true
+        type: boolean
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  RELEASE_SHA: ${{ inputs.sha }}
+  RELEASE_VERSION: ${{ inputs.version }}
 
 jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require repository owner dispatch
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [[ "$ACTOR" != "$OWNER" ]]; then
+            echo '::error::Only the repository owner may authorize a release.'
+            exit 1
+          fi
+
   validate:
-    uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
-  publish:
-    needs: validate
+    needs: authorize
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Checkout the requested source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
         with:
           bun-version: 1.4.0
-      - name: Verify tag and extract matching notes
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: bun scripts/release.ts --tag "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
-      - name: Publish source-only GitHub release
+      - name: Validate source, CI, version, and changelog
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: scripts/release-publish.sh validate
+      - name: Preserve validated release notes
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: validate
+    if: inputs.dry_run == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require dedicated release token
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          if [[ "$RELEASE_TAG" == *-rc.* ]]; then
-            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --prerelease
-          else
-            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          if [[ -z "$RELEASE_TOKEN" ]]; then
+            echo '::error::Configure RELEASE_TOKEN with Contents and Workflows read/write and Actions read.'
+            exit 1
           fi
+      - name: Checkout the validated source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Restore validated release notes
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}
+      - name: Tag, publish, and fast-forward main
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: |
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          scripts/release-publish.sh publish

@@ -1,19 +1,19 @@
 # Continuous Integration
 
-The [CI workflow](../../.github/workflows/ci.yml) runs one job, `validate`, on Linux x64. It runs the same commands a contributor runs locally, plus the native Herdr build and an installer smoke test.
+The [CI workflow](../../.github/workflows/ci.yml) runs its main job, `validate`, on Linux x64. It runs the same commands a contributor runs locally, plus the native Herdr build and an installer smoke test. A metadata-only policy job separately rejects pull requests into `main`.
 
 ## When it runs
 
 | Event | Coverage |
 | --- | --- |
 | Pull request | Every PR, regardless of changed paths. The required result for merging into `dev`. |
+| Push to `dev` | Every merged `dev` commit, providing exact-commit release evidence. |
 | Push to `main` | The released source after a release advances `main`. |
 | Manual dispatch | The same checks on any branch. |
-| Release | The [release workflow](releases.md) calls this workflow before publishing. |
 
-Every PR runs the full job. There's no path-based selection: a documentation-only PR still installs dependencies and builds Herdr. New runs cancel obsolete runs for the same PR or branch, except when called from the release workflow. The job has a 60 minute timeout.
+Every PR runs the full `validate` job. There's no path-based selection: a documentation-only PR still installs dependencies and builds Herdr. New runs cancel obsolete runs for the same PR or branch, except reusable workflow calls. The job has a 60 minute timeout. A separate metadata-only `reject-main-pr` job fails when a PR targets `main`; it does not check out or execute contributor code.
 
-Today the workflow's push trigger lists `main` but not `dev`, so a merge into `dev` doesn't rerun CI on the merge commit. The PR run against GitHub's merge candidate is the evidence for that change. See the release policy for what a release verifies.
+A merge into `dev` starts a push run for the exact merge commit. The release workflow requires a completed, successful `CI` push run on `dev` whose `head_sha` is exactly the requested release SHA; a PR run or a successful run for another commit is not release evidence.
 
 ## What runs
 

@@ -35,6 +35,9 @@ published.
 
 ### Changed
 
+- CI now records exact-commit results for every `dev` merge and rejects pull requests into
+  `main`. Owner-dispatched releases validate that evidence, publish an immutable source tag and
+  GitHub release, then fast-forward `main` with dedicated release credentials.
 - Repository policies follow `docs/policy/`: PRs target `dev` and merge with a merge
   commit, `main` only advances to released commits, and issue and PR text is in
   English. Issue forms are now `bug` and `proposal`.

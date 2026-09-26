@@ -11,7 +11,11 @@ import {
   receiptSchema,
   recoverRouting,
 } from "../../src/proxy/routing-config";
-import { type SyncOptions, syncRouting } from "../../src/proxy/routing-sync";
+import {
+  retainedRoutingInstalled,
+  type SyncOptions,
+  syncRouting,
+} from "../../src/proxy/routing-sync";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -91,6 +95,24 @@ async function fixture() {
   };
 }
 
+describe("retained routing for a fail-open launch", () => {
+  test("is installed only while every managed route is still in the configuration", async () => {
+    const world = await fixture();
+    const { configPath, stateDir } = world.options;
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+    await syncRouting(world.options);
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(true);
+    const adopted = await readFile(configPath, "utf8");
+    await writeFile(configPath, adopted.replace(/"opencodex\/gpt-6-luna"/g, '"native/luna"'));
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+    await rm(configPath);
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+    await writeFile(configPath, adopted);
+    await writeFile(join(stateDir, "state.json"), "{not json");
+    expect(await retainedRoutingInstalled(configPath, stateDir)).toBe(false);
+  });
+});
+
 describe("routing synchronization real filesystem boundary", () => {
   test.each(["entry record", "quoted exec"] as const)(
     "a package path with spaces resolves through the %s",
@@ -103,7 +125,7 @@ describe("routing synchronization real filesystem boundary", () => {
       const shim = join(dirname(world.options.configPath), "spaced-omo");
       const lines =
         form === "entry record"
-          ? ["#!/bin/sh", `# entry: ${entry}`, 'exec bun "$OMO_ENTRY" "$@"']
+          ? ["#!/bin/sh", `# entry: ${entry}`, `exec bun '${entry}' "$@"`]
           : ["#!/bin/sh", `exec bun '${entry}' "$@"`];
       await writeFile(shim, `${lines.join("\n")}\n`, { mode: 0o755 });
       const result = await syncRouting({ ...world.options, upstream: shim, check: true });

@@ -11,7 +11,7 @@ import {
   receiptSchema,
   recoverRouting,
 } from "./routing-config";
-import { planRouting, ROUTING_PROVIDER, RoutingError } from "./routing-plan";
+import { fields, planRouting, ROUTING_PROVIDER, RoutingError } from "./routing-plan";
 
 const configSchema = groupsSchema.partial().passthrough();
 const packageSchema = z.object({ name: z.literal("omo-ai"), version: z.string().min(1) });
@@ -168,4 +168,36 @@ export async function syncRouting(options: SyncOptions): Promise<RoutingReceipt>
   if (!options.check)
     await publishRouting(options.stateDir, options.configPath, configText, text, receipt);
   return receipt;
+}
+
+/**
+ * Whether the routing a failed preflight would fall back to is actually installed: an
+ * opencodex receipt whose managed routes (user overrides aside) are all still in the config.
+ */
+export async function retainedRoutingInstalled(
+  configPath: string,
+  stateDir: string,
+): Promise<boolean> {
+  const [configText, receiptText] = await Promise.all([
+    optionalText(configPath),
+    optionalText(join(stateDir, "state.json")),
+  ]);
+  if (configText === undefined || receiptText === undefined) return false;
+  try {
+    const receipt = receiptSchema.parse(JSON.parse(receiptText));
+    if (receipt.provider !== ROUTING_PROVIDER) return false;
+    const config = configSchema.parse(Bun.JSON5.parse(configText));
+    const overridden = new Set(receipt.overrides);
+    return (["categories", "agents"] as const).every((scope) =>
+      Object.entries(receipt.managed[scope]).every(([name, route]) => {
+        if (overridden.has(`${scope}.${name}`)) return true;
+        const actual = config[scope]?.[name];
+        return (
+          actual !== undefined && JSON.stringify(fields(actual)) === JSON.stringify(fields(route))
+        );
+      }),
+    );
+  } catch {
+    return false; // an unreadable receipt or config is not a safe fallback
+  }
 }

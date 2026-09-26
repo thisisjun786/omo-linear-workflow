@@ -104,7 +104,7 @@ function opencodexResolver(available: ReadonlySet<string>): (rung: RouteRung) =>
   };
 }
 
-function fields(route: RoutingFields): RoutingFields {
+export function fields(route: RoutingFields): RoutingFields {
   return Object.fromEntries(
     ROUTING_KEYS.filter((key) => Object.hasOwn(route, key)).map((key) => [key, route[key]]),
   );

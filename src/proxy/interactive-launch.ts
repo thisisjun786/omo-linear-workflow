@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { modelScopeArguments } from "./model-scope";
 import { ensureRouting, globalOmo } from "./routing-launch";
+import { retainedRoutingInstalled } from "./routing-sync";
 
 // Inspection and maintenance commands stay usable when the proxy is offline.
 const INSPECTION_FLAGS = new Set(["--version", "-v", "--help", "-h"]);
@@ -26,11 +27,12 @@ export const launchDependencies: LaunchDependencies = {
   upstream: globalOmo,
   ensureRouting,
   scopeArguments: modelScopeArguments,
-  routingAdopted: (home) => Bun.file(join(home, ".omo/proxy-routing/state.json")).exists(),
+  routingAdopted: (home) =>
+    retainedRoutingInstalled(join(home, ".omo/omo.jsonc"), join(home, ".omo/proxy-routing")),
   warn: (line) => process.stderr.write(line),
 };
 
-/** Once routing was adopted, a failed preflight keeps it, so OMO still starts with a warning. */
+/** With adopted routing still installed, a failed preflight keeps it and OMO starts with a warning. */
 export async function interactiveLaunch(
   root: string,
   home: string,
@@ -45,7 +47,7 @@ export async function interactiveLaunch(
   try {
     await deps.ensureRouting(root, upstream);
   } catch (error) {
-    // Without adopted routing OMO would fall back to stock native providers: stay closed.
+    // Without installed proxy routing OMO would fall back to stock native providers: stay closed.
     if (!(await deps.routingAdopted(home))) throw error;
     deps.warn(
       `OMO routing preflight: ${error instanceof Error ? error.message : String(error)}; starting OMO with the previous routing\n`,

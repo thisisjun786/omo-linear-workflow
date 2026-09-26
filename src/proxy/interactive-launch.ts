@@ -18,6 +18,7 @@ export interface LaunchDependencies {
   readonly upstream: () => string;
   readonly ensureRouting: (root: string, upstream: string) => Promise<void>;
   readonly scopeArguments: (home: string, flags: readonly string[]) => Promise<string[]>;
+  readonly routingAdopted: (home: string) => Promise<boolean>;
   readonly warn: (line: string) => void;
 }
 
@@ -25,10 +26,11 @@ export const launchDependencies: LaunchDependencies = {
   upstream: globalOmo,
   ensureRouting,
   scopeArguments: modelScopeArguments,
+  routingAdopted: (home) => Bun.file(join(home, ".omo/proxy-routing/state.json")).exists(),
   warn: (line) => process.stderr.write(line),
 };
 
-/** A failed preflight keeps the previous routing, so OMO still starts with a warning. */
+/** Once routing was adopted, a failed preflight keeps it, so OMO still starts with a warning. */
 export async function interactiveLaunch(
   root: string,
   home: string,
@@ -43,16 +45,13 @@ export async function interactiveLaunch(
   try {
     await deps.ensureRouting(root, upstream);
   } catch (error) {
+    // Without adopted routing OMO would fall back to stock native providers: stay closed.
+    if (!(await deps.routingAdopted(home))) throw error;
     deps.warn(
       `OMO routing preflight: ${error instanceof Error ? error.message : String(error)}; starting OMO with the previous routing\n`,
     );
   }
-  const scopeArgs = await deps.scopeArguments(home, flags).catch((error: unknown) => {
-    deps.warn(
-      `OMO model scope: ${error instanceof Error ? error.message : String(error)}; starting without a scope limit\n`,
-    );
-    return [];
-  });
+  const scopeArgs = await deps.scopeArguments(home, flags);
   return [upstream, "-e", join(root, "dist/extension/model-catalog.js"), ...scopeArgs, ...args];
 }
 

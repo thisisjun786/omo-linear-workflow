@@ -10,6 +10,7 @@ function deps(overrides: Partial<LaunchDependencies> = {}) {
       calls.push("routing");
     },
     scopeArguments: async () => ["--models", "a"],
+    routingAdopted: async () => true,
     warn: (line) => warnings.push(line),
     ...overrides,
   };
@@ -43,18 +44,26 @@ describe("interactive OMO launch", () => {
     expect(d.warnings[0]).toContain("starting OMO with the previous routing");
   });
 
-  test("an unreadable model scope still starts OMO without a scope limit", async () => {
+  test("without adopted routing a failed preflight stops the launch", async () => {
+    const d = deps({
+      ensureRouting: async () => {
+        throw new Error("Routing tracking is not initialized");
+      },
+      routingAdopted: async () => false,
+    });
+    await expect(interactiveLaunch("/olw", "/home", [], d.value)).rejects.toThrow(
+      /not initialized/,
+    );
+    expect(d.warnings).toEqual([]);
+  });
+
+  test("an unreadable model scope keeps the restriction by stopping the launch", async () => {
     const d = deps({
       scopeArguments: async () => {
         throw new SyntaxError("bad json");
       },
     });
-    expect(await interactiveLaunch("/olw", "/home", [], d.value)).toEqual([
-      "/bin/omo",
-      "-e",
-      "/olw/dist/extension/model-catalog.js",
-    ]);
-    expect(d.warnings[0]).toContain("starting without a scope limit");
+    await expect(interactiveLaunch("/olw", "/home", [], d.value)).rejects.toThrow(/bad json/);
   });
 
   test("inspection and maintenance commands skip preflight entirely", async () => {

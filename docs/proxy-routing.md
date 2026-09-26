@@ -212,9 +212,12 @@ edit is not overwritten.
 An unknown upstream layout, an unusable complete model chain, or a missing or
 disabled opencodex catalog during an update leaves the last valid configuration
 intact and fails the preflight with an actionable error. It does not enable native
-providers or substitute an arbitrary model. The interactive `omo` launcher prints
-that error and still starts OMO with the retained routing; OLW role launches keep
-failing closed. Fix the reported problem and run `sync --force`.
+providers or substitute an arbitrary model. Once routing has been adopted, the
+interactive `omo` launcher prints that error and still starts OMO with the
+retained routing. Before adoption it stops, as described above, and OLW role
+launches always stop. An unreadable model-scope preference also stops the
+launcher rather than widening a restricted picker. Fix the reported problem and
+run `sync --force`.
 A managed route with no surviving model candidate no longer rejects the update:
 it is published without models, listed under `unroutable`, and warned about.
 If a pending journal reports a conflicting edit, inspect it and the backup before

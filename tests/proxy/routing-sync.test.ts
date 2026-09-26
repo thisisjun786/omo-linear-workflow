@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
@@ -92,6 +92,24 @@ async function fixture() {
 }
 
 describe("routing synchronization real filesystem boundary", () => {
+  test.each(["entry record", "quoted exec"] as const)(
+    "a package path with spaces resolves through the %s",
+    async (form) => {
+      const world = await fixture();
+      const spaced = join(dirname(world.options.configPath), "My Tools", "omo-ai");
+      await mkdir(dirname(spaced), { recursive: true });
+      await rename(dirname(dirname(world.options.upstream)), spaced);
+      const entry = join(spaced, "bin/omo.js");
+      const shim = join(dirname(world.options.configPath), "spaced-omo");
+      const lines =
+        form === "entry record"
+          ? ["#!/bin/sh", `# entry: ${entry}`, 'exec bun "$OMO_ENTRY" "$@"']
+          : ["#!/bin/sh", `exec bun '${entry}' "$@"`];
+      await writeFile(shim, `${lines.join("\n")}\n`, { mode: 0o755 });
+      const result = await syncRouting({ ...world.options, upstream: shim, check: true });
+      expect(result.version).toBe("1.0.0");
+    },
+  );
   test("a generated bun launcher shim resolves to its recorded omo-ai entry package", async () => {
     const world = await fixture();
     const shimDirectory = join(dirname(dirname(world.options.upstream)), "..", "bun-bin");

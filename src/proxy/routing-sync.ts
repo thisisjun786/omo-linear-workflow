@@ -23,10 +23,20 @@ const providerCatalogSchema = z.object({
   models: z.array(z.object({ id: z.string().min(1) })).min(1),
 });
 
-// A launcher is either a symlink into the package or a small script (bun's generated shim
-// records `# entry:`; hand-written wrappers exec it). Any absolute omo.js path it names is a
-// candidate; the package is the nearest ancestor whose package.json is omo-ai itself.
-const LAUNCHER_ENTRY = /(\/[^\s'"]*\/bin\/omo\.js)/g;
+// A launcher is either a symlink into the package or a small script: bun's generated shim
+// records the entry as a whole-line `# entry: <path>`, and hand-written wrappers exec it as a
+// quoted or bare argument. The package is the nearest ancestor whose package.json is omo-ai.
+const ENTRY_RECORD = /^# entry: (\/.*\/bin\/omo\.js)[ \t]*$/gm;
+const QUOTED_ENTRY = /(['"])(\/(?:(?!\1).)*\/bin\/omo\.js)\1/g;
+const BARE_ENTRY = /(?:^|[\s=])(\/[^\s'"]*\/bin\/omo\.js)(?=$|[\s;])/gm;
+
+function launcherEntries(script: string): string[] {
+  return [
+    ...[...script.matchAll(ENTRY_RECORD)].map((match) => match[1]),
+    ...[...script.matchAll(QUOTED_ENTRY)].map((match) => match[2]),
+    ...[...script.matchAll(BARE_ENTRY)].map((match) => match[1]),
+  ].filter((entry): entry is string => entry !== undefined);
+}
 
 async function omoAiPackageAbove(path: string): Promise<string | undefined> {
   for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
@@ -51,8 +61,7 @@ export async function upstreamPackageRoot(upstream: string): Promise<string> {
   if (direct !== undefined) return direct;
   const head = (await readFile(target, "utf8")).slice(0, 4096);
   if (head.startsWith("#!")) {
-    for (const [, entry] of head.matchAll(LAUNCHER_ENTRY)) {
-      if (entry === undefined) continue;
+    for (const entry of launcherEntries(head)) {
       const resolved = await realpath(entry).catch(() => undefined);
       if (resolved === undefined) continue;
       tried.push(resolved);

@@ -56,6 +56,17 @@ published.
   OMO's `settings.json` `extensions`. A routing receipt without a provider is
   still re-planned at the next start.
 
+### Fixed
+
+- The managed `omo` launcher works with omo-ai installed through bun (5.0.0 and
+  later). It finds the omo-ai package from its manifest instead of assuming a
+  symlinked bin, so the generated bun launcher script no longer fails the routing
+  preflight with `ENOENT ... ~/.bun/package.json`.
+- Once routing has been adopted, a failed routing preflight no longer blocks the
+  interactive `omo` launcher: it prints the error and starts OMO with the retained
+  routing. Before adoption, and for OLW role launches, a failed preflight still
+  stops the launch.
+
 ## [0.1.0]
 
 Released: 2026-09-23

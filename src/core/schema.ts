@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const text = z.string().min(1);
-const refSchema = z.strictObject({ id: text, url: text, revision: text });
+const refSchema = z.strictObject({ id: text, url: text, revision: text, key: text.optional() });
 
 export const scopeSnapshotSchema = z.strictObject({
   version: z.literal(1),

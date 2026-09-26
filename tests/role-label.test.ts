@@ -9,6 +9,7 @@ const snapshot: ScopeSnapshot = {
     id: "init-uuid",
     url: "https://linear.app/acme/initiative/q4-billing-overhaul-0a1b2c3d4e5f",
     revision: "r1",
+    key: "I-13",
   },
   projects: [
     {
@@ -16,6 +17,7 @@ const snapshot: ScopeSnapshot = {
         id: "project-uuid",
         url: "https://linear.app/acme/project/tally-cli-%EA%B0%80%EA%B3%84%EB%B6%80-5da532c1a443",
         revision: "r1",
+        key: "P-JUN-68",
       },
       issues: [
         {
@@ -36,9 +38,7 @@ const parent: Assignment = {
 };
 
 test("labels a parent with its decoded project name", () => {
-  expect(roleLabel(parent, snapshot, "7c57be9a-3fcb-4376")).toBe(
-    "tally cli 가계부 · parent · 7c57be9a",
-  );
+  expect(roleLabel(parent, snapshot, "7c57be9a-3fcb-4376")).toBe("P-JUN-68 tally cli 가계부");
 });
 
 test("labels a child with its issue key and title words", () => {
@@ -50,14 +50,31 @@ test("labels a child with its issue key and title words", () => {
     ownerBindingId: "p",
   };
   expect(roleLabel(child, snapshot, "8e6883c7-8e7d")).toBe(
-    "JUN-274 tally add and tally list commands · child · 8e6883c7",
+    "JUN-274 tally add and tally list commands",
   );
 });
 
 test("labels a supervisor with its initiative name", () => {
   expect(
     roleLabel({ role: "supervisor", initiativeId: "init-uuid" }, snapshot, "aaaaaaaa-bbbb"),
-  ).toBe("q4 billing overhaul · supervisor · aaaaaaaa");
+  ).toBe("I-13 q4 billing overhaul");
+});
+
+test("uses the slug alone when a project ref has no key", () => {
+  const unkeyed: ScopeSnapshot = {
+    ...snapshot,
+    projects: [
+      {
+        project: {
+          id: "project-uuid",
+          url: "https://linear.app/acme/project/tally-cli-5da532c1a443",
+          revision: "r1",
+        },
+        issues: [],
+      },
+    ],
+  };
+  expect(roleLabel(parent, unkeyed, "12345678-9abc")).toBe("tally cli");
 });
 
 test("falls back to the role and short binding ID for non-Linear refs", () => {
@@ -67,7 +84,7 @@ test("falls back to the role and short binding ID for non-Linear refs", () => {
       { project: { id: "project-uuid", url: "linear://project", revision: "r1" }, issues: [] },
     ],
   };
-  expect(roleLabel(parent, fixture, "12345678-9abc")).toBe("parent · 12345678");
+  expect(roleLabel(parent, fixture, "12345678-9abc")).toBe("parent 12345678");
 });
 
 test("truncates long names", () => {
@@ -85,6 +102,7 @@ test("truncates long names", () => {
     ],
   };
   const label = roleLabel(parent, long, "12345678-9abc");
-  expect(label.endsWith("… · parent · 12345678")).toBe(true);
-  expect(label.length).toBeLessThanOrEqual(80);
+  expect(label.endsWith("…")).toBe(true);
+  expect(label.length).toBe(120);
+  expect(roleLabel(parent, snapshot, "x")).not.toContain("…");
 });

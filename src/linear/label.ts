@@ -1,9 +1,9 @@
 import type { Assignment, Ref, ScopeSnapshot } from "../core/contracts";
 
-const MAX_NAME = 56;
+const MAX_LABEL = 120;
 
-function slugWords(ref: Ref | undefined, kind: "initiative" | "project" | "issue"): string | null {
-  if (ref === undefined || !URL.canParse(ref.url)) return null;
+function slugWords(ref: Ref, kind: "initiative" | "project" | "issue"): string | null {
+  if (!URL.canParse(ref.url)) return null;
   const url = new URL(ref.url);
   if (url.hostname !== "linear.app") return null;
   const parts = url.pathname.split("/").filter((part) => part.length > 0);
@@ -21,25 +21,24 @@ function slugWords(ref: Ref | undefined, kind: "initiative" | "project" | "issue
   const words = decodeURIComponent(slug)
     .replace(/-[0-9a-f]{12}$/, "")
     .replaceAll("-", " ");
-  return words.length > 0 ? words : null;
+  if (words.length === 0) return null;
+  return ref.key === undefined ? words : `${ref.key} ${words}`;
 }
 
 function scopeName(assignment: Assignment, snapshot: ScopeSnapshot): string | null {
   switch (assignment.role) {
     case "supervisor":
-      return slugWords(snapshot.initiative ?? undefined, "initiative");
-    case "parent":
-      return slugWords(
-        snapshot.projects.find((entry) => entry.project.id === assignment.projectId)?.project,
-        "project",
-      );
-    case "child":
-      return slugWords(
-        snapshot.projects
-          .flatMap((entry) => entry.issues)
-          .find((issue) => issue.id === assignment.issueId),
-        "issue",
-      );
+      return snapshot.initiative === null ? null : slugWords(snapshot.initiative, "initiative");
+    case "parent": {
+      const entry = snapshot.projects.find((item) => item.project.id === assignment.projectId);
+      return entry === undefined ? null : slugWords(entry.project, "project");
+    }
+    case "child": {
+      const issue = snapshot.projects
+        .flatMap((item) => item.issues)
+        .find((item) => item.id === assignment.issueId);
+      return issue === undefined ? null : slugWords(issue, "issue");
+    }
   }
 }
 
@@ -49,9 +48,7 @@ export function roleLabel(
   snapshot: ScopeSnapshot,
   bindingId: string,
 ): string {
-  const suffix = `${assignment.role} · ${bindingId.slice(0, 8)}`;
   const name = scopeName(assignment, snapshot)?.trim();
-  if (name === undefined || name.length === 0) return suffix;
-  const short = name.length > MAX_NAME ? `${name.slice(0, MAX_NAME - 1).trimEnd()}…` : name;
-  return `${short} · ${suffix}`;
+  if (name === undefined || name.length === 0) return `${assignment.role} ${bindingId.slice(0, 8)}`;
+  return name.length > MAX_LABEL ? `${name.slice(0, MAX_LABEL - 1).trimEnd()}…` : name;
 }

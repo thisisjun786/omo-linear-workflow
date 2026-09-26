@@ -13,6 +13,8 @@ export interface Ref {
   readonly id: string;
   readonly url: string;
   readonly revision: string;
+  /** Human-readable Linear identifier such as P-ENG-12 or I-3; display only. */
+  readonly key?: string | undefined;
 }
 export interface ScopeSnapshot {
   readonly version: 1;

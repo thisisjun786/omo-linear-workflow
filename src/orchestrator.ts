@@ -164,6 +164,16 @@ export interface ListedQuestion {
   readonly answered: boolean;
   readonly answer: DeliveryRecord | null;
 }
+export type StatusBinding = Binding & {
+  readonly mode?: ChildCreateMode;
+  readonly stage?: ChildStage;
+  readonly stageBindings?: ReadonlyArray<{
+    readonly bindingId: string;
+    readonly stage: ChildStage;
+    readonly launchState: Binding["launchState"];
+  }>;
+  readonly openQuestions?: number;
+};
 export interface CreationResult {
   readonly binding: Binding;
   readonly expectedModel: RoleModel;
@@ -694,7 +704,6 @@ export class Orchestrator {
     const context = await this.#context(plan.value);
     if (!context.ok) return context;
     const herdr = this.#deps.createHerdrClient(plan.value.herdrSocket);
-    let stop: (() => void) | undefined;
     try {
       const snapshot = await herdr.snapshot();
       const pane = snapshot.panes.find(
@@ -719,33 +728,14 @@ export class Orchestrator {
         } finally {
           await native.close();
         }
-        const exited = Promise.withResolvers<void>();
-        const outcome = exited.promise.then(
-          () => true,
-          () => false,
-        );
-        stop = await herdr.subscribe((event) => {
-          if (planPaneExited(event, plan.value.paneId ?? "")) exited.resolve();
-          const disconnected = herdrConnectionErrorSchema.safeParse(event);
-          if (disconnected.success) exited.reject(new Error(disconnected.data.data.message));
-        });
-        const timeout = setTimeout(
-          () => exited.reject(new Error("Plan pane did not exit")),
-          30_000,
-        );
-        timeout.unref();
-        try {
-          await herdr.sendKeys(plan.value.paneId, "/quit", ["Enter"]);
-          if (!(await outcome)) return failure("runtime_unavailable", "Plan pane did not exit");
-        } finally {
-          clearTimeout(timeout);
-        }
+        const stopped = await this.#stopStageSession(plan.value, herdr);
+        if (!stopped.ok) return stopped;
+      } else {
+        await this.#deps.terminateBinding(plan.value);
       }
-      await this.#deps.terminateBinding(plan.value);
     } catch (cause) {
       return failure("runtime_unavailable", "Plan session could not be stopped", messageOf(cause));
     } finally {
-      stop?.();
       herdr.close();
     }
     return this.#create(
@@ -1382,21 +1372,60 @@ export class Orchestrator {
     return this.#withRegistry((registry) => registry.setOwner(parentId, null));
   }
 
-  public status(filter: string | ScopeFilter = {}): Result<Binding[]> {
+  public status(filter: string | ScopeFilter = {}): Result<StatusBinding[]> {
     const scope = typeof filter === "string" ? { initiativeId: filter } : filter;
     return this.#withRegistry((registry) => {
       const listed = registry.list();
       if (!listed.ok) return listed;
-      return ok(
-        listed.value.filter(
-          ({ assignment }) =>
-            (scope.initiativeId === undefined ||
-              (assignment.role !== "manager" && assignment.initiativeId === scope.initiativeId)) &&
-            (scope.projectId === undefined ||
-              ((assignment.role === "parent" || assignment.role === "child") &&
-                assignment.projectId === scope.projectId)),
-        ),
-      );
+      const questions = registry.questions({});
+      if (!questions.ok) return questions;
+      const rows: StatusBinding[] = [];
+      for (const binding of listed.value.filter(
+        ({ assignment }) =>
+          (scope.initiativeId === undefined ||
+            (assignment.role !== "manager" && assignment.initiativeId === scope.initiativeId)) &&
+          (scope.projectId === undefined ||
+            ((assignment.role === "parent" || assignment.role === "child") &&
+              assignment.projectId === scope.projectId)),
+      )) {
+        if (binding.assignment.role !== "child") {
+          rows.push(binding);
+          continue;
+        }
+        const stage = registry.stageOf(binding.id);
+        if (!stage.ok) return stage;
+        if (stage.value === null) {
+          rows.push(binding);
+          continue;
+        }
+        const lineage = registry.lineageFor(binding.id);
+        if (!lineage.ok) return lineage;
+        rows.push({
+          ...binding,
+          mode:
+            lineage.value.mode === "planned"
+              ? "planned"
+              : lineage.value.mode === "research"
+                ? "research"
+                : "direct",
+          stage:
+            lineage.value.stages.findLast((entry) => entry.launchState !== "closed")?.stage ??
+            lineage.value.stages.at(-1)?.stage ??
+            stage.value.stage,
+          stageBindings: lineage.value.stages.map(({ bindingId, stage, launchState }) => ({
+            bindingId,
+            stage,
+            launchState,
+          })),
+          openQuestions: questions.value.filter(
+            ({ record, answered }) =>
+              !answered &&
+              (record.envelope.fromBindingId === binding.id ||
+                record.envelope.toBindingId === binding.id),
+          ).length,
+        });
+      }
+      return ok(rows);
     });
   }
 
@@ -1407,6 +1436,13 @@ export class Orchestrator {
   }
 
   public async close(bindingId: string, confirmAbsent = false): Promise<Result<Binding>> {
+    const target = this.#binding(bindingId);
+    if (!target.ok) return target;
+    if (target.value.assignment.role === "child") {
+      const stage = this.#withRegistry((registry) => registry.stageOf(bindingId));
+      if (!stage.ok) return stage;
+      if (stage.value !== null) return this.#closeLineage(target.value, confirmAbsent);
+    }
     const closing = this.#withRegistry((registry) => registry.beginClose(bindingId));
     if (!closing.ok || closing.value.launchState === "closed") return closing;
     const binding = closing.value;
@@ -1473,6 +1509,138 @@ export class Orchestrator {
       );
     } finally {
       herdr.close();
+    }
+  }
+
+  async #closeLineage(target: Binding, confirmAbsent: boolean): Promise<Result<Binding>> {
+    const lineage = this.#withRegistry((registry) => registry.lineageFor(target.id));
+    if (!lineage.ok) return lineage;
+    const members: Binding[] = [];
+    for (const entry of lineage.value.stages) {
+      const member = this.#binding(entry.bindingId);
+      if (!member.ok) return member;
+      members.push(member.value);
+    }
+    const live = members.filter((member) => member.launchState !== "closed");
+    if (live.length > 1)
+      return failure("identity_mismatch", "Multiple live stages claim this child");
+    const active = live[0];
+    const closing =
+      active === undefined
+        ? ok(target)
+        : this.#withRegistry((registry) => registry.beginClose(active.id));
+    if (!closing.ok) return closing;
+    const binding = closing.value;
+    const knownIds = new Set(
+      members.flatMap((member) => (member.workspaceId === null ? [] : [member.workspaceId])),
+    );
+    if (knownIds.size > 1)
+      return failure("identity_mismatch", "Stage members claim different workspaces");
+    const recordedWorkspaceId = knownIds.values().next().value;
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    try {
+      const snapshot = await herdr.snapshot();
+      const context = await this.#context(members[0] ?? binding);
+      if (!context.ok) return context;
+      const labels = new Set(
+        members.flatMap((member) => [
+          `omo-child-${member.id}`,
+          roleLabel(member.assignment, context.value.snapshot, member.id),
+        ]),
+      );
+      const workspaces = snapshot.workspaces.filter((workspace) =>
+        recordedWorkspaceId === undefined
+          ? workspace.cwd === binding.cwd &&
+            workspace.label !== undefined &&
+            labels.has(workspace.label)
+          : workspace.workspaceId === recordedWorkspaceId,
+      );
+      if (workspaces.length > 1)
+        return failure("identity_mismatch", "Multiple workspaces claim this child");
+      const workspace = workspaces[0];
+      if (
+        workspace === undefined &&
+        recordedWorkspaceId === undefined &&
+        binding.sessionPath === null &&
+        !confirmAbsent
+      )
+        return failure(
+          "closure_uncertain",
+          "Inspect Herdr, then use --confirm-absent if no workspace was created",
+        );
+      if (
+        workspace !== undefined &&
+        (workspace.cwd !== binding.cwd ||
+          (recordedWorkspaceId === undefined &&
+            (workspace.label === undefined || !labels.has(workspace.label))))
+      )
+        return failure(
+          "identity_mismatch",
+          "Owned workspace identity changed; inspect it before closing",
+        );
+      if (binding.sessionPath !== null && active !== undefined) {
+        const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+        await this.#deps.ensureHost(
+          this.#root,
+          binding.omoSocket,
+          launchEnvironment(this.#root, managedHerdrPath(artifact.artifactDir)),
+        );
+        const pane = snapshot.panes.find(
+          (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
+        );
+        if (workspace !== undefined && pane !== undefined && pane.sessionPath !== null) {
+          const stopped = await this.#stopStageSession(binding, herdr);
+          if (!stopped.ok) return stopped;
+        } else {
+          await this.#deps.terminateBinding(binding);
+        }
+      }
+      if (workspace !== undefined) await herdr.closeWorkspace(workspace.workspaceId);
+      for (const member of members) {
+        if (member.launchState !== "closed") {
+          await removeReadiness(this.#root, member.id);
+          const finished = this.#withRegistry((registry) => registry.finishClose(member.id));
+          if (!finished.ok) return finished;
+        }
+      }
+      return this.#binding(target.id);
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Closure is incomplete; ownership remains held",
+        messageOf(cause),
+      );
+    } finally {
+      herdr.close();
+    }
+  }
+
+  async #stopStageSession(binding: Binding, herdr: HerdrClient): Promise<Result<void>> {
+    if (binding.paneId === null) return failure("runtime_unavailable", "Stage has no Herdr pane");
+    let stop: (() => void) | undefined;
+    try {
+      const exited = Promise.withResolvers<void>();
+      const outcome = exited.promise.then(
+        () => true,
+        () => false,
+      );
+      stop = await herdr.subscribe((event) => {
+        if (planPaneExited(event, binding.paneId ?? "")) exited.resolve();
+        const disconnected = herdrConnectionErrorSchema.safeParse(event);
+        if (disconnected.success) exited.reject(new Error(disconnected.data.data.message));
+      });
+      const timeout = setTimeout(() => exited.reject(new Error("Stage pane did not exit")), 30_000);
+      timeout.unref();
+      try {
+        await herdr.sendKeys(binding.paneId, "/quit", ["Enter"]);
+        if (!(await outcome)) return failure("runtime_unavailable", "Stage pane did not exit");
+      } finally {
+        clearTimeout(timeout);
+      }
+      await this.#deps.terminateBinding(binding);
+      return ok(undefined);
+    } finally {
+      stop?.();
     }
   }
 

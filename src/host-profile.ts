@@ -33,6 +33,7 @@ function runtimeNamespace(entry: string): string {
 export const RUNTIME_CACHE_MARKER = `OMO_INITIATIVE_CACHE_V1_${runtimeNamespace(
   import.meta.resolve("@code-yeongyu/senpi"),
 ).toUpperCase()}`;
+export const EXTENSION_PROTOCOL_MARKER = "OMO_INITIATIVE_EXTENSION_PROTOCOL_2";
 
 export function runtimeCacheEnvironment(
   root: string,
@@ -66,6 +67,14 @@ export class HostProfileMismatchError extends Error {
       "Running host profile is incompatible; review its sessions before an explicit generation handoff",
     );
   }
+}
+
+export async function assertHostProtocol(
+  root: string,
+  socket: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  await createHostProfile(root, await readHostStatus(root, socket, env));
 }
 
 export async function readHostStatus(
@@ -117,6 +126,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
     env: {
       OMO_NATIVE: "1",
       OMO_INITIATIVE_HOST: "1",
+      OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
       OMO_INITIATIVE_ROOT: root,
       OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
       [RUNTIME_CACHE_MARKER]: "1",
@@ -129,10 +139,13 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
   if (status?.reachable) {
     const core = status.launchProfile?.core;
     const missingExtensions = required.filter((extension) => !core?.extensions.includes(extension));
-    const missingCapabilities =
-      status.env_keys.includes(RUNTIME_CACHE_MARKER) && status.env_keys.includes("XDG_CACHE_HOME")
-        ? []
-        : ["runtime_cache_isolation"];
+    const missingCapabilities = [
+      ...(!status.env_keys.includes(RUNTIME_CACHE_MARKER) ||
+      !status.env_keys.includes("XDG_CACHE_HOME")
+        ? ["runtime_cache_isolation"]
+        : []),
+      ...(!status.env_keys.includes(EXTENSION_PROTOCOL_MARKER) ? ["olw_extension_protocol_2"] : []),
+    ];
     if (
       missingExtensions.length > 0 ||
       missingCapabilities.length > 0 ||

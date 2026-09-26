@@ -27,9 +27,9 @@ import { openRegistry } from "./core/store";
 import { createHerdrClient, type HerdrClient, type WorktreeGrouping } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import {
+  assertHostProtocol,
   createHostProfile,
   HostProfileMismatchError,
-  readHostStatus,
   runtimeCacheEnvironment,
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
@@ -300,9 +300,7 @@ const defaults: OrchestratorDependencies = {
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
-  checkHostProfile: async (root, socket, env) => {
-    await createHostProfile(root, await readHostStatus(root, socket, env));
-  },
+  checkHostProfile: assertHostProtocol,
   prompt: defaultPrompt,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
@@ -513,6 +511,8 @@ export class Orchestrator {
   public async send(input: SendInput): Promise<Result<unknown>> {
     const sender = this.#binding(input.fromId);
     if (!sender.ok) return sender;
+    const host = await this.#checkHostProtocol(sender.value);
+    if (host !== undefined) return host;
     const context = await this.#context(sender.value);
     if (!context.ok) return context;
     return this.#deliver(sender.value, {
@@ -532,6 +532,8 @@ export class Orchestrator {
   public async report(input: ReportInput): Promise<Result<unknown>> {
     const sender = this.#binding(input.fromId);
     if (!sender.ok) return sender;
+    const host = await this.#checkHostProtocol(sender.value);
+    if (host !== undefined) return host;
     if (sender.value.assignment.role === "supervisor")
       return failure("route_denied", "Supervisor has no owner to report to");
     const context = await this.#context(sender.value);
@@ -594,6 +596,25 @@ export class Orchestrator {
       );
     } finally {
       await session?.close();
+    }
+  }
+
+  async #checkHostProtocol(binding: Binding): Promise<Result<never> | undefined> {
+    try {
+      const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+      await this.#deps.checkHostProfile?.(
+        this.#root,
+        binding.omoSocket,
+        launchEnvironment(this.#root, managedHerdrPath(artifact.artifactDir)),
+      );
+      return undefined;
+    } catch (cause) {
+      if (cause instanceof HostProfileMismatchError)
+        return failure("runtime_unavailable", cause.message, {
+          reason: "host_profile_mismatch",
+          ...cause.details,
+        });
+      return failure("runtime_unavailable", "Native host protocol check failed", messageOf(cause));
     }
   }
 
@@ -996,7 +1017,12 @@ export class Orchestrator {
       );
       if (!observed.ok) return observed;
       const activated = await this.#verifyAndActivate(observed.value);
-      if (!activated.ok) return activated;
+      if (!activated.ok) {
+        if (activated.error.code === "runtime_unavailable") {
+          this.#withRegistry((registry) => registry.setLaunchState(bindingId, "uncertain"));
+        }
+        return activated;
+      }
       const initialized = await this.#initialize(activated.value, snapshot);
       if (!initialized.ok) return initialized;
       return ok({
@@ -1034,6 +1060,32 @@ export class Orchestrator {
       await session.configure(modelForBinding(binding));
       const identity = await session.describe();
       if (!identity.ok) return identity;
+      if (
+        identity.value.extensionProtocol !== 2 &&
+        binding.launchState === "provisioning" &&
+        binding.initialization.state === "pending"
+      ) {
+        return failure("runtime_unavailable", "Native host protocol is incompatible", {
+          reason: "host_profile_mismatch",
+          missingCapabilities: ["olw_extension_protocol_2"],
+          generation: null,
+          sessions: { total: 0, worker: 0 },
+          actualProfile: null,
+          recovery: {
+            automatic: false,
+            argv: [
+              join(this.#root, "node_modules/.bin/omo"),
+              "host",
+              "handoff",
+              "--launch-spec",
+              join(this.#root, "omo-host.json"),
+              "--socket",
+              binding.omoSocket,
+            ],
+            env: runtimeCacheEnvironment(this.#root),
+          },
+        });
+      }
       return this.#withRegistry((registry) => registry.activate(binding.id, identity.value));
     } catch (cause) {
       return failure(

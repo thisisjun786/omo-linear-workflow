@@ -2,8 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
 import {
   createHostProfile,
+  EXTENSION_PROTOCOL_MARKER,
   RUNTIME_CACHE_MARKER,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
@@ -29,7 +31,7 @@ async function fixture() {
     generation: 4,
     launchProfile: { core: { session_runtime: "in-process", multi_session: true, extensions } },
     sessions: { total: 3, worker: 1 },
-    env_keys: [RUNTIME_CACHE_MARKER, "XDG_CACHE_HOME"],
+    env_keys: [RUNTIME_CACHE_MARKER, "XDG_CACHE_HOME", EXTENSION_PROTOCOL_MARKER],
   };
   return { root, status };
 }
@@ -84,6 +86,42 @@ test("does not consider an unknown running launch profile ready", async () => {
   await expect(createHostProfile(root, { ...status, launchProfile: null })).rejects.toThrow();
 });
 
+test("rejects a host missing the extension protocol marker with handoff recovery", async () => {
+  const { root, status } = await fixture();
+  const result = await createHostProfile(root, {
+    ...status,
+    env_keys: status.env_keys.filter((key) => key !== EXTENSION_PROTOCOL_MARKER),
+  }).then(
+    () => null,
+    (cause: unknown) => cause,
+  );
+  expect(result).toMatchObject({
+    name: "HostProfileMismatchError",
+    details: {
+      missingCapabilities: ["olw_extension_protocol_2"],
+      recovery: {
+        automatic: false,
+        argv: [
+          join(root, "node_modules/.bin/omo"),
+          "host",
+          "handoff",
+          "--launch-spec",
+          join(root, "omo-host.json"),
+          "--socket",
+          status.socket,
+        ],
+      },
+    },
+  });
+});
+
+test("writes a launch spec accepted by Senpi's real loader", async () => {
+  const { root } = await fixture();
+  const path = await createHostProfile(root);
+  const loaded = await loadHostLaunchSpec(path);
+  expect(loaded.env[EXTENSION_PROTOCOL_MARKER]).toBe("1");
+});
+
 test("rejects a reused host without cache isolation and supplies scoped handoff environment", async () => {
   const { root, status } = await fixture();
   const result = await createHostProfile(root, { ...status, env_keys: [] }).then(
@@ -93,7 +131,7 @@ test("rejects a reused host without cache isolation and supplies scoped handoff 
   expect(result).toMatchObject({
     details: {
       missingExtensions: [],
-      missingCapabilities: ["runtime_cache_isolation"],
+      missingCapabilities: ["runtime_cache_isolation", "olw_extension_protocol_2"],
       recovery: {
         automatic: false,
         env: {
@@ -111,7 +149,7 @@ test("refuses the previous runtime even when extension paths still match", async
   await expect(
     createHostProfile(root, {
       ...status,
-      env_keys: ["OMO_INITIATIVE_CACHE_V1", "XDG_CACHE_HOME"],
+      env_keys: ["OMO_INITIATIVE_CACHE_V1", "XDG_CACHE_HOME", EXTENSION_PROTOCOL_MARKER],
     }),
   ).rejects.toThrow();
 });

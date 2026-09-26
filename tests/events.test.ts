@@ -349,7 +349,7 @@ describe("native delivery extension", () => {
           sessionPath: parent.sessionPath,
           cwd: parent.cwd,
           ...modelForRole("parent"),
-          extensionProtocol: 1,
+          extensionProtocol: 2,
         },
       });
     });

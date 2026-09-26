@@ -92,6 +92,7 @@ describe("host profile", () => {
       env: {
         OMO_NATIVE: "1",
         OMO_INITIATIVE_HOST: "1",
+        OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
         OMO_INITIATIVE_ROOT: root,
         OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
         [RUNTIME_CACHE_MARKER]: "1",
@@ -147,6 +148,7 @@ describe("Herdr readiness event", () => {
 
 class FakeHerdr implements HerdrClient {
   readonly events: string[];
+  protocol: 1 | 2 = 2;
   readonly emittedEvent: unknown;
   readonly tabCalls: unknown[] = [];
   listener: ((event: unknown) => void) | undefined;
@@ -263,7 +265,7 @@ class FakeHerdr implements HerdrClient {
         provider: "chatgpt-subscription",
         modelId: "gpt-5.6-sol",
         thinking: "medium",
-        extensionProtocol: 1,
+        extensionProtocol: this.protocol,
       });
       await publishReadiness(this.root, {
         bindingId: binding.id,
@@ -598,6 +600,67 @@ describe("orchestrator startup", () => {
       await rm(root, { recursive: true, force: true });
     },
   );
+
+  test("does not initialize a new role when native protocol 1 is reported", async () => {
+    const root = await ownedRoot("omo-orchestrator-protocol-1-");
+    const events: string[] = [];
+    const herdr = new FakeHerdr(events);
+    herdr.protocol = 1;
+    let nextId = 0;
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async (controlRoot) => ({
+        artifactDir: join(controlRoot, ".managed-herdr"),
+      }),
+      ensureHost: async () => {
+        events.push("host");
+      },
+      checkHostProfile: async () => {},
+      gitTip: async () => "commit",
+      now: () => "2026-09-22T00:00:00.000Z",
+      uuid: () => ["binding", "session"][nextId++] ?? `id-${nextId}`,
+      attachBinding: async (binding) => {
+        const identity = herdr.nativeIdentities.get(binding.durableSessionId);
+        if (!identity) throw new Error("Exact native session is not open");
+        return new FakeNative(identity, events);
+      },
+      terminateBinding: async () => {},
+      prompt: async () => {
+        events.push("prompt");
+      },
+    };
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+      projects: [],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(scope));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+
+    const result = await orchestrator.createSupervisor({
+      initiativeId: "initiative",
+      scopeDigest: imported.value.digest,
+      designationId: "designation",
+      execute: true,
+      fixture: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable", details: { reason: "host_profile_mismatch" } },
+    });
+    expect(events).not.toContain("prompt");
+    expect(orchestrator.status()).toMatchObject({
+      ok: true,
+      value: [{ launchState: "uncertain", initialization: { state: "pending" } }],
+    });
+  });
 
   test("fails role startup before reservation when the managed Herdr artifact is unavailable", async () => {
     const root = await ownedRoot("omo-orchestrator-managed-herdr-");

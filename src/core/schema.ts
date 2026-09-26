@@ -173,7 +173,7 @@ export const runtimeIdentitySchema = z.strictObject({
   provider: text,
   modelId: text,
   thinking: text,
-  extensionProtocol: z.literal(1),
+  extensionProtocol: z.union([z.literal(1), z.literal(2)]),
 });
 export const claimResultSchema = z.strictObject({
   disposition: z.enum(["new", "replay", "in_progress"]),

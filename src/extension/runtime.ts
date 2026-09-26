@@ -210,7 +210,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       provider: ctx.model.provider,
       modelId: ctx.model.id,
       thinking: ctx.thinkingLevel,
-      extensionProtocol: 1,
+      extensionProtocol: 2,
     };
     return { ok: true, value: identity };
   });

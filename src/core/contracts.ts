@@ -188,7 +188,7 @@ export interface RuntimeIdentity {
   readonly provider: string;
   readonly modelId: string;
   readonly thinking: string;
-  readonly extensionProtocol: 1;
+  readonly extensionProtocol: 1 | 2;
 }
 export interface ClaimResult {
   readonly disposition: "new" | "replay" | "in_progress";

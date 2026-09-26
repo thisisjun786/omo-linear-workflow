@@ -439,7 +439,7 @@ async function world() {
         sessionPath: path,
         cwd: binding.cwd,
         ...modelForRole(binding.assignment.role),
-        extensionProtocol: 1,
+        extensionProtocol: 2,
       });
       await publishReadiness(control, {
         bindingId: binding.id,
@@ -593,6 +593,40 @@ async function world() {
     },
   };
 }
+
+test("already-activated protocol-1 bindings remain valid during reconciliation", async () => {
+  const w = await world();
+  const registry = openRegistry(join(w.control, ".omo/state/registry.sqlite"));
+  value(registry.importScope(projectScope));
+  const parentBinding = activate(
+    registry,
+    value(
+      reserve(registry, "legacy-parent", projectScope, {
+        role: "parent",
+        projectId: "project",
+        initiativeId: null,
+        ownerBindingId: null,
+      }),
+    ),
+  );
+  registry.close();
+  if (parentBinding.workspaceId === null || parentBinding.paneId === null)
+    throw new Error("Missing legacy binding workspace");
+  w.workspaces.set(parentBinding.workspaceId, {
+    workspaceId: parentBinding.workspaceId,
+    rootPaneId: parentBinding.paneId,
+    cwd: parentBinding.cwd,
+  });
+  w.identities.set(parentBinding.id, {
+    durableSessionId: parentBinding.durableSessionId,
+    sessionPath: parentBinding.sessionPath ?? `/sessions/${parentBinding.id}`,
+    cwd: parentBinding.cwd,
+    ...modelForRole(parentBinding.assignment.role),
+    extensionProtocol: 1,
+  });
+  const result = await w.orchestrator.reconcile({ projectId: "project" });
+  expect(result).toMatchObject({ ok: true, value: { bindings: [{ launchState: "ready" }] } });
+});
 
 test.each(["reconcile", "close"] as const)(
   "known workspace identity survives display-name changes: %s",

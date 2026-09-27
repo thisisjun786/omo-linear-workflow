@@ -1015,6 +1015,44 @@ describe("orchestrator startup", () => {
     deliveries.run(
       "UPDATE stage_lineage SET handoff_json = json_remove(handoff_json, '$.completionReportId') WHERE binding_id = 'stage-id-5'",
     );
+    const recoveredLegacy = await orchestrator.stageComplete({
+      fromId: binding.id,
+      planPath: path,
+      head: tip,
+      messageId: "report",
+      text: "done",
+    });
+    expect(recoveredLegacy).toMatchObject({ ok: true, value: { state: "accepted" } });
+    const recoveredStage = deliveries
+      .query<{ handoff_json: string }, []>(
+        "SELECT handoff_json FROM stage_lineage WHERE binding_id = 'stage-id-5'",
+      )
+      .get();
+    expect(JSON.parse(recoveredStage?.handoff_json ?? "null")).toMatchObject({
+      completedAt: "2026-09-26T00:00:00.000Z",
+      completionReportId: "report",
+    });
+    expect(
+      await orchestrator.stageComplete({
+        fromId: binding.id,
+        planPath: path,
+        head: tip,
+        messageId: "report",
+        text: "done",
+      }),
+    ).toEqual(recoveredLegacy);
+    expect(
+      await orchestrator.stageComplete({
+        fromId: binding.id,
+        planPath: path,
+        head: tip,
+        messageId: "different-report",
+        text: "done",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "handoff_conflict" } });
+    deliveries.run(
+      "UPDATE stage_lineage SET handoff_json = json_remove(handoff_json, '$.completionReportId') WHERE binding_id = 'stage-id-5'",
+    );
     const beforeLegacyStart = events.length;
     expect(
       await orchestrator.stageStart({

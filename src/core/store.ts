@@ -510,8 +510,16 @@ export function openRegistry(
         stage?.stage !== "plan"
       )
         return error("handoff_not_allowed", "Handoff requires a ready plan owner");
-      if (stage.handoff !== null && !same(stage.handoff, handoff))
-        return error("handoff_conflict", "Handoff is immutable");
+      if (stage.handoff !== null && !same(stage.handoff, handoff)) {
+        const legacyRecovery =
+          stage.handoff.completionReportId === undefined &&
+          handoff.completionReportId !== undefined &&
+          stage.handoff.planPath === handoff.planPath &&
+          stage.handoff.planSha256 === handoff.planSha256 &&
+          stage.handoff.head === handoff.head &&
+          stage.handoff.completedAt === handoff.completedAt;
+        if (!legacyRecovery) return error("handoff_conflict", "Handoff is immutable");
+      }
       lineage.handoff(bindingId, handoff);
       return ok({ ...stage, handoff });
     });

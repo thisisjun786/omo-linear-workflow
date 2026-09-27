@@ -2,14 +2,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import type { Checkout } from "../core/contracts";
-import { CheckoutPathError, copyIntoCheckout } from "./checkout-fd";
+import { CheckoutPathError, copyIntoCheckout, hasControlCharacter } from "./checkout-fd";
 import { mirrorPath } from "./mirror";
 
-const hasControlCharacter = (value: string) =>
-  [...value].some((character) => {
-    const code = character.charCodeAt(0);
-    return code <= 0x1f || code === 0x7f;
-  });
 const localFileSchema = z.strictObject({
   source: z
     .string()

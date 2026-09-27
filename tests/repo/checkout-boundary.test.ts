@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type { Checkout } from "../../src/core/contracts";
 import { initializeCheckout } from "../../src/repo/checkout";
 import { copyIntoCheckout } from "../../src/repo/checkout-fd";
@@ -64,6 +65,35 @@ test("the FFI boundary rejects embedded NUL before encoding", async () => {
     code: "local_file_target_unsafe",
   });
 });
+
+test.each([
+  ["target DEL", "source", "a/secret\u007f"],
+  ["target C1 NEL", "source", "a/secret\u0085"],
+  ["target C1 CSI", "source", "a/secret\u009b"],
+  ["source C1 NEL", "source\u0085", "secret"],
+])("the configuration schema rejects %s before any copy", async (_label, sourceName, target) => {
+  const root = await mkdtemp(join(tmpdir(), "olw-checkout-c1-"));
+  roots.push(root);
+  const source = join(root, sourceName);
+  await writeFile(source, "fixture");
+  const w = await fixture(source, target);
+  await expect(initializeCheckout(w.root, w.checkout)).rejects.toBeInstanceOf(z.ZodError);
+  expect(await Bun.file(w.receiptPath).exists()).toBe(false);
+  expect(await Bun.file(join(w.checkoutPath, "a", "secret")).exists()).toBe(false);
+});
+
+test.each(["a\u001f/secret", "a/secret\u007f", "a/secret\u0085", "a/secret\u009b"])(
+  "the FFI boundary rejects control characters in %j",
+  async (target) => {
+    const root = await mkdtemp(join(tmpdir(), "olw-checkout-ffi-control-"));
+    roots.push(root);
+    await mkdir(join(root, "checkout"));
+    await expect(
+      copyIntoCheckout(join(root, "checkout"), target, new Uint8Array([1])),
+    ).rejects.toMatchObject({ code: "local_file_target_unsafe" });
+    expect(await Bun.file(join(root, "checkout", "a", "secret")).exists()).toBe(false);
+  },
+);
 
 test("a directory close failure is typed and each descriptor is closed once", async () => {
   const calls: number[] = [];

@@ -40,8 +40,18 @@ export interface CheckoutCopyOptions {
   readonly write?: (fd: number, contents: Uint8Array) => Promise<number>;
 }
 
+/** C0, DEL and C1 control characters (U+0000-U+001F, U+007F-U+009F). */
+export function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
 function cstring(value: string): Uint8Array {
-  if (value.includes("\0")) throw new CheckoutPathError("Local file path contains an embedded NUL");
+  if (hasControlCharacter(value))
+    throw new CheckoutPathError("Local file path contains a control character");
   return new TextEncoder().encode(`${value}\0`);
 }
 

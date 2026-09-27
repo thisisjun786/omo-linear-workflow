@@ -1751,6 +1751,21 @@ test("manage relaunches when the recorded pane survives but its TUI exited", asy
   expect(w.runs).toHaveLength(2);
 });
 
+test("manage resolves a missing managed Herdr artifact as runtime_unavailable", async () => {
+  const w = await world();
+  value(await w.orchestrator.manage());
+  const orchestrator = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    resolveHerdrArtifact: async () => {
+      throw new Error("managed Herdr artifact missing");
+    },
+  });
+  await expect(orchestrator.manage()).resolves.toMatchObject({
+    ok: false,
+    error: { code: "runtime_unavailable", details: "managed Herdr artifact missing" },
+  });
+});
+
 test("manage refuses an incompatible host before focusing or reattaching", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage());

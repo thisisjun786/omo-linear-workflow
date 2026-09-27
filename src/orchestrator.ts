@@ -2376,12 +2376,14 @@ export class Orchestrator {
     binding: Binding,
     allowIdleHandoff = false,
   ): Promise<Result<never> | undefined> {
-    const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
-    const environment = launchEnvironment(this.#root, managedHerdrPath(artifact.artifactDir));
-    const check = async () => {
-      await this.#deps.checkHostProfile?.(this.#root, binding.omoSocket, environment);
-    };
+    let environment: Readonly<Record<string, string | undefined>>;
+    let check: () => Promise<void>;
     try {
+      const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
+      environment = launchEnvironment(this.#root, managedHerdrPath(artifact.artifactDir));
+      check = async () => {
+        await this.#deps.checkHostProfile?.(this.#root, binding.omoSocket, environment);
+      };
       await check();
       return undefined;
     } catch (cause) {

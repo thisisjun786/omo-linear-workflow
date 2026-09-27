@@ -15,16 +15,22 @@ async function waitFor(
   trigger: () => Promise<void>,
 ): Promise<void> {
   const done = Promise.withResolvers<void>();
+  const expired = Promise.withResolvers<never>();
   const inspect = () =>
     void herdr.snapshot().then((snapshot) => {
       if (predicate(snapshot)) done.resolve();
     }, done.reject);
   const stop = await herdr.subscribe(inspect);
-  const timeout = setTimeout(() => done.reject(new Error("auto-handoff QA deadline")), 60_000);
+  const timeout = setTimeout(() => expired.reject(new Error("auto-handoff QA deadline")), 60_000);
   try {
-    await trigger();
-    inspect();
-    await done.promise;
+    await Promise.race([
+      (async () => {
+        await trigger();
+        inspect();
+        await done.promise;
+      })(),
+      expired.promise,
+    ]);
   } finally {
     clearTimeout(timeout);
     stop();

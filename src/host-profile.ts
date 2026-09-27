@@ -166,6 +166,7 @@ export async function runBoundedHostCommand(
   spawn: () => HostCommandProcess = () =>
     Bun.spawn([...argv], { cwd, env, stdout: "pipe", stderr: "pipe", detached: true }),
   operation: "status" | "handoff" = "handoff",
+  deadline?: Promise<never>,
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   const child = spawn();
   const stdout = child.stdout?.getReader();
@@ -181,11 +182,13 @@ export async function runBoundedHostCommand(
   };
   const completed = Promise.all([child.exited, read(stdout), read(stderr)]);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new HostCommandTimeoutError(operation, timeoutMs));
-    }, timeoutMs);
-  });
+  const timeout =
+    deadline ??
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new HostCommandTimeoutError(operation, timeoutMs));
+      }, timeoutMs);
+    });
   try {
     const [code, stdoutText, stderrText] = await Promise.race([completed, timeout]);
     await cleanSuccessfulProcessGroup(child.pid);

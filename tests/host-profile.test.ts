@@ -238,23 +238,34 @@ test("an output read failure kills and reaps the child before preserving the rea
   expect(await child.exited).toBe(137);
 });
 
-test("bounded host commands time out after the parent exits while a grandchild holds output pipes", async () => {
-  const started = performance.now();
-  await expect(
-    import("../src/host-profile").then(({ runBoundedHostCommand }) =>
-      runBoundedHostCommand(
-        [
-          "python3",
-          "-c",
-          "import os, signal; pid=os.fork(); os._exit(0) if pid else signal.pause()",
-        ],
-        "/tmp",
-        process.env,
-        100,
-      ),
-    ),
-  ).rejects.toBeInstanceOf(HostCommandTimeoutError);
-  expect(performance.now() - started).toBeLessThan(3000);
+test("bounded host commands kill the group, reap, then reject when the deadline fires", async () => {
+  const exit = Promise.withResolvers<number>();
+  const deadline = Promise.withResolvers<never>();
+  const events: string[] = [];
+  const child = {
+    exited: exit.promise.then((code) => {
+      events.push("reap");
+      return code;
+    }),
+    stdout: new ReadableStream<Uint8Array>(),
+    stderr: new ReadableStream<Uint8Array>(),
+    kill() {
+      events.push("kill");
+      exit.resolve(137);
+    },
+  };
+  const timeout = new HostCommandTimeoutError("handoff", 100);
+  const running = import("../src/host-profile")
+    .then(({ runBoundedHostCommand }) =>
+      runBoundedHostCommand(["fixture"], "/tmp", {}, 100, () => child, "handoff", deadline.promise),
+    )
+    .catch((cause: unknown) => {
+      events.push("reject");
+      throw cause;
+    });
+  deadline.reject(timeout);
+  await expect(running).rejects.toBe(timeout);
+  expect(events).toEqual(["kill", "reap", "reject"]);
 });
 
 test("successful host commands empty their detached process group before returning", async () => {

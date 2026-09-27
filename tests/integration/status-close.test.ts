@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -493,6 +493,44 @@ test.each([false, true])(
     }
   },
 );
+
+test("status and close preserve storage_corrupt for a successor's malformed predecessor handoff", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query("UPDATE stage_lineage SET handoff_json = ? WHERE binding_id = 'plan'").run(
+        JSON.stringify({ head: 7 }),
+      );
+    } finally {
+      db.close();
+    }
+    const corrupt = {
+      ok: false,
+      error: { code: "storage_corrupt", message: "Stored stage handoff is invalid" },
+    };
+    expect(w.orchestrator.status()).toMatchObject(corrupt);
+    expect(await w.orchestrator.close("execute")).toMatchObject(corrupt);
+
+    let output = "";
+    const stdout = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      output += String(chunk);
+      return true;
+    });
+    try {
+      expect(
+        await runCli(["--root", w.root, "close", "--binding", "execute", "--json"], w.dependencies),
+      ).toBe(2);
+      expect(JSON.parse(output)).toMatchObject(corrupt);
+    } finally {
+      stdout.mockRestore();
+    }
+    expect(value(w.registry.get("execute")).launchState).toBe("ready");
+  } finally {
+    w.cleanup();
+  }
+});
 
 test("status/close: old generation close leaves new generation live, and new generation can close", async () => {
   const w = await world();

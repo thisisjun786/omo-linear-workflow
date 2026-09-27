@@ -199,6 +199,12 @@ export function openRegistry(
     return ok(history.length === 0 ? parsed.data : { ...parsed.data, attempts: history });
   }
 
+  function storageFailure<T>(cause: unknown, message: string): Result<T> {
+    return cause instanceof StageHandoffStorageError
+      ? error("storage_corrupt", cause.message, cause.details)
+      : error("storage_error", message, messageOf(cause));
+  }
+
   function transaction<T>(operation: () => Result<T>): Result<T> {
     try {
       db.run("BEGIN IMMEDIATE");
@@ -214,7 +220,7 @@ export function openRegistry(
           rollback: messageOf(rollbackCause),
         });
       }
-      return error("storage_error", "Registry transaction failed", messageOf(cause));
+      return storageFailure(cause, "Registry transaction failed");
     }
   }
 
@@ -389,50 +395,50 @@ export function openRegistry(
     try {
       return ok(lineage.get(bindingId));
     } catch (cause) {
-      return cause instanceof StageHandoffStorageError
-        ? error("storage_corrupt", cause.message, cause.details)
-        : error("storage_error", "Could not read stage", messageOf(cause));
+      return storageFailure(cause, "Could not read stage");
     }
   }
   function stageChain(issueId: string): Result<StageRecord[]> {
     try {
       return ok(lineage.chain(issueId));
     } catch (cause) {
-      return cause instanceof StageHandoffStorageError
-        ? error("storage_corrupt", cause.message, cause.details)
-        : error("storage_error", "Could not read stage chain", messageOf(cause));
+      return storageFailure(cause, "Could not read stage chain");
     }
   }
   function lineageFor(bindingId: string): Result<StageLineage> {
-    const binding = get(bindingId);
-    if (!binding.ok) return binding;
-    if (binding.value.assignment.role !== "child")
-      return error("invalid_stage", "Only children have stage lineage");
-    const issueId = binding.value.assignment.issueId;
-    const stage = stageOf(bindingId);
-    if (!stage.ok) return stage;
-    if (stage.value === null)
+    try {
+      const binding = get(bindingId);
+      if (!binding.ok) return binding;
+      if (binding.value.assignment.role !== "child")
+        return error("invalid_stage", "Only children have stage lineage");
+      const issueId = binding.value.assignment.issueId;
+      const stage = stageOf(bindingId);
+      if (!stage.ok) return stage;
+      if (stage.value === null)
+        return ok({
+          issueId,
+          mode: "direct",
+          stages: [
+            { bindingId, stage: "direct", ordinal: 0, launchState: binding.value.launchState },
+          ],
+        });
+      const stages = lineage.generationOf(bindingId).map((entry) => {
+        const current = get(entry.bindingId);
+        return {
+          bindingId: entry.bindingId,
+          stage: entry.stage,
+          ordinal: entry.ordinal,
+          launchState: current.ok ? current.value.launchState : ("closed" as const),
+        };
+      });
       return ok({
         issueId,
-        mode: "direct",
-        stages: [
-          { bindingId, stage: "direct", ordinal: 0, launchState: binding.value.launchState },
-        ],
+        mode: stages[0]?.stage === "plan" ? "planned" : (stages[0]?.stage ?? "direct"),
+        stages,
       });
-    const stages = lineage.generationOf(bindingId).map((entry) => {
-      const current = get(entry.bindingId);
-      return {
-        bindingId: entry.bindingId,
-        stage: entry.stage,
-        ordinal: entry.ordinal,
-        launchState: current.ok ? current.value.launchState : ("closed" as const),
-      };
-    });
-    return ok({
-      issueId,
-      mode: stages[0]?.stage === "plan" ? "planned" : (stages[0]?.stage ?? "direct"),
-      stages,
-    });
+    } catch (cause) {
+      return storageFailure(cause, "Could not read stage lineage");
+    }
   }
   function recordStage(
     bindingId: string,
@@ -1176,12 +1182,10 @@ export function openRegistry(
         "deliverable_mismatch",
         "Issue packet deliverable differs from the child binding",
       );
-    if (
-      report &&
-      from.role === "child" &&
-      envelope.outcome === "completed" &&
-      lineage.get(sender.value.id)?.stage !== "plan"
-    ) {
+    if (report && from.role === "child" && envelope.outcome === "completed") {
+      const senderStage = stageOf(sender.value.id);
+      if (!senderStage.ok) return senderStage;
+      if (senderStage.value?.stage === "plan") return ok(target.value);
       const kind = sender.value.deliverable;
       if (kind === "report" || kind === "document") {
         if (envelope.delivery?.kind !== kind)

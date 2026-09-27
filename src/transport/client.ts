@@ -12,6 +12,13 @@ export class NativeSessionAbsentError extends Error {
   }
 }
 
+export class NativeSessionNotReadyError extends Error {
+  constructor(readonly status: "opening" | "closing" | "closed") {
+    super(`Exact durable native session is present but ${status}`);
+    this.name = "NativeSessionNotReadyError";
+  }
+}
+
 export interface NativeSession {
   configure(model: RoleModel): Promise<void>;
   hasUserMessage(text: string): Promise<boolean>;
@@ -71,7 +78,6 @@ export async function attachBindingWithClient(
     const sessions = await client.listSessions();
     const matches = sessions.filter(
       (session) =>
-        session.status === "open" &&
         session.durableSessionId === binding.durableSessionId &&
         session.sessionPath === binding.sessionPath &&
         session.cwd === binding.cwd,
@@ -80,6 +86,7 @@ export async function attachBindingWithClient(
     if (exact === undefined) throw new NativeSessionAbsentError();
     if (matches.length !== 1)
       throw new Error("Host must contain exactly one durable native session");
+    if (exact.status !== "open") throw new NativeSessionNotReadyError(exact.status);
     const opened = await client.openSession({
       sessionPath: binding.sessionPath,
       cwd: binding.cwd,

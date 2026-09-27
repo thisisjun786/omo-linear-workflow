@@ -25,7 +25,12 @@ import {
   planPathForIssueKey,
 } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
-import { type NativeSession, NativeSessionAbsentError } from "../../src/transport";
+import {
+  attachBindingWithClient,
+  type NativeSession,
+  NativeSessionAbsentError,
+  type RpcPort,
+} from "../../src/transport/client";
 
 const ownedRoots: string[] = [];
 afterEach(async () => {
@@ -1177,6 +1182,51 @@ describe("orchestrator startup", () => {
       },
     });
     expect(events.filter((event) => event === "run")).toHaveLength(runsBeforeRecovery);
+
+    for (const status of ["opening", "closing"] as const) {
+      const presentButUnavailable = new Orchestrator(root, "/fake/herdr.sock", {
+        ...dependencies,
+        attachBinding: async (candidate) => {
+          if (candidate.id !== started.value.binding.id)
+            return dependencies.attachBinding(candidate);
+          const rpc: RpcPort = {
+            getMessages: async () => [],
+            setModel: async () => {},
+            setThinkingLevel: async () => {},
+            start: async () => {},
+            stop: async () => {},
+            closeSession: async () => {},
+            listSessions: async () => [
+              {
+                sessionId: "execute-native-row",
+                durableSessionId: candidate.durableSessionId,
+                ...(candidate.sessionPath === null ? {} : { sessionPath: candidate.sessionPath }),
+                cwd: candidate.cwd,
+                status,
+              },
+            ],
+            openSession: async () => ({ sessionId: "execute-native-row", attached: true }),
+            requestExtension: async () => {
+              throw new Error("present non-open session must not be attached");
+            },
+            onEvent: () => () => {},
+          };
+          return attachBindingWithClient(candidate, rpc);
+        },
+      });
+      expect(
+        await presentButUnavailable.stageStart({
+          fromId: binding.id,
+          parentId: parent.value.binding.id,
+          stage: "execute",
+          messageId: "start",
+        }),
+      ).toMatchObject({
+        ok: false,
+        error: { code: "runtime_unavailable", details: expect.stringContaining(status) },
+      });
+      expect(events.filter((event) => event === "run")).toHaveLength(runsBeforeRecovery);
+    }
 
     herdr.nativeIdentities.delete(started.value.binding.durableSessionId);
     expect(

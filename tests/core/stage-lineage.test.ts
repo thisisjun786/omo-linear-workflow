@@ -211,9 +211,12 @@ test("a read-only registry without a generation column still returns lineage", a
   }
 });
 
-test("malformed persisted handoff returns a typed storage error", async () => {
-  await fixture((path, registry, _parent, plan) => {
+test("malformed persisted handoff returns storage_corrupt from every lineage and transaction path", async () => {
+  await fixture((path, registry, _parent, plan, next) => {
     value(registry.recordStage(plan.id, "issue", "plan", 0, null));
+    ready(registry, plan);
+    value(registry.recordHandoff(plan.id, handoff));
+    const successor = value(registry.successorReservation(plan.id, next, "execute"));
     const db = new Database(path);
     try {
       db.query("UPDATE stage_lineage SET handoff_json = ? WHERE binding_id = ?").run(
@@ -223,10 +226,22 @@ test("malformed persisted handoff returns a typed storage error", async () => {
     } finally {
       db.close();
     }
-    expect(registry.stageOf(plan.id)).toMatchObject({
+    const corrupt = {
       ok: false,
       error: { code: "storage_corrupt", message: "Stored stage handoff is invalid" },
-    });
+    };
+    expect(registry.stageOf(plan.id)).toMatchObject(corrupt);
+    expect(registry.stageChain("issue")).toMatchObject(corrupt);
+    expect(registry.lineageFor(plan.id)).toMatchObject(corrupt);
+    expect(registry.lineageFor(successor.id)).toMatchObject(corrupt);
+    expect(registry.recordHandoff(plan.id, handoff)).toMatchObject(corrupt);
+    expect(
+      registry.successorReservation(
+        plan.id,
+        { ...next, bindingId: "another", durableSessionId: "another" },
+        "execute",
+      ),
+    ).toMatchObject(corrupt);
   });
 });
 

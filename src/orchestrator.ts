@@ -1421,6 +1421,15 @@ export class Orchestrator {
             registry.successorLaunchIntent(binding.id),
           );
           if (!intent.ok) return intent;
+          if (
+            intent.value !== null &&
+            (intent.value.state === "claimed" || intent.value.state === "dispatching")
+          )
+            return ok({
+              ...this.#creationResult(binding),
+              readiness: "launching",
+              execution: "not_started",
+            });
           if (intent.value === null || intent.value.state !== "uncertain")
             return failure("invalid_transition", "Execute recovery is not reconcilable");
           const recovered = this.#withRegistry((registry) =>

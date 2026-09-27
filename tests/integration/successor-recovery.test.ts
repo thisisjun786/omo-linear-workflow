@@ -319,6 +319,28 @@ test("a stale absence observation revalidates after the owner succeeds", async (
   expect(w.launches()).toBe(1);
 });
 
+test("a caller seeing the native session during another dispatch gets the in-progress attempt", async () => {
+  const w = await world();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  w.setRunHook(async () => {
+    await w.publish();
+    entered.resolve();
+    await release.promise;
+  });
+  const first = w.start();
+  await entered.promise;
+  const second = await w.start();
+  expect(second).toMatchObject({
+    ok: true,
+    value: { binding: { id: "execute" }, readiness: "launching" },
+  });
+  expect(w.launches()).toBe(1);
+  release.resolve();
+  expect(await first).toMatchObject({ ok: true, value: { readiness: "ready" } });
+  expect(w.launches()).toBe(1);
+});
+
 test("dispatching is never taken over when the claim clock expires", async () => {
   const w = await world();
   const entered = Promise.withResolvers<void>();

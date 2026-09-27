@@ -1006,6 +1006,34 @@ describe("orchestrator startup", () => {
     }
     expect(live().map((item) => item.id)).toEqual([binding.id]);
     const deliveries = new Database(join(root, ".omo/state/registry.sqlite"));
+    const nativeHandoff = deliveries
+      .query<{ handoff_json: string }, []>(
+        "SELECT handoff_json FROM stage_lineage WHERE binding_id = 'stage-id-5'",
+      )
+      .get();
+    if (nativeHandoff === null) throw new Error("Missing native handoff fixture");
+    deliveries.run(
+      "UPDATE stage_lineage SET handoff_json = json_remove(handoff_json, '$.completionReportId') WHERE binding_id = 'stage-id-5'",
+    );
+    const beforeLegacyStart = events.length;
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        stage: "execute",
+        parentId: parent.value.binding.id,
+        messageId: "start",
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "plan_report_not_accepted",
+        message: expect.stringContaining("stage complete"),
+      },
+    });
+    expect(events).toHaveLength(beforeLegacyStart);
+    deliveries.run("UPDATE stage_lineage SET handoff_json = ? WHERE binding_id = 'stage-id-5'", [
+      nativeHandoff.handoff_json,
+    ]);
     deliveries.run("UPDATE deliveries SET state = 'uncertain' WHERE message_id = 'report'");
     deliveries.close();
     const beforeUnacceptedStart = events.length;
@@ -1144,6 +1172,26 @@ describe("orchestrator startup", () => {
       ),
     ).toHaveLength(quitCount);
     expect(herdr.nativeIdentities.has(binding.durableSessionId)).toBe(false);
+    const editDuringStop = new Orchestrator(root, "/fake/herdr.sock", {
+      ...dependencies,
+      terminateBinding: async (child) => {
+        await Bun.write(path, "Plan edited while predecessor exits");
+        await originalTerminate(child);
+      },
+    });
+    expect(
+      await editDuringStop.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "plan_changed", message: expect.stringContaining("already stopped") },
+    });
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    await Bun.write(path, "Plan content");
     const originalTab = herdr.createTab.bind(herdr);
     let failedTab = false;
     herdr.createTab = async (workspaceId, cwd, label) => {

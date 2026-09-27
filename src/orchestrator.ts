@@ -1295,42 +1295,67 @@ export class Orchestrator {
       if (!context.ok) return context;
       return this.#resumeSuccessor(successor.value, context.value.snapshot, handoff);
     }
-    if (handoff.completionReportId !== undefined) {
-      const report = this.#withRegistry((registry) =>
-        registry.delivery(handoff.completionReportId ?? ""),
+    if (handoff.completionReportId === undefined)
+      return failure(
+        "plan_report_not_accepted",
+        "Plan handoff predates accepted-report tracking; rerun stage complete before execution",
       );
-      if (
-        !report.ok ||
-        report.value.state !== "accepted" ||
-        report.value.envelope.fromBindingId !== plan.value.id ||
-        report.value.envelope.outcome !== "completed" ||
-        !report.value.envelope.evidence.includes(handoff.planPath)
-      )
-        return failure(
-          "plan_report_not_accepted",
-          "Plan completion report has not been natively accepted",
-        );
-    }
+    const completionReportId = handoff.completionReportId;
+    const report = this.#withRegistry((registry) => registry.delivery(completionReportId));
+    if (
+      !report.ok ||
+      report.value.state !== "accepted" ||
+      report.value.envelope.fromBindingId !== plan.value.id ||
+      report.value.envelope.outcome !== "completed" ||
+      !report.value.envelope.evidence.includes(handoff.planPath)
+    )
+      return failure(
+        "plan_report_not_accepted",
+        "Plan completion report has not been natively accepted",
+      );
     const checkout = plan.value.checkout;
-    let head: string;
-    try {
-      if (handoff.completionReportId !== undefined) {
+    const verifyPlan = async (stopped: boolean): Promise<Result<undefined>> => {
+      try {
         const [checkoutPath, planPath] = await Promise.all([
           realpath(checkout.path),
           realpath(handoff.planPath),
         ]);
         const inside = relative(checkoutPath, planPath);
         if (inside === "" || inside === ".." || inside.startsWith("../") || isAbsolute(inside))
-          return failure("plan_changed", "Plan path no longer resolves inside the child worktree");
+          return failure(
+            "plan_changed",
+            stopped
+              ? "Plan path changed after the plan session stopped; no successor was reserved"
+              : "Plan path no longer resolves inside the child worktree",
+          );
         const digest = createHash("sha256")
           .update(await readFile(planPath))
           .digest("hex");
         if (digest !== handoff.planSha256)
-          return failure("plan_changed", "Plan file changed since the accepted handoff");
+          return failure(
+            "plan_changed",
+            stopped
+              ? "Plan changed after the plan session already stopped; no successor was reserved"
+              : "Plan file changed since the accepted handoff",
+          );
+        return ok(undefined);
+      } catch (cause) {
+        return failure(
+          "plan_changed",
+          stopped
+            ? "Plan could not be verified after the plan session already stopped; no successor was reserved"
+            : "Could not verify the handed-off plan file",
+          messageOf(cause),
+        );
       }
+    };
+    const initialPlan = await verifyPlan(false);
+    if (!initialPlan.ok) return initialPlan;
+    let head: string;
+    try {
       head = await this.#deps.gitTip(checkout.path, "HEAD");
     } catch (cause) {
-      return failure("plan_changed", "Could not verify the handed-off plan file", messageOf(cause));
+      return failure("runtime_unavailable", "Could not read plan HEAD", messageOf(cause));
     }
     if (head !== handoff.head)
       return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
@@ -1373,6 +1398,8 @@ export class Orchestrator {
     } finally {
       herdr.close();
     }
+    const finalPlan = await verifyPlan(true);
+    if (!finalPlan.ok) return finalPlan;
     return this.#create(
       plan.value.assignment,
       context.value.designation,

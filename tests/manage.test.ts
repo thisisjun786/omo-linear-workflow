@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@code-yeongyu/senpi";
@@ -493,6 +493,139 @@ test("bare entry takes over a dead reattach owner and reports a live owner as ma
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+  }
+});
+
+test("bare entry takes over a recycled PID while the unrelated process stays alive and fences its old token", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  const child = Bun.spawn([process.execPath, "--eval", "process.stdin.resume();"], {
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    const claim = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+    );
+    if (!claim.claimed) throw new Error("Manager reattachment not claimed");
+    const columns = db.query<{ name: string }, []>("PRAGMA table_info(manager_reattach)").all();
+    expect(columns.some((column) => column.name === "owner_starttime")).toBe(true);
+    const stat = await readFile(`/proc/${process.pid}/stat`, "utf8");
+    const starttime = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19];
+    if (starttime === undefined) throw new Error("Missing current process start time");
+    expect(
+      db
+        .query<{ owner_pid: number; owner_starttime: string }, []>(
+          "SELECT owner_pid, owner_starttime FROM manager_reattach",
+        )
+        .get(),
+    ).toEqual({ owner_pid: process.pid, owner_starttime: starttime });
+    const unrelatedStat = await readFile(`/proc/${child.pid}/stat`, "utf8");
+    const unrelatedStart = unrelatedStat.slice(unrelatedStat.lastIndexOf(")") + 2).split(/\s+/)[19];
+    if (unrelatedStart === undefined) throw new Error("Missing fixture process start time");
+    db.query("UPDATE manager_reattach SET owner_pid = ?, owner_starttime = ?").run(
+      child.pid,
+      unrelatedStart,
+    );
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+    // A matching generation remains a live owner, even before an agent appears.
+    expect(await runCli(["--root", w.root], w.deps)).toBe(3);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      ok: false,
+      error: { code: "manager_busy" },
+    });
+    // Model the persisted identity of an older process at this now-recycled PID.
+    db.query("UPDATE manager_reattach SET owner_starttime = ?").run(
+      (BigInt(unrelatedStart) + 1n).toString(),
+    );
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(child.exitCode).toBeNull();
+    expect(w.runs).toHaveLength(2);
+    expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(false);
+    expect(
+      w.readRegistry((r) => r.recordReattachPane(first.id, claim.token, "stale:pane")),
+    ).toMatchObject({ ok: false, error: { code: "lease_lost" } });
+    expect(w.readRegistry((r) => value(r.finishReattach(first.id, claim.token)))).toBe(false);
+  } finally {
+    child.kill();
+    await child.exited;
+    db.close();
+    output.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("legacy reattachment rows migrate with unknown start time and retain PID-only liveness", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const held = w.readRegistry((r) =>
+    value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+  );
+  if (!held.claimed) throw new Error("No fixture reattachment claim");
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  const child = Bun.spawn([process.execPath, "--eval", "process.stdin.resume();"], {
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    // Recreate the actual prior schema, rather than adding the new column in the test.
+    db.run("ALTER TABLE manager_reattach RENAME TO saved_reattach");
+    db.run(
+      "CREATE TABLE manager_reattach (binding_id TEXT PRIMARY KEY REFERENCES bindings(id), claimed_at TEXT NOT NULL, owner TEXT NOT NULL, owner_pid INTEGER)",
+    );
+    db.run(
+      "INSERT INTO manager_reattach SELECT binding_id, claimed_at, owner, owner_pid FROM saved_reattach",
+    );
+    db.run("DROP TABLE saved_reattach");
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(child.pid);
+    // Read-only inspection must not migrate a legacy registry.
+    const readonly = openRegistry(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
+    readonly.close();
+    expect(
+      db
+        .query<{ name: string }, []>("PRAGMA table_info(manager_reattach)")
+        .all()
+        .some((c) => c.name === "owner_starttime"),
+    ).toBe(false);
+    const live = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01", true)),
+    );
+    expect(live.claimed).toBe(false);
+    expect(
+      db
+        .query<{ owner_starttime: string | null }, []>(
+          "SELECT owner_starttime FROM manager_reattach",
+        )
+        .get()?.owner_starttime,
+    ).toBeNull();
+    child.kill();
+    await child.exited;
+    const reclaimed = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01", true)),
+    );
+    expect(reclaimed.claimed).toBe(true);
+    expect(w.readRegistry((r) => value(r.ownsReattach(first.id, held.token)))).toBe(false);
+    expect(
+      db
+        .query<{ owner_pid: number; owner_starttime: string }, []>(
+          "SELECT owner_pid, owner_starttime FROM manager_reattach",
+        )
+        .get(),
+    ).toMatchObject({ owner_pid: process.pid, owner_starttime: expect.stringMatching(/^\d+$/) });
+  } finally {
+    child.kill();
+    await child.exited;
+    db.close();
   }
 });
 

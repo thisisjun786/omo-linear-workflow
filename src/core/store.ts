@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { z } from "zod";
 import type {
   Assignment,
   Binding,
@@ -60,7 +62,29 @@ function error<T>(code: string, message: string, details?: unknown): Result<T> {
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
-function processAlive(pid: number): boolean {
+const processStarttimeSchema = z.string().regex(/^\d+$/);
+function processStarttime(pid: number): string | null {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (cause) {
+    if (
+      cause instanceof Error &&
+      "code" in cause &&
+      (cause.code === "ENOENT" || cause.code === "ESRCH")
+    )
+      return null;
+    throw cause;
+  }
+  // comm (field 2) may contain spaces or ')'; the suffix starts at field 3.
+  const fields = stat
+    .slice(stat.lastIndexOf(")") + 2)
+    .trim()
+    .split(/\s+/);
+  return processStarttimeSchema.parse(fields[19]);
+}
+function processAlive(pid: number, starttime: string | null): boolean {
+  if (starttime !== null) return processStarttime(pid) === starttime;
   try {
     process.kill(pid, 0);
     return true;
@@ -181,6 +205,8 @@ export function openRegistry(
       .all();
     if (!reattachColumns.some((column) => column.name === "owner_pid"))
       db.run("ALTER TABLE manager_reattach ADD COLUMN owner_pid INTEGER");
+    if (!reattachColumns.some((column) => column.name === "owner_starttime"))
+      db.run("ALTER TABLE manager_reattach ADD COLUMN owner_starttime TEXT");
     db.run(`CREATE TABLE IF NOT EXISTS successor_launch (
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
     state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
@@ -664,12 +690,20 @@ export function openRegistry(
     readonly claimed_at: string;
     readonly owner: string;
     readonly owner_pid: number | null;
+    readonly owner_starttime: string | null;
   } | null {
     return db
       .query<
-        { readonly claimed_at: string; readonly owner: string; readonly owner_pid: number | null },
+        {
+          readonly claimed_at: string;
+          readonly owner: string;
+          readonly owner_pid: number | null;
+          readonly owner_starttime: string | null;
+        },
         [string]
-      >("SELECT claimed_at, owner, owner_pid FROM manager_reattach WHERE binding_id = ?")
+      >(
+        "SELECT claimed_at, owner, owner_pid, owner_starttime FROM manager_reattach WHERE binding_id = ?",
+      )
       .get(id);
   }
 
@@ -697,13 +731,23 @@ export function openRegistry(
         binding.value.paneId !== expectedPaneId ||
         (held !== null &&
           held.claimed_at >= staleBefore &&
-          !(reclaimDeadOwner && held.owner_pid !== null && !processAlive(held.owner_pid)))
+          !(
+            reclaimDeadOwner &&
+            held.owner_pid !== null &&
+            !processAlive(held.owner_pid, held.owner_starttime)
+          ))
       )
         return ok({ claimed: false, binding: binding.value });
       const token = randomUUID();
       db.query(
-        "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid) VALUES (?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid",
-      ).run(id, claimedAt, token, process.pid);
+        "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid, owner_starttime) VALUES (?, ?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid, owner_starttime = excluded.owner_starttime",
+      ).run(
+        id,
+        claimedAt,
+        token,
+        process.pid,
+        processStarttimeSchema.parse(processStarttime(process.pid)),
+      );
       return ok({ claimed: true, binding: binding.value, token });
     });
   }

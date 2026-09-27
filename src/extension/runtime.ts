@@ -677,6 +677,8 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       }
     }
     try {
+      // Accepted manager-notice limitation: a turn that starts in the instant between the idle
+      // check and native acceptance may receive the one-line notice mid-turn; delivery is still exactly once.
       const input = nativeSendInputSchema.parse({
         thread: claim.target.durableSessionId,
         message,

@@ -22,7 +22,7 @@ published.
 ### Changed
 
 - Type `olw` in Herdr to open or reattach the single durable manager in the current pane, or focus its live pane. `manage --here` shares this entry; plain `manage` retains separate-workspace behavior.
-- Parent reports and questions reach the manager only when idle, as compact notices with retrievable full payloads and unchanged delivery receipts.
+- Parent reports and questions wait for manager idle admission and arrive as compact notices with retrievable full payloads and unchanged delivery receipts. Accepted limitation: a turn starting between the idle check and native acceptance may receive the notice mid-turn; delivery remains exactly once.
 - Manager guidance applies only when handling OLW messages, leaving ordinary assistant work unrestricted.
 - Pinned `omo-ai` 5.0.1 and its exact `@code-yeongyu/senpi` 2026.9.27 dependency, porting the maintained runtime repairs to the new executable bundles.
 

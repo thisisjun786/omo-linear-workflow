@@ -368,7 +368,7 @@ export async function runCli(
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
             "parent create":
-              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID [--repo PATH (deprecated; unmapped projects only)] [--base REF] (mapped projects use an owned clone; standalone parents link to the ready manager unless --no-manager)",
+              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID [--repo PATH (deprecated; rejected with legacy_parent_unsupported)] [--base REF] (mapped projects use an owned clone; standalone parents link to the ready manager unless --no-manager)",
             "parent link": "--parent BINDING --supervisor BINDING (supervisor or manager)",
             "parent unlink": "--parent BINDING",
             "child create":

@@ -486,6 +486,65 @@ test.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
   },
 );
 
+test.each(["SIGINT", "SIGTERM", "SIGHUP", "none"] as const)(
+  "%s followed by rejecting a pre-launch subscription closes the never-launched manager",
+  async (signal) => {
+    const w = await world();
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+    w.panes.set("caller:p1", { workspaceId: "caller" });
+    const entered = Promise.withResolvers<void>();
+    const subscription = Promise.withResolvers<() => void>();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => deadline.reject(new Error("Rejected startup settlement deadline")),
+      3000,
+    );
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const subscribe = herdr.subscribe;
+    herdr.subscribe = () => {
+      entered.resolve();
+      return subscription.promise;
+    };
+    const pending = w.orchestrator.manage({ here: true });
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      const reserved = managers(value(w.orchestrator.status()))[0];
+      if (!reserved) throw new Error("No startup reservation");
+      if (signal !== "none") process.emit(signal, signal);
+      subscription.reject(new Error("Herdr connection closed during subscription"));
+      expect(await Promise.race([pending, deadline.promise])).toMatchObject({
+        ok: false,
+        error: { code: signal === "none" ? "runtime_unavailable" : "manager_interrupted" },
+      });
+      expect(w.runs).toHaveLength(0);
+      expect(w.readRegistry((r) => value(r.get(reserved.id)))).toMatchObject({
+        launchState: "closed",
+        paneId: null,
+        initialization: { state: "pending" },
+      });
+      expect(w.readRegistry((r) => value(r.reattachPending(reserved.id)))).toBe(false);
+      herdr.subscribe = subscribe;
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("created");
+      expect(w.runs).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      subscription.resolve(() => {});
+      await pending;
+      herdr.subscribe = subscribe;
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
 test.each(["reserved", "provisioning"] as const)(
   "bare entry reclaims a dead %s launch owner through a new fenced token",
   async (state) => {

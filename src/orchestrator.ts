@@ -3177,8 +3177,12 @@ export class Orchestrator {
       if (here !== undefined && launchToken !== undefined) {
         const closed = this.#withRegistry((r) => r.closeUnstartedManager(bindingId, launchToken));
         if (!closed.ok) return closed;
-        if (cause instanceof ManagerInterrupted)
-          return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
+        const interrupted =
+          here.failure ?? (cause instanceof ManagerInterrupted ? cause : undefined);
+        if (interrupted !== undefined)
+          return failure("manager_interrupted", interrupted.message, {
+            exitCode: interrupted.exitCode,
+          });
       }
       if (here === undefined && target?.successor === undefined)
         this.#withRegistry((registry) => {
@@ -3347,6 +3351,24 @@ export class Orchestrator {
               },
       });
     } catch (cause) {
+      // A rejected pre-launch await can mask the signal that already interrupted this entry.
+      // No foreground child was spawned: settle the owned reservation, never mark it uncertain.
+      // The finally block below still releases any subscription/readiness resources.
+      if (here !== undefined && here.tui === undefined && launchToken !== undefined) {
+        const closed = this.#withRegistry((registry) =>
+          registry.closeUnstartedManager(bindingId, launchToken),
+        );
+        if (!closed.ok) return closed;
+        const interrupted =
+          here.failure ?? (cause instanceof ManagerInterrupted ? cause : undefined);
+        return interrupted === undefined
+          ? failure(
+              "runtime_unavailable",
+              "Manager failed before TUI launch; its reservation was released",
+              messageOf(cause),
+            )
+          : failure("manager_interrupted", interrupted.message, { exitCode: interrupted.exitCode });
+      }
       if (cause instanceof ManagerTuiExited || cause instanceof ManagerInterrupted) {
         if (here !== undefined && here.tui !== undefined && this.#ownsForeground(here))
           await here.tui.exited;

@@ -15,7 +15,7 @@ published.
 
 ### Fixed
 
-- Keep manager live ownership beyond lease expiry for both bare entry and plain `manage`, fence termination, and handle interruption from before reservation; safely recover abandoned unstarted claims.
+- Keep manager live ownership beyond lease expiry for both bare entry and plain `manage`, fence termination, and handle interruption from before reservation, including rejected pre-launch operations; safely recover abandoned unstarted claims.
 - Retain the manager's original OLW-owned workspace after moving to a user pane, and remove only that owned workspace at close.
 - Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.
 - Reject here-mode socket or foreground-process mismatches rather than binding to a same-named pane on another server.

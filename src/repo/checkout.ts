@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import type { Checkout } from "../core/contracts";
 import { mirrorPath } from "./mirror";
@@ -77,9 +77,13 @@ export async function cloneCheckout(root: string, checkout: Checkout): Promise<v
   await checkoutGit(checkout.path, ["checkout", "-b", checkout.branch, checkout.baseCommit]);
 }
 
+export class CheckoutInitializationError extends Error {
+  readonly code = "local_file_target_unsafe";
+}
+
 interface CheckoutReceipt {
   readonly checkout: string;
-  readonly copies: Array<{ source: string; target: string; mode: "0600" }>;
+  readonly copies: Array<{ sourceLabel: string; target: string; mode: "0600" }>;
   readonly setup: Array<{ index: number; code: number; timedOut: boolean; log: string }>;
 }
 
@@ -100,14 +104,35 @@ export async function initializeCheckout(root: string, checkout: Checkout): Prom
     writeFile(checkout.receiptPath ?? "", `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
   await save();
   const secrets: string[] = [];
+  await mkdir(checkout.path, { recursive: true });
+  const checkoutPath = await realpath(checkout.path);
+  const insideCheckout = (path: string) => {
+    const rel = relative(checkoutPath, path);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  };
+  const unsafe = (message: string) => new CheckoutInitializationError(message);
   for (const file of entry?.localFiles ?? []) {
     const destination = resolve(checkout.path, file.target);
     let directory = checkout.path;
     for (const part of file.target.split("/").slice(0, -1)) {
       directory = join(directory, part);
-      await mkdir(directory, { recursive: true });
-      if (!(await lstat(directory)).isDirectory())
-        throw new Error("Local file target traverses a non-directory");
+      try {
+        const existing = await lstat(directory);
+        if (existing.isSymbolicLink() || !existing.isDirectory())
+          throw unsafe("Local file target traverses a symlink or non-directory");
+      } catch (cause) {
+        if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) throw cause;
+        await mkdir(directory);
+      }
+    }
+    const resolvedDirectory = await realpath(directory);
+    if (!insideCheckout(resolvedDirectory))
+      throw unsafe("Local file target directory resolves outside the checkout");
+    try {
+      if ((await lstat(destination)).isSymbolicLink())
+        throw unsafe("Local file target is an existing symlink");
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) throw cause;
     }
     const contents = await readFile(file.source);
     const text = contents.toString("utf8");
@@ -128,7 +153,7 @@ export async function initializeCheckout(root: string, checkout: Checkout): Prom
     } finally {
       await rm(temporary, { force: true });
     }
-    receipt.copies.push({ source: file.source, target: file.target, mode: "0600" });
+    receipt.copies.push({ sourceLabel: basename(file.source), target: file.target, mode: "0600" });
     await save();
   }
   const redact = (text: string) =>

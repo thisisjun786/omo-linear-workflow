@@ -116,8 +116,9 @@ mapped parent and child gets its own copy, mode `0600`. Targets must be relative
 symlink directories, and cannot address `.git`. A target file is atomically replaced, not followed
 as a symlink. Legacy checkouts and execute-stage tab reuse are not initialized again.
 
-Receipts are recorded incrementally in `.omo/state/checkouts/<binding>.json` with source/target
-paths and permissions, never file contents. Optional trusted shell commands execute sequentially
+Receipts are recorded incrementally in `.omo/state/checkouts/<binding>.json` with each source's
+basename label, target path and permissions, never absolute source paths or file contents. Optional
+trusted shell commands execute sequentially
 in the new checkout. Each has a deadline (default 120 seconds, maximum 600 seconds) that kills its
 process group; nonzero exits and timeouts fail creation visibly, preserve the checkout, and retain
 the receipt. Stdout/stderr are captured in private `0600` adjacent setup logs; copied contents and

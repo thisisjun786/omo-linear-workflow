@@ -348,8 +348,9 @@ test("explicit local files are private, receipted and redacted from setup logs i
     expect(receiptPath).toBeDefined();
     const receipt = await readFile(receiptPath ?? "", "utf8");
     expect(receipt).not.toContain(secret);
+    expect(receipt).not.toContain(source);
     expect(JSON.parse(receipt)).toMatchObject({
-      copies: [{ source, target: ".env", mode: "0600" }],
+      copies: [{ sourceLabel: "local-env", target: ".env", mode: "0600" }],
       setup: [{ code: 0, timedOut: false }],
     });
     const log = await readFile(`${receiptPath}.setup-0.log`, "utf8");
@@ -404,21 +405,41 @@ test("snapshot base overrides default branch and duplicate parent never clones t
   expect(w.calls).toHaveLength(1);
 });
 
-test.each(["../outside", ".git/config", "link/secret"])(
-  "rejects local-file escape %s",
+test.each(["../outside", ".git/config"])("rejects invalid local-file target %s", async (target) => {
+  const w = await world();
+  const parent = value(await w.create()).binding;
+  if (!parent.checkout) throw new Error("missing checkout");
+  const source = join(w.root, "source");
+  await writeFile(source, "secret");
+  await writeFile(
+    join(w.root, ".omo/repos/config.json"),
+    JSON.stringify({ [w.remote]: { localFiles: [{ source, target }] } }),
+  );
+  expect(initializeCheckout(w.root, parent.checkout)).rejects.toThrow();
+});
+
+test.each(["link/secret", "link"])(
+  "rejects symlinked local-file target %s with a typed error and no outside write",
   async (target) => {
     const w = await world();
     const parent = value(await w.create()).binding;
     if (!parent.checkout) throw new Error("missing checkout");
-    await symlink(w.root, join(parent.cwd, "link"));
+    const outside = join(w.root, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(parent.cwd, "link"));
     const source = join(w.root, "source");
     await writeFile(source, "secret");
     await writeFile(
       join(w.root, ".omo/repos/config.json"),
       JSON.stringify({ [w.remote]: { localFiles: [{ source, target }] } }),
     );
-    await expect(initializeCheckout(w.root, parent.checkout)).rejects.toThrow();
-    expect(await Bun.file(join(w.root, "secret")).exists()).toBe(false);
+    try {
+      await initializeCheckout(w.root, parent.checkout);
+      throw new Error("expected initializeCheckout to reject");
+    } catch (cause) {
+      expect(cause).toMatchObject({ code: "local_file_target_unsafe" });
+    }
+    expect(await Bun.file(join(outside, "secret")).exists()).toBe(false);
   },
 );
 

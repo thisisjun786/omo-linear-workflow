@@ -10,7 +10,7 @@ here is itself an enforcement, and Linear permissions aren't enforced by these s
 
 | Role | Bound to | Model / reasoning | Workspace | Instructs | Reports to |
 |---|---|---|---|---|---|
-| Manager (the session the user directs, `olw manage`) | nothing fixed; linked parents | the user's default model from `~/.omo/agent/settings.json` (fallback `opencodex/anthropic/claude-opus-5-5` / `medium`) | Herdr workspace at the control root, no implementation branch | its linked parents only | the user, directly in its own TUI |
+| Manager (the session the user directs, `olw`) | nothing fixed; linked parents | the user's default model from `~/.omo/agent/settings.json` (fallback `opencodex/anthropic/claude-opus-5-5` / `medium`) | Current Herdr pane (`manage` can create a control-root workspace), no fixed implementation branch | its linked parents only | the user, directly in its own TUI |
 | Supervisor (optional management session) | one initiative ID | `opencodex/gpt-6-astra` / `high` | Herdr workspace at the control root, no implementation branch | its project parents only | the user |
 | Parent | one project ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree on the project integration branch | its own issue children only | linked manager/supervisor or local user inbox |
 | Child, `direct` stage | one issue ID | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | Herdr worktree forked from its parent's branch | internal mass-ulw workers, no OLW roles | its parent |
@@ -43,8 +43,14 @@ integration. The [child execution contract](../run/SKILL.md#child) defines the g
 worker limits, evidence and recovery. These are execution instructions, not a filesystem
 sandbox or new permission enforcement in the native DAG engine.
 
-The manager is a scope-free management role. `olw manage` creates it once and reattaches
-afterwards; it holds a fixed designation, not an initiative or project. A parent created
+The manager is a scope-free management role, not a launcher identity. Type `olw` in Herdr
+(or `olw manage --here`) to attach it in the current pane; a live manager is focused instead.
+`olw manage` retains the separate-workspace entry. The durable session is never replaced by
+an unrelated session. Outside OLW message handling it is a normal assistant. For an OLW
+notice, inspect `olw reports` or `olw questions --project ID`, answer with `olw answer`,
+review evidence within existing approval, and escalate decisions beyond that approval to
+the user. Reports and questions arrive only at idle, as a one-line notice plus the envelope.
+It holds a fixed designation, not an initiative or project. A parent created
 while the manager is ready links to it unless `--no-manager` is passed. The link grants
 contact, never approval, exactly like `parent link`.
 

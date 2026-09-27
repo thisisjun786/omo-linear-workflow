@@ -26,7 +26,7 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-async function world() {
+async function world(options: { executeInitialized?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "olw-successor-recovery-"));
   roots.push(root);
   await mkdir(join(root, ".omo/state"), { recursive: true });
@@ -131,16 +131,36 @@ async function world() {
       completedAt: "2026-09-27T00:00:00.000Z",
     }),
   );
-  const execute = await ready(
-    value(
-      registry.successorReservation(
-        plan.id,
-        { ...base, bindingId: "execute", durableSessionId: "session-execute", assignment },
-        "execute",
-      ),
+  const executeReservation = value(
+    registry.successorReservation(
+      plan.id,
+      { ...base, bindingId: "execute", durableSessionId: "session-execute", assignment },
+      "execute",
     ),
-    true,
   );
+  const execute =
+    options.executeInitialized === false
+      ? await (async () => {
+          const model = modelForLaunch("child", "execute");
+          const sessionPath = join(root, "execute.jsonl");
+          await writeFile(
+            sessionPath,
+            `${JSON.stringify({ type: "model_change", provider: model.provider, modelId: model.modelId })}\n${JSON.stringify({ type: "thinking_level_change", thinkingLevel: model.thinking })}\n`,
+          );
+          value(registry.provision(executeReservation.id, "workspace", "pane-execute"));
+          value(registry.observeSession(executeReservation.id, sessionPath));
+          const identity = {
+            durableSessionId: executeReservation.durableSessionId,
+            sessionPath,
+            cwd: root,
+            ...model,
+            extensionProtocol: 2 as const,
+          };
+          identities.set(executeReservation.durableSessionId, identity);
+          value(registry.activate(executeReservation.id, identity));
+          return value(registry.get(executeReservation.id));
+        })()
+      : await ready(executeReservation, true);
   registry.close();
 
   let elapsed = 0;
@@ -149,8 +169,10 @@ async function world() {
   let launches = 0;
   let absenceHook: ((count: number) => Promise<void>) | undefined;
   let runHook: ((count: number) => Promise<void>) | undefined;
-  let describeHook: (() => Promise<void>) | undefined;
+  let describeHook: ((count: number) => Promise<void>) | undefined;
   let absences = 0;
+  let descriptions = 0;
+  let sends = 0;
   const listeners = new Set<(event: unknown) => void>();
   const pane = (): Snapshot["panes"][number] => ({
     paneId: "pane-execute",
@@ -215,14 +237,29 @@ async function world() {
       },
       hasUserMessage: async () => true,
       describe: async () => {
-        if (identity.durableSessionId === execute.durableSessionId) await describeHook?.();
+        if (identity.durableSessionId === execute.durableSessionId)
+          await describeHook?.(++descriptions);
         return {
           ok: true,
           value: identities.get(identity.durableSessionId) ?? identity,
         };
       },
-      send: async () => {
-        throw new Error("unexpected send");
+      send: async (envelope) => {
+        sends += 1;
+        return {
+          ok: true,
+          value: {
+            envelope,
+            state: "accepted",
+            receipt: {
+              kind: "ok",
+              thread_id: identity.durableSessionId,
+              message_seq: sends,
+              deduplicated: false,
+              delivery: { kind: "started", turn_id: `turn-${sends}` },
+            },
+          },
+        };
       },
       deliverUserAnswer: async () => {
         throw new Error("unexpected answer");
@@ -240,7 +277,10 @@ async function world() {
     gitTip: async () => "head",
     now: () => new Date(Date.parse("2026-09-27T00:00:00.000Z") + elapsed).toISOString(),
     uuid: () => crypto.randomUUID(),
-    terminateBinding: async () => {},
+    terminateBinding: async () => {
+      native = false;
+      paneLive = false;
+    },
     prompt: async () => {},
     attachBinding: async (binding) => {
       if (binding.id === execute.id && !native) {
@@ -291,10 +331,12 @@ async function world() {
     setRunHook: (hook: (count: number) => Promise<void>) => {
       runHook = hook;
     },
-    setDescribeHook: (hook: (() => Promise<void>) | undefined) => {
+    setDescribeHook: (hook: ((count: number) => Promise<void>) | undefined) => {
       describeHook = hook;
     },
     launches: () => launches,
+    sends: () => sends,
+    orchestrator: () => new Orchestrator(root, "/herdr", dependencies),
     absences: () => absences,
     registry: withRegistry,
   };
@@ -441,6 +483,83 @@ test("stale native adoption cannot settle a newer claimed attempt", async () => 
   expect(current.attemptId).not.toBe(oldIntent.attemptId);
   expect(w.registry((registry) => value(registry.get("execute")).launchState)).toBe("ready");
   expect(w.launches()).toBe(0);
+});
+
+test("stage-start settlement uses the intent captured before native observation", async () => {
+  const w = await world();
+  w.setRunHook(async () => w.disconnect());
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  const first = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
+  if (first === null) throw new Error("first uncertain attempt missing");
+  await w.publish();
+  const described = Promise.withResolvers<void>();
+  const releaseDescription = Promise.withResolvers<void>();
+  w.setDescribeHook(async (count) => {
+    if (count === 2) {
+      described.resolve();
+      await releaseDescription.promise;
+    }
+  });
+  const stale = w.start();
+  await described.promise;
+  const settled = await runCli(
+    ["--root", w.root, "--herdr-socket", "/herdr", "reconcile", "--project", "project", "--json"],
+    w.dependencies,
+  );
+  expect(settled).toBe(0);
+  w.setVisibility(false);
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  const second = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
+  if (second === null) throw new Error("second uncertain attempt missing");
+  expect(second.attemptId).not.toBe(first.attemptId);
+  releaseDescription.resolve();
+  expect(await stale).toMatchObject({ ok: false, error: { code: "lease_lost" } });
+  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual(
+    second,
+  );
+  expect(w.launches()).toBe(2);
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "recovery_uncertain" } });
+  expect(w.launches()).toBe(2);
+});
+
+test("closing during dispatch remains terminal after delayed launch failure", async () => {
+  const w = await world();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  w.setRunHook(async () => {
+    entered.resolve();
+    await release.promise;
+    throw new Error("pending run failed after closure");
+  });
+  const starting = w.start();
+  await entered.promise;
+  expect(await w.orchestrator().close("execute", false, true)).toMatchObject({ ok: true });
+  expect(w.registry((registry) => value(registry.get("execute")).launchState)).toBe("closed");
+  release.resolve();
+  expect(await starting).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  const closed = w.registry((registry) => value(registry.get("execute")));
+  expect(closed.launchState).toBe("closed");
+  expect(closed.contactState).toBe("cancelled");
+});
+
+test("owner-held native adoption initializes before reporting brief acceptance", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setAbsenceHook(async () => w.setVisibility(true));
+  const adopted = await w.start();
+  expect(adopted).toMatchObject({
+    ok: true,
+    value: {
+      readiness: "ready",
+      execution: "brief_accepted",
+      binding: { launchState: "ready", initialization: { state: "accepted" } },
+    },
+  });
+  const persisted = w.registry((registry) => value(registry.get("execute")));
+  expect(persisted.launchState).toBe("ready");
+  expect(persisted.initialization.state).toBe("accepted");
+  expect(persisted.initialization.text).not.toBeNull();
+  expect(w.launches()).toBe(0);
+  expect(w.sends()).toBe(1);
 });
 
 test("CLI reconcile settles the same uncertain attempt ready", async () => {

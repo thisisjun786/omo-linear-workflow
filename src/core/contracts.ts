@@ -355,8 +355,6 @@ export interface Registry {
   ): Result<Binding>;
   /** Settle a failed owner: claimed is deleted; dispatching becomes uncertain. */
   failSuccessorLaunch(id: string, token: string): Result<Binding>;
-  /** Only a proven pre-dispatch failure may return the intent to none. */
-  releaseSuccessorLaunch(id: string, token: string): Result<boolean>;
   /** Settle a claimed/dispatching attempt without deleting its durable result. */
   finishSuccessorLaunch(id: string, token: string, state: "ready" | "uncertain"): Result<Binding>;
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;

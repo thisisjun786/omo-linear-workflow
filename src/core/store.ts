@@ -894,20 +894,17 @@ export function openRegistry(
         return error("lease_lost", "Execute recovery attempt changed during observation");
       const binding = get(id);
       if (!binding.ok) return binding;
+      if (binding.value.launchState === "closing" || binding.value.launchState === "closed")
+        return binding;
       if (!matchesRuntime(binding.value, identity.data))
         return error("identity_mismatch", "Runtime identity does not match the reserved role", {
           binding: binding.value,
           identity: identity.data,
         });
-      const saved = saveBinding({
+      return saveBinding({
         ...binding.value,
         launchState: binding.value.initialization.state === "accepted" ? "ready" : "initializing",
       });
-      if (!saved.ok) return saved;
-      db.query(
-        "UPDATE successor_launch SET state = 'ready' WHERE binding_id = ? AND owner = ? AND state = ?",
-      ).run(id, attemptId, expectedState);
-      return saved;
     });
   }
 
@@ -918,6 +915,12 @@ export function openRegistry(
         return error("lease_lost", "Execute recovery is owned by another caller");
       const binding = get(id);
       if (!binding.ok) return binding;
+      if (binding.value.launchState === "closing" || binding.value.launchState === "closed") {
+        db.query(
+          "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
+        ).run(id, token);
+        return binding;
+      }
       if (held.state === "claimed") {
         db.query("DELETE FROM successor_launch WHERE binding_id = ? AND owner = ?").run(id, token);
         return binding;
@@ -937,17 +940,6 @@ export function openRegistry(
     });
   }
 
-  function releaseSuccessorLaunch(id: string, token: string): Result<boolean> {
-    return transaction(() => {
-      const released = db
-        .query(
-          "DELETE FROM successor_launch WHERE binding_id = ? AND owner = ? AND state = 'claimed'",
-        )
-        .run(id, token);
-      return ok(released.changes === 1);
-    });
-  }
-
   function finishSuccessorLaunch(
     id: string,
     token: string,
@@ -957,10 +949,22 @@ export function openRegistry(
       if (!successorOwner(id, token))
         return error("lease_lost", "Execute recovery is owned by another caller");
       const held = successorLaunchClaim(id);
-      if (held?.state !== "claimed" && held?.state !== "dispatching")
+      if (
+        held?.state !== "claimed" &&
+        held?.state !== "dispatching" &&
+        !(held?.state === "uncertain" && state === "ready")
+      )
         return error("invalid_transition", "Execute recovery is already settled");
       const binding = get(id);
       if (!binding.ok) return binding;
+      if (binding.value.launchState === "closing" || binding.value.launchState === "closed") {
+        db.query("UPDATE successor_launch SET state = ? WHERE binding_id = ? AND owner = ?").run(
+          state,
+          id,
+          token,
+        );
+        return binding;
+      }
       const saved =
         state === "uncertain" && binding.value.launchState !== "reserved"
           ? saveBinding({ ...binding.value, launchState: "uncertain" })
@@ -1995,7 +1999,6 @@ export function openRegistry(
     dispatchSuccessorLaunch,
     reconcileSuccessorLaunch,
     failSuccessorLaunch,
-    releaseSuccessorLaunch,
     finishSuccessorLaunch,
     activate,
     setLaunchState,

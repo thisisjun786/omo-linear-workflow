@@ -211,6 +211,25 @@ test("bounded host commands kill and reap a timed-out child", async () => {
   expect(reaped).toBe(true);
 });
 
+test("bounded host commands time out after the parent exits while a grandchild holds output pipes", async () => {
+  const started = performance.now();
+  await expect(
+    import("../src/host-profile").then(({ runBoundedHostCommand }) =>
+      runBoundedHostCommand(
+        [
+          "python3",
+          "-c",
+          "import os, signal; pid=os.fork(); os._exit(0) if pid else signal.pause()",
+        ],
+        "/tmp",
+        process.env,
+        100,
+      ),
+    ),
+  ).rejects.toBeInstanceOf(HostCommandTimeoutError);
+  expect(performance.now() - started).toBeLessThan(3000);
+});
+
 test("prepares a new profile when no host is reachable", async () => {
   const { root, status } = await fixture();
   expect(await createHostProfile(root, { ...status, reachable: false, launchProfile: null })).toBe(

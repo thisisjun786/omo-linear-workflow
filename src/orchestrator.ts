@@ -2383,12 +2383,23 @@ export class Orchestrator {
             return;
           } catch (current) {
             if (!(current instanceof HostProfileMismatchError)) throw current;
-            const status = await this.#deps.readHostStatus?.(
-              this.#root,
-              binding.omoSocket,
-              environment,
-            );
-            if (status === undefined || !hostIsIdle(status)) throw current;
+            let status: HostStatus | undefined;
+            try {
+              status = await this.#deps.readHostStatus?.(
+                this.#root,
+                binding.omoSocket,
+                environment,
+              );
+            } catch (statusCause) {
+              throw new HostRecoveryError("status_unreadable", current, statusCause);
+            }
+            if (status === undefined)
+              throw new HostRecoveryError(
+                "status_unreadable",
+                current,
+                new Error("Native host summary status is unavailable"),
+              );
+            if (!hostIsIdle(status)) throw current;
             try {
               await this.#deps.observeEmptyHostSessions?.(binding.omoSocket);
             } catch (statusCause) {

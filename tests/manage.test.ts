@@ -1842,7 +1842,7 @@ test.each(["sessions", "unreadable"] as const)(
       expect(w.hooks.hostHandoffs).toBe(0);
       const human = String(output.mock.calls.at(-1)?.[0]);
       expect(() => JSON.parse(human)).toThrow();
-      expect(human).toContain("1 session");
+      expect(human).toContain(condition === "sessions" ? "1 session" : "could not be read");
       expect(human).toContain("/fixture/omo host handoff --socket /fixture/socket");
       output.mockClear();
       expect(await runCli(["--root", w.root, "manage", "--json"], w.deps)).toBe(3);
@@ -1861,6 +1861,45 @@ test.each(["sessions", "unreadable"] as const)(
       else Object.defineProperty(process.stdout, "isTTY", tty);
       output.mockRestore();
     }
+  },
+);
+
+test.each(["first", "existing"] as const)(
+  "%s manager entry preserves an unreadable summary status in JSON",
+  async (entry) => {
+    const w = await world();
+    if (entry === "existing") value(await w.orchestrator.manage());
+    w.hooks.hostCheck = () => {
+      throw new HostProfileMismatchError({
+        missingExtensions: ["old-extension"],
+        missingCapabilities: [],
+        generation: 1,
+        sessions: {
+          total: 0,
+          interactive: 0,
+          worker: 0,
+          retained: 0,
+          foreign_attached: 0,
+          foreign_retained: 0,
+        },
+        actualProfile: null,
+        recovery: { automatic: true, argv: ["omo", "host", "handoff"], env: {} },
+      });
+    };
+    w.hooks.hostStatus = async () => {
+      throw new Error("injected summary status failure");
+    };
+    const result = await w.orchestrator.manage();
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        details: {
+          recoveryPhase: "status_unreadable",
+          statusError: "injected summary status failure",
+        },
+      },
+    });
+    expect(w.hooks.hostHandoffs).toBe(0);
   },
 );
 

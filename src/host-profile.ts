@@ -40,6 +40,7 @@ const HOST_STATUS_TIMEOUT_MS = 15_000;
 const HOST_HANDOFF_TIMEOUT_MS = 45_000;
 
 interface HostCommandProcess {
+  readonly pid?: number;
   readonly exited: Promise<number>;
   readonly stdout: ReadableStream<Uint8Array> | null;
   readonly stderr: ReadableStream<Uint8Array> | null;
@@ -133,31 +134,49 @@ export async function runBoundedHostCommand(
   env: Readonly<Record<string, string | undefined>>,
   timeoutMs: number,
   spawn: () => HostCommandProcess = () =>
-    Bun.spawn([...argv], { cwd, env, stdout: "pipe", stderr: "pipe" }),
+    Bun.spawn([...argv], { cwd, env, stdout: "pipe", stderr: "pipe", detached: true }),
   operation: "status" | "handoff" = "handoff",
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   const child = spawn();
-  const output = Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+  const stdout = child.stdout?.getReader();
+  const stderr = child.stderr?.getReader();
+  const read = async (reader: ReadableStreamDefaultReader<Uint8Array> | undefined) => {
+    if (reader === undefined) return "";
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const item = await reader.read();
+      if (item.done) return new TextDecoder().decode(Buffer.concat(chunks));
+      chunks.push(item.value);
+    }
+  };
+  const completed = Promise.all([child.exited, read(stdout), read(stderr)]);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
+      timedOut = true;
       reject(new HostCommandTimeoutError(operation, timeoutMs));
-      child.kill("SIGKILL");
     }, timeoutMs);
   });
   try {
-    const code = await Promise.race([child.exited, timeout]);
-    const [stdout, stderr] = await output;
-    return { code, stdout, stderr };
+    const [code, stdoutText, stderrText] = await Promise.race([completed, timeout]);
+    return { code, stdout: stdoutText, stderr: stderrText };
   } catch (cause) {
-    if (cause instanceof HostCommandTimeoutError) await child.exited;
-    await output;
+    if (!timedOut) throw cause;
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      else child.kill("SIGKILL");
+    } catch (killCause) {
+      if (!(killCause instanceof Error && "code" in killCause && killCause.code === "ESRCH"))
+        throw killCause;
+    }
+    await child.exited;
+    await Promise.allSettled([stdout?.cancel(), stderr?.cancel()]);
     throw cause;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    stdout?.releaseLock();
+    stderr?.releaseLock();
   }
 }
 

@@ -56,9 +56,14 @@ export async function prepareQaWorld() {
   const controlRoot = join(scratch, "control");
   const repository = join(scratch, "fixture-repo");
   const sessionName = `olw-qa-${crypto.randomUUID().slice(0, 12)}`;
+  await mkdir(controlRoot);
+  await cp(join(installRoot, "herdr-release.json"), join(controlRoot, "herdr-release.json"));
+  const fixtureBuild = await loadHerdrBuild(controlRoot);
+  await cp(artifact.artifactDir, fixtureBuild.artifactDir, { recursive: true });
+  const fixtureArtifact = await resolveHerdrArtifact(controlRoot);
   const environment = {
     ...process.env,
-    QA_HERDR_BINARY: process.env["QA_HERDR_BINARY"] ?? artifact.binaryPath,
+    QA_HERDR_BINARY: fixtureArtifact.binaryPath,
     HERDR_SESSION: sessionName,
     HERDR_SOCKET_PATH: undefined,
     HERDR_CLIENT_SOCKET_PATH: undefined,
@@ -75,18 +80,10 @@ export async function prepareQaWorld() {
     tempFiles: [] as string[],
     tempFilesRemoved: false,
   };
-  await mkdir(controlRoot);
   await mkdir(repository);
   await cp(join(installRoot, "dist"), join(controlRoot, "dist"), { recursive: true });
   await cp(join(installRoot, "skills"), join(controlRoot, "skills"), { recursive: true });
   await cp(join(installRoot, "package.json"), join(controlRoot, "package.json"));
-  await cp(join(installRoot, "vendor/herdr"), join(controlRoot, "vendor/herdr"), {
-    recursive: true,
-  });
-  await mkdir(join(controlRoot, "patches"), { recursive: true });
-  await cp(artifact.patchPath, join(controlRoot, artifact.manifest.patch));
-  const fixtureBuild = await loadHerdrBuild(controlRoot);
-  await cp(artifact.artifactDir, fixtureBuild.artifactDir, { recursive: true });
   await checkedQaCommand(
     [
       "/usr/bin/cp",
@@ -278,19 +275,14 @@ export async function prepareQaWorld() {
         }
         const observer = createHerdrClient(herdrSocket);
         const activeWorkspaces = new Set<string>();
-        const groupHeads = new Set<string>();
         try {
           for (const workspace of (await observer.snapshot()).workspaces) {
             activeWorkspaces.add(workspace.workspaceId);
-            if (workspace.groupHeadWorkspaceId === workspace.workspaceId)
-              groupHeads.add(workspace.workspaceId);
           }
         } finally {
           observer.close();
         }
-        const removalOrder = worktrees
-          .toReversed()
-          .sort((left, right) => Number(groupHeads.has(left)) - Number(groupHeads.has(right)));
+        const removalOrder = worktrees.toReversed();
         for (const workspace of removalOrder) {
           if (activeWorkspaces.has(workspace))
             await run([

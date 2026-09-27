@@ -22,8 +22,9 @@ const created = z.object({
   ),
 });
 const projectRef = (id: string) => ({ id, url: `linear://project/${id}`, revision: "qa-r1" });
-const project = (id: string) => ({
+const project = (id: string, repository: string) => ({
   project: projectRef(id),
+  repository: { remote: pathToFileURL(repository).href, defaultBranch: "main" },
   issues: [{ id: `${id}-issue`, url: `linear://issue/${id}-issue`, revision: "qa-r1" }],
 });
 
@@ -56,14 +57,12 @@ function grouped(snapshot: Snapshot, parents: Binding[], children: Binding[]) {
     const child = children[index];
     assert.ok(child);
     assert.equal(
-      snapshot.workspaces.find((entry) => entry.workspaceId === parent.workspaceId)
-        ?.groupHeadWorkspaceId,
-      parent.workspaceId,
+      snapshot.workspaces.find((entry) => entry.workspaceId === parent.workspaceId)?.repoKey,
+      join(parent.cwd, ".git"),
     );
     assert.equal(
-      snapshot.workspaces.find((entry) => entry.workspaceId === child.workspaceId)
-        ?.groupHeadWorkspaceId,
-      parent.workspaceId,
+      snapshot.workspaces.find((entry) => entry.workspaceId === child.workspaceId)?.repoKey,
+      join(parent.cwd, ".git"),
     );
   }
   assert.notEqual(parents[0]?.workspaceId, parents[1]?.workspaceId);
@@ -120,7 +119,7 @@ async function main() {
           version: 1,
           source: "fixture",
           initiative: null,
-          projects: [project(id)],
+          projects: [project(id, qa.repository)],
           decisionRefs: [],
         }),
       );
@@ -139,10 +138,6 @@ async function main() {
           id,
           "--execute",
           "--fixture",
-          "--repo",
-          qa.repository,
-          "--base",
-          "main",
         ]),
       ).binding;
       parents.push(parent);
@@ -372,7 +367,7 @@ async function main() {
           url: "linear://initiative/qa-management",
           revision: "qa-r1",
         },
-        projects: [project("qa-project-a"), project("qa-project-b")],
+        projects: [project("qa-project-a", qa.repository), project("qa-project-b", qa.repository)],
         decisionRefs: [],
       }),
     );

@@ -54,14 +54,14 @@ export interface Workspace {
   readonly rootTabId?: string;
   readonly cwd: string;
   readonly label?: string;
-  readonly groupHeadWorkspaceId?: string;
+  readonly repoKey?: string;
 }
 export interface Pane {
   readonly paneId: string;
   readonly workspaceId: string;
   readonly revision: number;
   readonly sessionPath: string | null;
-  /** Herdr's detected foreground agent label (the OMO TUI reports `omo`). */
+  /** Senpi's built-in integration reports `pi`; older OMO detection reports `omo`. */
   readonly agent?: string;
 }
 export interface Snapshot {
@@ -71,15 +71,9 @@ export interface Snapshot {
   readonly workspaces: readonly Workspace[];
   readonly panes: readonly Pane[];
 }
-export type WorktreeGrouping = { readonly head: true } | { readonly parentWorkspaceId: string };
-
 export interface HerdrClient {
   createWorkspace(cwd: string, label: string): Promise<Workspace>;
-  createWorktree(
-    checkout: Checkout,
-    label: string,
-    grouping?: WorktreeGrouping,
-  ): Promise<Workspace>;
+  createWorktree(checkout: Checkout, label: string): Promise<Workspace>;
   createTab(
     workspaceId: string,
     cwd: string,
@@ -93,7 +87,6 @@ export interface HerdrClient {
     argv: readonly string[],
     env: Readonly<Record<string, string>>,
   ): Promise<void>;
-  reportSession(paneId: string, sessionPath: string): Promise<void>;
   snapshot(): Promise<Snapshot>;
   subscribe(listener: (event: unknown) => void): Promise<() => void>;
   closeWorkspace(id: string): Promise<void>;
@@ -141,16 +134,10 @@ class SocketHerdrClient implements HerdrClient {
     };
   }
 
-  public async createWorktree(
-    checkout: Checkout,
-    label: string,
-    grouping?: WorktreeGrouping,
-  ): Promise<Workspace> {
+  public async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
     const result = workspaceResultSchema.parse(
-      await this.#request(grouping === undefined ? "worktree.create" : "worktree.create_grouped", {
-        ...(grouping !== undefined && "parentWorkspaceId" in grouping
-          ? { group_head_workspace_id: nonEmptyStringSchema.parse(grouping.parentWorkspaceId) }
-          : { cwd: absolutePathSchema.parse(checkout.originalRepoRoot) }),
+      await this.#request("worktree.create", {
+        cwd: absolutePathSchema.parse(checkout.originalRepoRoot),
         branch: nonEmptyStringSchema.parse(checkout.branch),
         base: nonEmptyStringSchema.parse(checkout.baseBranch),
         path: absolutePathSchema.parse(checkout.path),
@@ -230,14 +217,6 @@ class SocketHerdrClient implements HerdrClient {
     });
   }
 
-  public async reportSession(paneId: string, sessionPath: string): Promise<void> {
-    await this.#expectOk("pane.report_agent_session", {
-      pane_id: nonEmptyStringSchema.parse(paneId),
-      source: "omo-initiative",
-      agent: "omo",
-      agent_session_path: absolutePathSchema.parse(sessionPath),
-    });
-  }
   public async closeWorkspace(id: string): Promise<void> {
     await this.#expectOk("workspace.close", {
       workspace_id: nonEmptyStringSchema.parse(id),
@@ -280,7 +259,6 @@ class SocketHerdrClient implements HerdrClient {
           `snapshot omitted root pane cwd for workspace ${source.workspace_id}`,
         );
       }
-      const groupHeadWorkspaceId = source.worktree?.repo_key.match(/^herdr-group:(.+)$/)?.[1];
       const rootTabId = layout?.tab_id ?? source.active_tab_id;
       return {
         workspaceId: source.workspace_id,
@@ -288,7 +266,7 @@ class SocketHerdrClient implements HerdrClient {
         ...(rootTabId === undefined ? {} : { rootTabId }),
         cwd: rootPane.cwd,
         ...(source.label === undefined ? {} : { label: source.label }),
-        ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),
+        ...(source.worktree == null ? {} : { repoKey: source.worktree.repo_key }),
       };
     });
     return {

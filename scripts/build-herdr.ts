@@ -7,7 +7,8 @@ process.stdout.write(
   `${JSON.stringify({
     result: "HERDR_READY",
     binary: artifact.binaryPath,
-    sourceKey: artifact.sourceKey,
-    sha256: artifact.receipt.binarySha256,
+    version: artifact.manifest.version,
+    url: artifact.url,
+    sha256: artifact.asset.sha256,
   })}\n`,
 );

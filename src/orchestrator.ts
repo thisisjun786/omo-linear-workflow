@@ -30,7 +30,7 @@ import {
 } from "./core/policy";
 import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
-import { createHerdrClient, type HerdrClient, type WorktreeGrouping } from "./herdr";
+import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import {
   assertHostProtocol,
@@ -878,7 +878,7 @@ export class Orchestrator {
           `The manager workspace is gone or changed; ${closeInstruction}`,
           { bindingId: binding.id, workspaceId },
         );
-      // Herdr labels a pane whose foreground process is the OMO TUI with agent `omo`.
+      // Official Herdr receives `pi` from Senpi's built-in reporter; older servers use `omo`.
       const recordedPane = snapshot.panes.find(
         (pane) => pane.paneId === binding.paneId && pane.workspaceId === workspaceId,
       );
@@ -1101,7 +1101,6 @@ export class Orchestrator {
     const parentAssignment = owner.value.assignment;
     const context = await this.#context(owner.value);
     if (!context.ok) return context;
-    let grouping: WorktreeGrouping | undefined;
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {
       const parentWorkspace = (await herdr.snapshot()).workspaces.find(
@@ -1109,14 +1108,6 @@ export class Orchestrator {
       );
       if (parentWorkspace === undefined || parentWorkspace.cwd !== owner.value.cwd)
         return failure("owner_unavailable", "Parent workspace identity does not match its binding");
-      if (
-        owner.value.checkout.kind !== "owned-clone" &&
-        parentWorkspace.groupHeadWorkspaceId !== undefined
-      ) {
-        if (parentWorkspace.groupHeadWorkspaceId !== parentWorkspace.workspaceId)
-          return failure("owner_unavailable", "Parent workspace is not its group's head");
-        grouping = { parentWorkspaceId: parentWorkspace.workspaceId };
-      }
     } catch (cause) {
       return failure(
         "runtime_unavailable",
@@ -1177,7 +1168,6 @@ export class Orchestrator {
       checkout,
       {
         bindingId,
-        grouping,
         stage,
         mode,
         ...(planPath === undefined ? {} : { planPath }),
@@ -2448,7 +2438,6 @@ export class Orchestrator {
     checkout: Checkout | null,
     target?: {
       readonly bindingId: string;
-      readonly grouping?: WorktreeGrouping | undefined;
       readonly stage?: ChildStage;
       readonly mode?: ChildCreateMode;
       readonly planPath?: string;
@@ -2579,11 +2568,7 @@ export class Orchestrator {
       const workspace =
         checkout === null || checkout.kind === "owned-clone"
           ? await herdr.createWorkspace(cwd, label)
-          : await herdr.createWorktree(
-              checkout,
-              label,
-              assignment.role === "parent" ? { head: true } : target?.grouping,
-            );
+          : await herdr.createWorktree(checkout, label);
       const provisioned = this.#withRegistry((registry) =>
         registry.provision(bindingId, workspace.workspaceId, workspace.rootPaneId),
       );

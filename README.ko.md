@@ -33,10 +33,9 @@ bun run cli -- doctor --json
 설치된 `olw` 실행기를 확인한 뒤 그 파일만 삭제합니다. 체크아웃, `.omo/` 상태와
 외부 접근 파일은 그대로 남습니다.
 
-`git`이 PATH에 있어야 합니다. 최초 빌드는 Rustup의 Rust 1.96.1과 Zig 0.16.0을 사용해
-OMO 지원 패치가 포함된 Herdr도 함께 준비합니다. `cargo`나 `zig`가 PATH에 없다면
-`CARGO`와 `ZIG` 환경변수로 실행 파일을 지정합니다. 이후 빌드는 검증된 산출물을
-재사용하므로 Herdr를 매번 컴파일하지 않습니다.
+`git`이 PATH에 있어야 합니다. 최초 빌드는 공식 Herdr 0.9.1 릴리즈를 다운로드하고
+고정된 SHA-256을 검증합니다. Rust나 Zig는 필요하지 않습니다. 이후 빌드는 관리형
+산출물을 다시 검증해 재사용하며, 체크섬이 다르면 실행을 거부합니다.
 
 Herdr는 별도로 맞춰 설치하는 선택 항목이 아니라 OLW의 필수 관리형 런타임입니다.
 `bun run herdr`로 이 빌드를 실행할 수 있으며, OLW 역할 생성은 Herdr 안에서 실행합니다.
@@ -53,7 +52,7 @@ TUI와 공유 호스트는 이 저장소의 `node_modules/.bin/omo`를 실행하
 [버전·릴리즈 정책](docs/policy/releases.md)은 SemVer, `vVERSION` 태그, 소스 배포,
 업그레이드와 롤백을 다룹니다. 릴리즈 노트는 [CHANGELOG.md](CHANGELOG.md)에
 기록하며, `bun run release:check`로 패키지 버전과 노트를 검증합니다.
-CI는 제공자 인증 없이 필수 네이티브 Herdr 빌드와 격리 설치 검사까지 실행합니다.
+CI는 제공자 인증 없이 공식 Herdr 다운로드·체크섬 검증과 격리 설치 검사까지 실행합니다.
 소유자가 버전 태그를 푸시하면 이 검사들이 통과한 뒤 GitHub 릴리즈를 발행합니다.
 위 clone 명령은 최신 릴리즈 커밋인 `main`을 설치합니다. 첫 릴리즈를 설치하려면 `--branch v0.1.0`을
 추가합니다. 발행된 버전과 소스 압축 파일은
@@ -280,17 +279,16 @@ workspace 생성 응답 자체가 유실됐다면 Herdr를 직접 확인해야 �
 
 ## 관리형 Herdr
 
-[고정 manifest](vendor/herdr/manifest.json), [OMO 지원 패치](patches/herdr-0.9.1-omo.patch),
-[빌드·업데이트·복구 안내](vendor/herdr/README.md)가 Herdr의 소유 지점입니다.
-업스트림 커밋과 패치 해시, Rust/Zig 버전으로 산출물 위치를 구분하고,
-실행 전 receipt와 실행 파일의 SHA-256을 검증합니다. 누락되거나 다른 산출물이면
-전역 PATH의 Herdr로 조용히 대체하지 않습니다.
+[릴리즈 manifest](herdr-release.json)에 공식 Herdr 0.9.1의 플랫폼별 자산과 SHA-256을
+고정합니다. `.omo/herdr/bin/`의 산출물은 버전·플랫폼·체크섬으로 구분하며 실행 전
+체크섬을 검증합니다. 빌드 receipt나 전역 PATH 대체는 사용하지 않습니다.
+전환 조건과 한 릴리즈 동안 유지하는 패치 빌드 롤백은 [운영 안내](docs/operations.md)에 있습니다.
 
 `bun run build`가 Herdr를 포함한 전체 런타임을 준비하고, `bun run herdr:build`는
 Herdr 단계만 실행합니다. 새 역할 TUI와 공유 호스트에는 이 바이너리 디렉터리가
 PATH 앞에 전달됩니다. 기존 서버·binding·workspace를 자동 재시작하거나 이전하지 않습니다.
 
-통합 당시 재빌드한 Linux x64 바이너리는 기존 설치본 및 실제 실행 중인 서버와
-SHA-256이 같았습니다. 원래 `~/code/herdr-omo-0.9.1`과 과거 `~/code/herdr-omo`는
-보존했지만, 향후 빌드는 그 외부 소스 트리에 의존하지 않습니다.
-검증 기록은 [관리형 Herdr 증거](.omo/evidence/managed-herdr-integration.md)에 있습니다.
+Senpi 내장 연동이 세션과 상태 보고를 담당합니다. OLW는 `pi`와 `omo`를 인식하고
+세션 보고를 중복 전송하지 않습니다. 전환 전에 `olw doctor --json`을 실행하십시오.
+기존 linked-worktree 부모가 남으면 목록을 출력하고 전환을 차단합니다. 사용자 확장
+제거와 실제 서버 재시작은 별도 승인이 필요하며 설치된 바이너리와 캐시는 보존합니다.

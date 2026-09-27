@@ -20,7 +20,7 @@ While the major version is `0`:
 - A **patch** bump is backwards-compatible. Existing state, bindings and configuration keep working without user action.
 - A **release candidate** (`-rc.N`) is a preview of the next version. It's marked as a prerelease on GitHub and may be superseded by a later RC or the final version.
 
-Dependency pins have their own version lines and aren't part of the OLW version. The managed Herdr pin lives in `vendor/herdr/manifest.json` and its patch; OMO, Senpi and other packages are pinned in `package.json` and `pnpm-lock.yaml`. Changing a pin is a normal change that gets a changelog entry under whichever OLW version ships it. The Herdr update and rollback procedure is in [vendor/herdr/README.md](../../vendor/herdr/README.md).
+Dependency pins have their own version lines and aren't part of the OLW version. Official Herdr release assets and SHA-256 pins live in `herdr-release.json`; OMO, Senpi and other packages are pinned in `package.json` and `pnpm-lock.yaml`. Changing a pin is a normal change that gets a changelog entry under whichever OLW version ships it. The Herdr switch gate and one-release patched-build rollback are in [operations](../operations.md#official-herdr-runtime-and-switch-gate).
 
 ## Changelog contract
 

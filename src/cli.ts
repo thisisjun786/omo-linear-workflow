@@ -11,6 +11,7 @@ import {
   deliveryRecordSchema,
   questionPayloadSchema,
 } from "./core/schema";
+import { openRegistry } from "./core/store";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
@@ -217,6 +218,40 @@ async function doctor(
   herdrSocket?: string,
 ): Promise<Result<{ sideEffects: false; paths: unknown; checks: unknown }>> {
   const paths = new Orchestrator(root, herdrSocket).paths();
+  const database = join(root, ".omo/state/registry.sqlite");
+  if (await Bun.file(database).exists()) {
+    const registry = openRegistry(database, { readonly: true });
+    try {
+      const bindings = registry.list();
+      if (!bindings.ok) return bindings;
+      const legacyParents = bindings.value
+        .filter(
+          (binding) =>
+            binding.assignment.role === "parent" &&
+            binding.launchState !== "closed" &&
+            binding.checkout?.kind !== "owned-clone",
+        )
+        .map((binding) => ({
+          bindingId: binding.id,
+          projectId: binding.assignment.role === "parent" ? binding.assignment.projectId : null,
+          cwd: binding.cwd,
+          workspaceId: binding.workspaceId,
+          checkoutKind: binding.checkout?.kind ?? "legacy",
+        }));
+      if (legacyParents.length > 0)
+        return {
+          ok: false,
+          error: {
+            code: "legacy_parents_remaining",
+            message:
+              "Official Herdr switch blocked: legacy parents remain. Resolve the listed linked-worktree parents with user approval before switching servers.",
+            details: { legacyParents },
+          },
+        };
+    } finally {
+      registry.close();
+    }
+  }
   const herdr = await resolveHerdrArtifact(root);
   const checks = {
     bun: process.execPath,

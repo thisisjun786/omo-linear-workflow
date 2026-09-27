@@ -329,7 +329,6 @@ class FakeHerdr implements HerdrClient {
         ),
     };
   }
-  async reportSession(): Promise<void> {}
   async closeWorkspace(id: string): Promise<void> {
     this.events.push(`close-workspace:${id}`);
     this.workspaces.delete(id);

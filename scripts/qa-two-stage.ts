@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, watch } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -17,6 +17,10 @@ import { prepareQaWorld } from "./qa-world";
 
 // Native boundaries remain real. Only npm's read-only version lookup is offline.
 const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === "--official-offline") {
+  await (await import("./qa-official-herdr")).runOfficialHerdrQa();
+  process.exit(0);
+}
 assert.ok(args.length === 0 || (args.length === 1 && args[0] === "--break-answer"));
 const breakAnswer = args.includes("--break-answer");
 const root = resolve(import.meta.dir, "..");
@@ -25,7 +29,6 @@ const evidencePath = join(
   evidenceDir,
   breakAnswer ? "qa-two-stage-break-answer.json" : "qa-two-stage.json",
 );
-const artifactLink = join(root, ".omo/herdr");
 const upstream = globalOmo();
 const originalHome = process.env["HOME"];
 assert.ok(originalHome);
@@ -55,7 +58,6 @@ const retryCounts = new Map<RpcClient, number>();
 let world: Awaited<ReturnType<typeof prepareQaWorld>> | undefined;
 let herdr: ReturnType<typeof createHerdrClient> | undefined;
 let failure: unknown;
-let linkCreated = false;
 let currentStep = "isolation";
 const activeProcesses = new Set<ReturnType<typeof Bun.spawn>>();
 const receipt = {
@@ -63,7 +65,6 @@ const receipt = {
   homeRemoved: false,
   scratchRemoved: false,
   worldClosed: false,
-  managedArtifactLinkRemoved: false,
   processesExited: false,
 };
 evidence["cleanup"] = receipt;
@@ -301,10 +302,6 @@ async function identity(binding: Binding, client: RpcClient, modelId: string, th
 
 try {
   await mkdir(evidenceDir, { recursive: true });
-  if (!existsSync(artifactLink)) {
-    await symlink("/home/jun/code/omo-linear-workflow/.omo/herdr", artifactLink);
-    linkCreated = true;
-  }
   // Copy credentials/catalog, never link writable global state. No global settings mutation.
   const agent = join(home, ".omo/agent");
   await mkdir(agent, { recursive: true });
@@ -935,12 +932,6 @@ try {
   } catch (error) {
     failure ??= error;
     evidence["cleanupError"] = String(error);
-  } finally {
-    if (linkCreated) {
-      assert.ok((await lstat(artifactLink)).isSymbolicLink());
-      await rm(artifactLink);
-    }
-    receipt.managedArtifactLinkRemoved = !existsSync(artifactLink);
   }
   if (failure) evidence["result"] = "FAILED";
   await mkdir(evidenceDir, { recursive: true });

@@ -34,7 +34,7 @@ interface RunCall {
   readonly env: Readonly<Record<string, string>>;
 }
 
-async function world() {
+async function world(agent = "omo") {
   const root = await mkdtemp(join(tmpdir(), "olw-manage-"));
   roots.push(root);
   await mkdir(join(root, ".omo/state"), { recursive: true });
@@ -132,7 +132,7 @@ async function world() {
       const binding = readRegistry((registry) => value(registry.bySession(sessionId)));
       const pane = panes.get(paneId);
       if (pane === undefined) throw new Error("No such pane");
-      panes.set(paneId, { ...pane, agent: "omo" });
+      panes.set(paneId, { ...pane, agent });
       identities.set(binding.id, {
         durableSessionId: binding.durableSessionId,
         sessionPath: path,
@@ -150,7 +150,6 @@ async function world() {
         paneId,
       });
     },
-    async reportSession() {},
     async snapshot(): Promise<Snapshot> {
       return {
         focusedWorkspaceId: null,
@@ -375,48 +374,53 @@ test("manager create passes real-shaped update versions once into its brief", as
   ]);
 });
 
-test("first manage creates one manager labeled manager; second focuses it and launches nothing", async () => {
-  const w = await world();
-  const first = value(await w.orchestrator.manage());
-  expect(first.action).toBe("created");
-  expect(first.updateCheck.state).toBe("current");
-  expect(first.binding).toMatchObject({
-    assignment: { role: "manager" },
-    launchState: "ready",
-    designationId: "manager",
-    cwd: w.root,
-  });
-  expect(w.created).toEqual([{ cwd: w.root, label: "manager" }]);
-  expect(w.runs).toHaveLength(1);
-  const argv = w.runs[0]?.argv ?? [];
-  expect(argv).toContain(`OLW_MANAGER_BINDING=${first.binding.id}`);
-  expect(argv[argv.indexOf("--name") + 1]).toBe("manager");
-  expect(argv[argv.indexOf("--model") + 1]).toBe("fixture-provider/fixture-model");
-  expect(argv[argv.indexOf("--thinking") + 1]).toBe("high");
-  expect(argv).not.toContain("--no-model-fallback");
-  const managerBrief = w.prompts.get(first.binding.id)?.values().next().value;
-  if (managerBrief === undefined) throw new Error("Manager brief was not initialized");
-  const updateLines = managerBrief.split("\n").filter((line) => line.startsWith("update_check: "));
-  expect(updateLines).toHaveLength(1);
-  expect(updateLines[0]).toContain("omo-ai pinned 1.0.0, beta 1.0.0");
-  expect(updateLines[0]).toContain("@code-yeongyu/senpi pinned 1.0.0, latest 1.0.0");
-  expect(updateLines[0]).not.toContain("undefined");
-  expect(w.focused).toEqual([]);
+test.each(["pi", "omo"])(
+  "manage with %s creates one manager then focuses without relaunch",
+  async (agent) => {
+    const w = await world(agent);
+    const first = value(await w.orchestrator.manage());
+    expect(first.action).toBe("created");
+    expect(first.updateCheck.state).toBe("current");
+    expect(first.binding).toMatchObject({
+      assignment: { role: "manager" },
+      launchState: "ready",
+      designationId: "manager",
+      cwd: w.root,
+    });
+    expect(w.created).toEqual([{ cwd: w.root, label: "manager" }]);
+    expect(w.runs).toHaveLength(1);
+    const argv = w.runs[0]?.argv ?? [];
+    expect(argv).toContain(`OLW_MANAGER_BINDING=${first.binding.id}`);
+    expect(argv[argv.indexOf("--name") + 1]).toBe("manager");
+    expect(argv[argv.indexOf("--model") + 1]).toBe("fixture-provider/fixture-model");
+    expect(argv[argv.indexOf("--thinking") + 1]).toBe("high");
+    expect(argv).not.toContain("--no-model-fallback");
+    const managerBrief = w.prompts.get(first.binding.id)?.values().next().value;
+    if (managerBrief === undefined) throw new Error("Manager brief was not initialized");
+    const updateLines = managerBrief
+      .split("\n")
+      .filter((line) => line.startsWith("update_check: "));
+    expect(updateLines).toHaveLength(1);
+    expect(updateLines[0]).toContain("omo-ai pinned 1.0.0, beta 1.0.0");
+    expect(updateLines[0]).toContain("@code-yeongyu/senpi pinned 1.0.0, latest 1.0.0");
+    expect(updateLines[0]).not.toContain("undefined");
+    expect(w.focused).toEqual([]);
 
-  w.hooks.hangingUpdateCheck = false;
-  const second = value(await w.orchestrator.manage());
-  expect(second.action).toBe("focused");
-  expect(second.updateCheck.state).toBe("current");
-  expect(second.binding.id).toBe(first.binding.id);
-  expect(w.runs).toHaveLength(1);
-  expect(w.created).toHaveLength(1);
-  expect(w.tabs).toEqual([]);
-  expect(w.focused).toEqual([first.binding.workspaceId ?? "missing-workspace"]);
-  expect(managers(value(w.orchestrator.status()))).toHaveLength(1);
-});
+    w.hooks.hangingUpdateCheck = false;
+    const second = value(await w.orchestrator.manage());
+    expect(second.action).toBe("focused");
+    expect(second.updateCheck.state).toBe("current");
+    expect(second.binding.id).toBe(first.binding.id);
+    expect(w.runs).toHaveLength(1);
+    expect(w.created).toHaveLength(1);
+    expect(w.tabs).toEqual([]);
+    expect(w.focused).toEqual([first.binding.workspaceId ?? "missing-workspace"]);
+    expect(managers(value(w.orchestrator.status()))).toHaveLength(1);
+  },
+);
 
-test("manage reattaches in a new tab with the same env when the TUI pane is gone", async () => {
-  const w = await world();
+test.each(["pi", "omo"])("manage reattaches %s in a new tab with the same env", async (agent) => {
+  const w = await world(agent);
   const first = value(await w.orchestrator.manage());
   const launch = w.runs[0];
   if (launch === undefined || first.binding.paneId === null) throw new Error("No launch");

@@ -5,5 +5,4 @@ export {
   type Pane,
   type Snapshot,
   type Workspace,
-  type WorktreeGrouping,
 } from "./client";

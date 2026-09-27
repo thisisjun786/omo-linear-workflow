@@ -539,7 +539,7 @@ describe("native delivery extension", () => {
     });
   });
 
-  test("publishes the bound TUI readiness receipt and discovers four skills", async () => {
+  test("publishes TUI readiness without duplicating Senpi's Herdr session report", async () => {
     await fixture(async ({ root, parent }) => {
       const harness = new Harness();
       registerInitiativeRuntime(harness, { root, hostRuntime: false });
@@ -554,6 +554,7 @@ describe("native delivery extension", () => {
         cwd: parent.cwd,
         paneId: "pane-parent",
       });
+      expect(harness.reports).toEqual([]);
       const resources = harness.resources?.();
       expect(resources?.skillPaths).toEqual(
         ["define", "plan", "run", "check"].map((name) => join(root, "skills", name)),

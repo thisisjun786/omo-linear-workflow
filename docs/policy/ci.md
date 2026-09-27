@@ -17,13 +17,13 @@ Today the workflow's push trigger lists `main` but not `dev`, so a merge into `d
 
 ## What runs
 
-In order, after installing the pinned toolchain (Node 24.20.0, pnpm 10.33.3, Bun 1.4.0, Rust 1.96.1 with `rustfmt`, Zig 0.16.0) and `pnpm install --frozen-lockfile`:
+In order, after installing Node 24.20.0, pnpm 10.33.3 and Bun 1.4.0, and running `pnpm install --frozen-lockfile`:
 
 1. `bun run release:check`: `package.json` `version` matches a well-formed `## [VERSION]` changelog section.
 2. `bun run typecheck`: strict TypeScript with `tsc --noEmit`.
 3. `bun run lint`: Biome over `src`, `tests` and `scripts`.
 4. `bun test`: the Bun test suite. Tests use fixtures and never touch a real Linear workspace or a live provider.
-5. `bun run build`: builds the CLI and the managed Herdr pinned by `vendor/herdr/manifest.json`, including Herdr's source preparation, Rust fmt and tests, and the Zig release build. Cargo downloads are cached by the manifest hash; the pnpm store is cached by the lockfile and patch hash.
+5. `bun run build`: builds the CLI and downloads the official Herdr release pinned by `herdr-release.json`. SHA-256 verification runs even for cached executables. Release assets are cached by the manifest hash; no Rust or Zig is required. The pnpm store is cached by the lockfile and patch hash.
 6. Installer smoke: `bun run install:local -- --bin-dir "$RUNNER_TEMP/olw-bin"` followed by `olw --help` from that directory.
 
 CI has no provider credentials, no proxy access files and no Linear account. Nothing it runs may depend on them. The runtime-facing QA scripts (`bun run qa:events`, `qa:proxy`, `qa:routing`, `qa:child-workflow`) run only on a contributor's or the owner's machine and are reported in the PR as manual verification.

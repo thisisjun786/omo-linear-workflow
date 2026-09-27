@@ -113,7 +113,6 @@ async function world() {
     renameTab: unused,
     focusWorkspace: unused,
     run: unused,
-    reportSession: unused,
     removeWorktree: unused,
     subscribe: async (cb) => {
       events.push("subscribe");

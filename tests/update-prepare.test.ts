@@ -506,22 +506,17 @@ test("no newer versions in the latest check prepares nothing", async () => {
 const hash = (text: string | Uint8Array) =>
   new Bun.CryptoHasher("sha256").update(text).digest("hex");
 async function herdrVendor(dir: string) {
-  await mkdir(join(dir, "vendor/herdr"), { recursive: true });
-  await mkdir(join(dir, "patches"), { recursive: true });
-  const patch = "fixture patch\n";
-  await writeFile(join(dir, "patches/herdr.patch"), patch);
   await writeFile(
-    join(dir, "vendor/herdr/manifest.json"),
+    join(dir, "herdr-release.json"),
     JSON.stringify({
       schemaVersion: 1,
       version: "0.9.1",
-      repository: "file:///nonexistent/olw-update-prepare-herdr-fixture",
-      revision: "a".repeat(40),
-      rustToolchain: "1.96.1",
-      zigVersion: "0.16.0",
-      patch: "patches/herdr.patch",
-      patchSha256: hash(patch),
-      referenceBinarySha256: "b".repeat(64),
+      assets: {
+        [`${process.platform}-${process.arch}`]: {
+          name: "herdr-linux-x86_64",
+          sha256: hash("#!/bin/sh\nexit 0\n"),
+        },
+      },
     }),
   );
 }
@@ -529,37 +524,32 @@ async function tree(dir: string): Promise<string[]> {
   return (await readdir(dir, { recursive: true })).map(String).sort();
 }
 
-test("a worktree build without a managed receipt never writes into the root Herdr dir", async () => {
+test("a worktree download without a managed release never writes into the root Herdr dir", async () => {
   const root = await prepareFixture();
   await herdrVendor(root);
   await mkdir(join(root, ".omo/herdr"), { recursive: true });
-  const tools = join(root, "tools");
-  await mkdir(tools);
-  await writeFile(join(tools, "cargo"), "#!/bin/sh\necho 'cargo 1.96.1 (fixture)'\n", {
-    mode: 0o700,
-  });
-  await writeFile(join(tools, "zig"), "#!/bin/sh\necho 0.16.0\n", { mode: 0o700 });
+
   const before = await tree(join(root, ".omo/herdr"));
   let buildError = "";
-  let preparedIn: string[] = [];
+  let published = false;
   const fake = fakeRunner(
     async (argv, cwd) => {
       if (argv[0] !== "bun" || argv[2] !== "build") return undefined;
       // The real managed-build entry point, run against the update worktree.
       try {
-        await ensureHerdrBuild(cwd, { cargo: join(tools, "cargo"), zig: join(tools, "zig") });
+        await ensureHerdrBuild(cwd, { download: async () => new Response("tampered") });
       } catch (cause) {
         buildError = String(cause);
       }
-      preparedIn = await tree(join(cwd, ".omo/herdr"));
+      published = await Bun.file((await loadHerdrBuild(cwd)).binaryPath).exists();
       return { code: 1, stderr: buildError };
     },
     (path) => herdrVendor(path),
   );
   const result = await prepareUpdate(root, { run: fake.run, ghBin: "gh" });
   expect(result.ok && result.value.draft).toBe(true);
-  expect(buildError).toContain("git fetch");
-  expect(preparedIn).toContain("sources");
+  expect(buildError).toContain("SHA256 mismatch");
+  expect(published).toBe(false);
   expect(await tree(join(root, ".omo/herdr"))).toEqual(before);
 });
 
@@ -570,22 +560,7 @@ test("a verified root Herdr artifact is copied, not linked, into the worktree", 
   const executable = "#!/bin/sh\nexit 0\n";
   await mkdir(build.artifactDir, { recursive: true });
   await writeFile(build.binaryPath, executable, { mode: 0o700 });
-  await writeFile(
-    build.receiptPath,
-    JSON.stringify({
-      schemaVersion: 1,
-      sourceKey: build.sourceKey,
-      version: build.manifest.version,
-      revision: build.manifest.revision,
-      patchSha256: build.manifest.patchSha256,
-      rustToolchain: build.manifest.rustToolchain,
-      zigVersion: build.manifest.zigVersion,
-      platform: process.platform,
-      arch: process.arch,
-      binarySha256: hash(executable),
-      builtAt: new Date().toISOString(),
-    }),
-  );
+
   const before = await tree(join(root, ".omo/herdr"));
   let reused = "";
   const fake = fakeRunner(
@@ -593,7 +568,13 @@ test("a verified root Herdr artifact is copied, not linked, into the worktree", 
       if (argv[0] !== "bun" || argv[2] !== "build") return undefined;
       const { lstat } = await import("node:fs/promises");
       expect((await lstat(join(cwd, ".omo/herdr"))).isSymbolicLink()).toBe(false);
-      reused = (await ensureHerdrBuild(cwd, { cargo: join(cwd, "missing-cargo") })).binaryPath;
+      reused = (
+        await ensureHerdrBuild(cwd, {
+          download: async () => {
+            throw new Error("network called");
+          },
+        })
+      ).binaryPath;
       return { code: 0 };
     },
     (path) => herdrVendor(path),

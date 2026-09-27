@@ -34,10 +34,9 @@ change or service/session restart is performed. The existing `omo` launcher is
 not replaced. To uninstall, inspect and remove only the installed `olw` launcher;
 your checkout, `.omo/` state and external access files remain.
 
-`git` must be on PATH. The first build uses Rust 1.96.1 from Rustup and Zig 0.16.0
-to prepare Herdr with the OMO support patch applied. If `cargo` or `zig` isn't on
-PATH, point the `CARGO` and `ZIG` environment variables at the executables. Later
-builds reuse the verified artifact, so Herdr isn't compiled on every build.
+`git` must be on PATH. The first build downloads the official Herdr 0.9.1 release
+asset and verifies its pinned SHA-256. No Rust or Zig is needed. Later builds
+verify and reuse the managed artifact. A checksum mismatch fails closed.
 
 Herdr isn't an optional component you install and match separately. It's OLW's
 required managed runtime. `bun run herdr` runs this build, and OLW creates its
@@ -57,8 +56,8 @@ GitHub supplies bug/proposal forms and a PR template.
 [Version and release policy](docs/policy/releases.md) defines SemVer, `vVERSION` tags,
 source-only releases, upgrades and rollback. [CHANGELOG.md](CHANGELOG.md) holds
 release notes. `bun run release:check` validates the package version and notes.
-CI runs without provider credentials and includes the required native Herdr
-build and an isolated installation smoke test. An owner-pushed version tag
+CI runs without provider credentials and includes the checksum-verified official
+Herdr download and an isolated installation smoke test. An owner-pushed version tag
 runs those checks before publishing a GitHub release. The clone above installs
 `main`, the latest released commit; add `--branch v0.1.0` to install the first release instead. See
 [GitHub Releases](https://github.com/thisisjun786/omo-linear-workflow/releases)
@@ -296,19 +295,21 @@ QA with real Herdr, real models and real reports has passed. New managed supervi
 
 ## Managed Herdr
 
-The [pinned manifest](vendor/herdr/manifest.json), the [OMO support patch](patches/herdr-0.9.1-omo.patch)
-and the [build, update and recovery guide](vendor/herdr/README.md) are Herdr's ownership points.
-Artifact locations are keyed by upstream commit, patch hash and Rust/Zig versions,
-and the receipt and the executable's SHA-256 are verified before running. A missing
-or mismatched artifact is never silently replaced with a Herdr from the global PATH.
+The [release manifest](herdr-release.json) pins official Herdr 0.9.1 assets and
+SHA-256 checksums for Linux and macOS x64/arm64 (the supported OLW installer target
+remains Linux x64). Artifacts live in `.omo/herdr/bin/`, keyed by version, platform
+and checksum. The executable's SHA-256 is checked before use; there is no local
+build receipt or global PATH fallback. See [operations](docs/operations.md) for
+switch prerequisites, recovery and the one-release patched-build rollback.
 
 `bun run build` prepares the whole runtime including Herdr, while `bun run herdr:build`
 runs only the Herdr step. New role TUIs and the shared host receive this binary
 directory at the front of PATH. Existing servers, bindings and workspaces aren't
 restarted or migrated automatically.
 
-The Linux x64 binary rebuilt at integration time had the same SHA-256 as the
-existing installation and the server actually running. The original
-`~/code/herdr-omo-0.9.1` and the older `~/code/herdr-omo` were preserved, but
-future builds don't depend on those external source trees.
-The verification record is in [managed Herdr evidence](.omo/evidence/managed-herdr-integration.md).
+Senpi's built-in Herdr integration owns session and agent-state reports. OLW
+recognizes both `pi` and `omo` and never duplicates `pane.report_agent_session`.
+Owned parent clones naturally form separate groups by Git common directory;
+children use the official `worktree.create` RPC. Run `olw doctor --json` before
+switching: it blocks and lists legacy linked-worktree parents. Removing the old
+user extension or restarting the live server requires separate user approval.

@@ -84,8 +84,8 @@ async function world() {
       workspaces.set(workspace.workspaceId, workspace);
       return workspace;
     },
-    async createWorktree(checkout, _label, grouping) {
-      calls.push({ method: "worktree.create", cwd: checkout.originalRepoRoot, grouping });
+    async createWorktree(checkout) {
+      calls.push({ method: "worktree.create", cwd: checkout.originalRepoRoot });
       await git(
         checkout.originalRepoRoot,
         "worktree",
@@ -111,7 +111,6 @@ async function world() {
     async renameTab() {},
     async focusWorkspace() {},
     async sendKeys() {},
-    async reportSession() {},
     async run(paneId, argv) {
       const path = argv[argv.indexOf("--session") + 1];
       if (!path) throw new Error("missing session");

@@ -15,6 +15,11 @@ published.
 
 ### Added
 
+- Official checksum-pinned Herdr 0.9.1 releases replace the vendored patch and Rust/Zig
+  build. Senpi's built-in integration owns reports; OLW recognizes `pi` and `omo` without
+  duplicate session reports. Owned clones use upstream groups and `worktree.create`.
+  `olw doctor` blocks the operational switch and lists remaining legacy parents. Existing
+  servers, installed binaries and caches are untouched; one-release rollback is documented.
 - Pinned-by-default OMO model routing with accepted baselines, route-level upstream advice,
   selective `apply`/`dismiss`, optional `follow` mode, launcher and manager notices, and catalog
   health review for removed or degraded models. Advice is read-only until explicit acceptance.

@@ -24,7 +24,7 @@ import {
   scopeSnapshotSchema,
 } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
-import type { HerdrClient, Workspace, WorktreeGrouping } from "../src/herdr";
+import type { HerdrClient, Workspace } from "../src/herdr";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
 import type { NativeSession } from "../src/transport";
@@ -376,7 +376,7 @@ async function world() {
   const identities = new Map<string, RuntimeIdentity>();
   const prompts = new Map<string, Set<string>>();
   const workspaces = new Map<string, Workspace>();
-  const groupingRequests = new Map<string, WorktreeGrouping | undefined>();
+  const worktreeRequests = new Map<string, string>();
   const tabCalls: unknown[] = [];
   const sends: Envelope[] = [];
   const launches: string[] = [];
@@ -406,17 +406,10 @@ async function world() {
       workspaces.set(workspace.workspaceId, workspace);
       return workspace;
     },
-    async createWorktree(checkout, label, grouping) {
+    async createWorktree(checkout, label) {
       const workspace = await this.createWorkspace(checkout.path, label);
-      groupingRequests.set(workspace.workspaceId, grouping);
-      if (grouping === undefined) return workspace;
-      const grouped = {
-        ...workspace,
-        groupHeadWorkspaceId:
-          "head" in grouping ? workspace.workspaceId : grouping.parentWorkspaceId,
-      };
-      workspaces.set(workspace.workspaceId, grouped);
-      return grouped;
+      worktreeRequests.set(workspace.workspaceId, checkout.originalRepoRoot);
+      return workspace;
     },
     async createTab(workspaceId, cwd, label) {
       const call = { tabId: `${workspaceId}:t2`, rootPaneId: `${workspaceId}:p2` };
@@ -465,7 +458,6 @@ async function world() {
         })),
       };
     },
-    async reportSession() {},
     async closeWorkspace(id) {
       workspaces.delete(id);
     },
@@ -584,7 +576,7 @@ async function world() {
     create,
     createManager,
     workspaces,
-    groupingRequests,
+    worktreeRequests,
     sends,
     launches,
     identities,
@@ -820,22 +812,19 @@ test.each(["reconcile", "close"] as const)(
   },
 );
 
-test("new parent heads its group and child placement follows the actual parent workspace", async () => {
+test("child worktree creation uses the recorded parent repository", async () => {
   const w = await world();
   const parent = value(await w.create()).binding;
   if (parent.workspaceId === null) throw new Error("Missing parent workspace");
-  expect(w.groupingRequests.get(parent.workspaceId)).toEqual({ head: true });
+  expect(w.worktreeRequests.get(parent.workspaceId)).toBe(w.control);
   const child = value(
     await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
   ).binding;
   if (child.workspaceId === null) throw new Error("Missing child workspace");
-  expect(w.groupingRequests.get(child.workspaceId)).toEqual({
-    parentWorkspaceId: parent.workspaceId,
-  });
-  expect(w.workspaces.get(child.workspaceId)?.groupHeadWorkspaceId).toBe(parent.workspaceId);
+  expect(w.worktreeRequests.get(child.workspaceId)).toBe(parent.checkout?.originalRepoRoot);
 });
 
-test.each(["missing", "cwd", "child"] as const)(
+test.each(["missing", "cwd"] as const)(
   "refuses a mismatched parent workspace before reserving a child: %s",
   async (caseName) => {
     const w = await world();
@@ -844,37 +833,67 @@ test.each(["missing", "cwd", "child"] as const)(
     const workspace = w.workspaces.get(parent.workspaceId);
     if (!workspace) throw new Error("Missing parent snapshot");
     if (caseName === "missing") w.workspaces.delete(parent.workspaceId);
-    else
-      w.workspaces.set(
-        parent.workspaceId,
-        caseName === "cwd"
-          ? { ...workspace, cwd: "/unrelated" }
-          : { ...workspace, groupHeadWorkspaceId: "another-parent" },
-      );
+    else w.workspaces.set(parent.workspaceId, { ...workspace, cwd: "/unrelated" });
     expect(
       await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
     ).toMatchObject({ ok: false, error: { code: "owner_unavailable" } });
     expect(w.registry((registry) => value(registry.list()))).toEqual([parent]);
-    expect(w.groupingRequests.size).toBe(1);
+    expect(w.worktreeRequests.size).toBe(1);
   },
 );
 
-test("children of existing legacy parents retain their existing layout", async () => {
-  const w = await world();
-  const parent = value(await w.create()).binding;
-  if (parent.workspaceId === null) throw new Error("Missing parent workspace");
-  const current = w.workspaces.get(parent.workspaceId);
-  if (!current) throw new Error("Missing parent workspace snapshot");
-  const legacy = { ...current };
-  delete legacy.groupHeadWorkspaceId;
-  w.workspaces.set(parent.workspaceId, legacy);
-  const child = value(
-    await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
-  ).binding;
-  if (child.workspaceId === null) throw new Error("Missing child workspace");
-  expect(w.groupingRequests.get(child.workspaceId)).toBeUndefined();
-  expect(w.workspaces.get(parent.workspaceId)).toEqual(legacy);
-});
+test.each(["linked-worktree", "missing-kind"])(
+  "doctor lists legacy parents (%s) without launching anything",
+  async (kind) => {
+    const w = await world();
+    const parent = value(await w.create()).binding;
+    if (kind === "missing-kind") {
+      const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+      try {
+        db.query(
+          "UPDATE bindings SET json = json_remove(json, '$.checkout.kind') WHERE id = ?",
+        ).run(parent.id);
+      } finally {
+        db.close();
+      }
+    }
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../src/cli.ts"),
+        "--root",
+        w.control,
+        "doctor",
+        "--json",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [code, stdout] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).not.toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "legacy_parents_remaining",
+        details: {
+          legacyParents: [
+            {
+              bindingId: parent.id,
+              projectId: "project",
+              cwd: parent.cwd,
+              workspaceId: parent.workspaceId,
+              checkoutKind: "linked-worktree",
+            },
+          ],
+        },
+      },
+    });
+    expect(w.registry((r) => value(r.list()))).toEqual([parent]);
+  },
+);
 
 test("no-supervisor creation through child instruction, report and user inbox uses the real registry", async () => {
   const w = await world();

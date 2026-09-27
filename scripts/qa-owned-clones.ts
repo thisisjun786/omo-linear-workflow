@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,7 +12,7 @@ import { modelForBinding } from "../src/core/policy";
 import { scopeSnapshotSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
-import { resolveHerdrArtifact } from "../src/herdr/artifact";
+import { loadHerdrBuild, resolveHerdrArtifact } from "../src/herdr/artifact";
 import type { OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
 import { checkoutGit } from "../src/repo/checkout";
@@ -20,12 +20,20 @@ import { checkoutGit } from "../src/repo/checkout";
 // Real CLI + registry + Git + official Herdr RPC. Native model execution is deliberately
 // replaced at its boundary: grouping QA needs neither credentials nor model network calls.
 const root = resolve(import.meta.dir, "..");
-const artifact = await resolveHerdrArtifact(root);
+const installedArtifact = await resolveHerdrArtifact(root);
 const scratch = await mkdtemp(join(tmpdir(), "olw-owned-qa-"));
 const control = join(scratch, "control");
 const home = join(scratch, "home");
 await mkdir(control);
 await mkdir(home);
+await cp(join(root, "herdr-release.json"), join(control, "herdr-release.json"));
+const fixtureBuild = await loadHerdrBuild(control);
+await cp(installedArtifact.artifactDir, fixtureBuild.artifactDir, { recursive: true });
+const artifact = await resolveHerdrArtifact(control);
+await writeFile(
+  join(scratch, "herdr.toml"),
+  "[update]\nversion_check = false\nmanifest_check = false\n",
+);
 const env = {
   ...process.env,
   HOME: home,
@@ -33,6 +41,7 @@ const env = {
   XDG_DATA_HOME: join(home, ".local/share"),
   XDG_STATE_HOME: join(home, ".local/state"),
   XDG_CACHE_HOME: join(home, ".cache"),
+  HERDR_CONFIG_PATH: join(scratch, "herdr.toml"),
   HERDR_SOCKET_PATH: undefined,
   HERDR_CLIENT_SOCKET_PATH: undefined,
   HERDR_SESSION: undefined,
@@ -140,13 +149,9 @@ try {
           record("workspace.create", { cwd, label });
           return client.createWorkspace(cwd, label);
         },
-        createWorktree: (checkout, label, grouping) => {
-          record(grouping === undefined ? "worktree.create" : "worktree.create_grouped", {
-            checkout,
-            label,
-            grouping,
-          });
-          return client.createWorktree(checkout, label, grouping);
+        createWorktree: (checkout, label) => {
+          record("worktree.create", { checkout, label });
+          return client.createWorktree(checkout, label);
         },
         createTab: (workspace, cwd, label) => {
           record("tab.create", { workspace, cwd, label });
@@ -155,7 +160,6 @@ try {
         renameTab: (tab, label) => client.renameTab(tab, label),
         focusWorkspace: (workspace) => client.focusWorkspace(workspace),
         sendKeys: (pane, text, keys) => client.sendKeys(pane, text, keys),
-        reportSession: (pane, path) => client.reportSession(pane, path),
         snapshot: () => client.snapshot(),
         subscribe: (listener) => client.subscribe(listener),
         closeWorkspace: (workspace) => client.closeWorkspace(workspace),
@@ -463,7 +467,7 @@ try {
   assert.equal(failure, undefined);
   result = {
     passed: true,
-    artifact: artifact.receipt,
+    artifact: { version: artifact.manifest.version, sha256: artifact.asset.sha256 },
     groups,
     integrations,
     ghArgv: (await readFile(`${ghState}.argv`, "utf8"))

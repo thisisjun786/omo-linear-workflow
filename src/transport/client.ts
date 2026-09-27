@@ -5,6 +5,13 @@ import type { RoleModel } from "../core/policy";
 import { envelopeSchema } from "../core/schema";
 import { describeResultSchema, sendResultSchema } from "./schema";
 
+export class NativeSessionAbsentError extends Error {
+  constructor(message = "Exact durable native session is not open") {
+    super(message);
+    this.name = "NativeSessionAbsentError";
+  }
+}
+
 export interface NativeSession {
   configure(model: RoleModel): Promise<void>;
   hasUserMessage(text: string): Promise<boolean>;
@@ -70,7 +77,7 @@ export async function attachBindingWithClient(
         session.cwd === binding.cwd,
     );
     const exact = matches[0];
-    if (exact === undefined) throw new Error("Exact durable native session is not open");
+    if (exact === undefined) throw new NativeSessionAbsentError();
     if (matches.length !== 1)
       throw new Error("Host must contain exactly one durable native session");
     const opened = await client.openSession({

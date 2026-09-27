@@ -211,6 +211,25 @@ test("a read-only registry without a generation column still returns lineage", a
   }
 });
 
+test("malformed persisted handoff returns a typed storage error", async () => {
+  await fixture((path, registry, _parent, plan) => {
+    value(registry.recordStage(plan.id, "issue", "plan", 0, null));
+    const db = new Database(path);
+    try {
+      db.query("UPDATE stage_lineage SET handoff_json = ? WHERE binding_id = ?").run(
+        JSON.stringify({ head: 7 }),
+        plan.id,
+      );
+    } finally {
+      db.close();
+    }
+    expect(registry.stageOf(plan.id)).toMatchObject({
+      ok: false,
+      error: { code: "storage_corrupt", message: "Stored stage handoff is invalid" },
+    });
+  });
+});
+
 test("an existing lineage table gains generation without rewriting its rows", async () => {
   const dir = await mkdtemp(join(tmpdir(), "olw-lineage-old-"));
   const path = join(dir, "registry.sqlite");

@@ -50,7 +50,7 @@ import {
 } from "./repo/checkout";
 import { fetchMirror } from "./repo/mirror";
 import { mergePr, type OpenPrInput, openPr } from "./repo/pr";
-import { attachBinding, type NativeSession } from "./transport";
+import { attachBinding, type NativeSession, NativeSessionAbsentError } from "./transport";
 import {
   checkUpdates,
   systemUpdateTimer,
@@ -59,21 +59,6 @@ import {
 } from "./update/check";
 import { type PrepareResult, prepareUpdate } from "./update/prepare";
 
-const normalizedPaneSchema = z.strictObject({
-  paneId: z.string(),
-  sessionPath: z.string().nullable(),
-});
-const herdrPaneEventSchema = z.object({
-  data: z.object({
-    pane: z.object({
-      pane_id: z.string(),
-      agent_session: z
-        .object({ kind: z.literal("path"), value: z.string() })
-        .nullable()
-        .optional(),
-    }),
-  }),
-});
 const herdrConnectionErrorSchema = z.strictObject({
   event: z.literal("connection.error"),
   data: z.strictObject({ code: z.string(), message: z.string() }),
@@ -310,17 +295,6 @@ function launchEnvironment(
   managedPath: string,
 ): Readonly<Record<string, string | undefined>> {
   return { ...process.env, PATH: managedPath, ...runtimeCacheEnvironment(root) };
-}
-
-/** Decode either P2's normalized pane callback or Herdr's pane.updated envelope. */
-export function readSessionPath(event: unknown, paneId: string): string | null {
-  const normalized = normalizedPaneSchema.safeParse(event);
-  if (normalized.success) {
-    return normalized.data.paneId === paneId ? normalized.data.sessionPath : null;
-  }
-  const source = herdrPaneEventSchema.safeParse(event);
-  if (!source.success || source.data.data.pane.pane_id !== paneId) return null;
-  return source.data.data.pane.agent_session?.value ?? null;
 }
 
 async function defaultEnsureHost(
@@ -1407,20 +1381,25 @@ export class Orchestrator {
         );
         if (pane === undefined) return failure("runtime_unavailable", "Successor pane is missing");
         let session: NativeSession | undefined;
-        let available = false;
+        let sessionAbsent = false;
         try {
           session = await this.#deps.attachBinding(binding);
           const identity = await session.describe();
           if (!identity.ok) return identity;
           if (binding.launchState === "ready" && !matchesRuntime(binding, identity.value))
             return failure("identity_mismatch", "Execute runtime identity changed");
-          available = true;
-        } catch {
-          /* A missing native session is relaunched from the retained seed. */
+        } catch (cause) {
+          if (!(cause instanceof NativeSessionAbsentError))
+            return failure(
+              "runtime_unavailable",
+              "Could not inspect execute session",
+              messageOf(cause),
+            );
+          sessionAbsent = true;
         } finally {
           await session?.close();
         }
-        if (available) {
+        if (!sessionAbsent) {
           if (binding.launchState === "ready" && binding.initialization.state === "accepted")
             return ok(this.#creationResult(binding));
           const provisioning = this.#withRegistry((registry) =>
@@ -1432,6 +1411,11 @@ export class Orchestrator {
           const initialized = await this.#initialize(activated.value, snapshot);
           return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
         }
+        if (hasLiveTui(pane))
+          return failure(
+            "runtime_unavailable",
+            "Execute pane still has a live TUI but its native session could not be found",
+          );
       }
     } catch (cause) {
       return failure(

@@ -1,1 +1,1 @@
-export { attachBinding, type NativeSession } from "./client";
+export { attachBinding, type NativeSession, NativeSessionAbsentError } from "./client";

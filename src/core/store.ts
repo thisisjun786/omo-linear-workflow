@@ -36,7 +36,7 @@ import {
   runtimeIdentitySchema,
   scopeSnapshotSchema,
 } from "./schema";
-import { createStageLineage } from "./stage-lineage";
+import { createStageLineage, StageHandoffStorageError } from "./stage-lineage";
 
 interface JsonRow {
   readonly json: string;
@@ -389,14 +389,18 @@ export function openRegistry(
     try {
       return ok(lineage.get(bindingId));
     } catch (cause) {
-      return error("storage_error", "Could not read stage", messageOf(cause));
+      return cause instanceof StageHandoffStorageError
+        ? error("storage_corrupt", cause.message, cause.details)
+        : error("storage_error", "Could not read stage", messageOf(cause));
     }
   }
   function stageChain(issueId: string): Result<StageRecord[]> {
     try {
       return ok(lineage.chain(issueId));
     } catch (cause) {
-      return error("storage_error", "Could not read stage chain", messageOf(cause));
+      return cause instanceof StageHandoffStorageError
+        ? error("storage_corrupt", cause.message, cause.details)
+        : error("storage_error", "Could not read stage chain", messageOf(cause));
     }
   }
   function lineageFor(bindingId: string): Result<StageLineage> {

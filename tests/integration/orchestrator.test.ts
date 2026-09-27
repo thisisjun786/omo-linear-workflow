@@ -23,10 +23,9 @@ import {
   type OrchestratorDependencies,
   planPaneExited,
   planPathForIssueKey,
-  readSessionPath,
 } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
-import type { NativeSession } from "../../src/transport";
+import { type NativeSession, NativeSessionAbsentError } from "../../src/transport";
 
 const ownedRoots: string[] = [];
 afterEach(async () => {
@@ -129,50 +128,6 @@ test("real Herdr exit variants identify only the plan pane", () => {
       "p",
     ),
   ).toBe(false);
-});
-
-describe("Herdr readiness event", () => {
-  test("accepts normalized panes and the actual Herdr event source shape", () => {
-    expect(
-      readSessionPath(
-        {
-          event: "pane_updated",
-          data: {
-            type: "pane_updated",
-            pane: {
-              pane_id: "pane-1",
-              agent_session: {
-                source: "herdr:pi",
-                agent: "pi",
-                kind: "path",
-                value: "/s/session.jsonl",
-              },
-            },
-          },
-        },
-        "pane-1",
-      ),
-    ).toBe("/s/session.jsonl");
-    expect(
-      readSessionPath({ paneId: "pane-1", sessionPath: "/s/normalized.jsonl" }, "pane-1"),
-    ).toBe("/s/normalized.jsonl");
-  });
-  test("does not treat a durable session ID report as a session file path", () => {
-    expect(
-      readSessionPath(
-        {
-          event: "pane.updated",
-          data: {
-            pane: {
-              pane_id: "pane-1",
-              agent_session: { kind: "id", value: "session-id-not-a-path" },
-            },
-          },
-        },
-        "pane-1",
-      ),
-    ).toBeNull();
-  });
 });
 
 class FakeHerdr implements HerdrClient {
@@ -904,7 +859,7 @@ describe("orchestrator startup", () => {
       uuid: () => `stage-id-${++nextId}`,
       attachBinding: async (binding) => {
         const identity = herdr.nativeIdentities.get(binding.durableSessionId);
-        if (!identity) throw new Error("Missing native session");
+        if (!identity) throw new NativeSessionAbsentError();
         const messages = prompts.get(binding.durableSessionId) ?? new Set<string>();
         prompts.set(binding.durableSessionId, messages);
         const session = new FakeNative(identity, events, messages);
@@ -1198,7 +1153,43 @@ describe("orchestrator startup", () => {
     expect(seed.buildSessionContext().thinkingLevel).toBe("medium");
     expect(seed.buildSessionContext().model?.modelId).toBe("anthropic/claude-opus-5-5");
     expect(await Bun.file(binding.sessionPath ?? "").exists()).toBe(true);
+    const runsBeforeRecovery = events.filter((event) => event === "run").length;
+    const observationFailure = new Orchestrator(root, "/fake/herdr.sock", {
+      ...dependencies,
+      attachBinding: async (candidate) => {
+        if (candidate.id === started.value.binding.id)
+          throw new Error("transient RPC transport failure");
+        return dependencies.attachBinding(candidate);
+      },
+    });
+    expect(
+      await observationFailure.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "runtime_unavailable",
+        details: "transient RPC transport failure",
+      },
+    });
+    expect(events.filter((event) => event === "run")).toHaveLength(runsBeforeRecovery);
+
     herdr.nativeIdentities.delete(started.value.binding.durableSessionId);
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        parentId: parent.value.binding.id,
+        stage: "execute",
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+    expect(events.filter((event) => event === "run")).toHaveLength(runsBeforeRecovery);
+
+    herdr.paneSessions.delete(started.value.binding.paneId ?? "");
     const recovered = await orchestrator.stageStart({
       fromId: binding.id,
       parentId: parent.value.binding.id,
@@ -1209,6 +1200,7 @@ describe("orchestrator startup", () => {
       ok: true,
       value: { binding: { id: started.value.binding.id } },
     });
+    expect(events.filter((event) => event === "run")).toHaveLength(runsBeforeRecovery + 1);
     expect(live()).toHaveLength(1);
     expect(
       await orchestrator.stageStart({

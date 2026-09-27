@@ -1,5 +1,23 @@
 import type { Database } from "bun:sqlite";
+import { z } from "zod";
 import type { ChildStage, StageHandoff, StageRecord } from "./contracts";
+
+const stageHandoffSchema = z.strictObject({
+  planPath: z.string().min(1),
+  planSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  head: z.string().min(1),
+  completedAt: z.string().min(1),
+});
+
+export class StageHandoffStorageError extends Error {
+  readonly details: unknown;
+
+  constructor(details: unknown) {
+    super("Stored stage handoff is invalid");
+    this.name = "StageHandoffStorageError";
+    this.details = details;
+  }
+}
 
 interface StageRow {
   readonly binding_id: string;
@@ -37,13 +55,24 @@ export function createStageLineage(db: Database, readonly: boolean) {
       .all()
       .some((column) => column.name === "generation");
   const generationOfRow = (row: StageRow): number => (hasGeneration ? (row.generation ?? 0) : 0);
+  const parseHandoff = (value: string): StageHandoff => {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(value);
+    } catch (cause) {
+      throw new StageHandoffStorageError(cause instanceof Error ? cause.message : String(cause));
+    }
+    const parsed = stageHandoffSchema.safeParse(decoded);
+    if (!parsed.success) throw new StageHandoffStorageError(parsed.error.issues);
+    return parsed.data;
+  };
   const parse = (row: StageRow): StageRecord => ({
     bindingId: row.binding_id,
     issueId: row.issue_id,
     stage: row.stage,
     ordinal: row.ordinal,
     previousBindingId: row.previous_binding_id,
-    handoff: row.handoff_json === null ? null : (JSON.parse(row.handoff_json) as StageHandoff),
+    handoff: row.handoff_json === null ? null : parseHandoff(row.handoff_json),
   });
   return {
     get(bindingId: string): StageRecord | null {

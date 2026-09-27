@@ -1515,7 +1515,12 @@ export class Orchestrator {
       const settled = this.#withRegistry((registry) =>
         registry.failSuccessorLaunch(binding.id, owner),
       );
-      if (!settled.ok && settled.error.code !== "lease_lost") return settled;
+      if (
+        !settled.ok &&
+        settled.error.code !== "lease_lost" &&
+        settled.error.code !== "invalid_transition"
+      )
+        return settled;
     }
     return result;
   }
@@ -1564,9 +1569,10 @@ export class Orchestrator {
             if (!recovered.ok) return recovered;
             const initialized = await this.#initialize(recovered.value, snapshot);
             if (!initialized.ok) {
-              this.#withRegistry((registry) =>
+              const settled = this.#withRegistry((registry) =>
                 registry.finishSuccessorLaunch(binding.id, owner, "uncertain"),
               );
+              if (!settled.ok && settled.error.code !== "lease_lost") return settled;
               return initialized;
             }
             const finished = this.#withRegistry((registry) =>

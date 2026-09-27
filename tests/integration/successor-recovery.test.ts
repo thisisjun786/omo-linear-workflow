@@ -168,6 +168,7 @@ async function world(options: { executeInitialized?: boolean } = {}) {
   let paneLive = false;
   let launches = 0;
   let absenceHook: ((count: number) => Promise<void>) | undefined;
+  let sendState: "accepted" | "rejected" = "accepted";
   let runHook: ((count: number) => Promise<void>) | undefined;
   let describeHook: ((count: number) => Promise<void>) | undefined;
   let absences = 0;
@@ -250,7 +251,7 @@ async function world(options: { executeInitialized?: boolean } = {}) {
           ok: true,
           value: {
             envelope,
-            state: "accepted",
+            state: sendState,
             receipt: {
               kind: "ok",
               thread_id: identity.durableSessionId,
@@ -330,6 +331,9 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     },
     setRunHook: (hook: (count: number) => Promise<void>) => {
       runHook = hook;
+    },
+    setSendState: (state: "accepted" | "rejected") => {
+      sendState = state;
     },
     setDescribeHook: (hook: ((count: number) => Promise<void>) | undefined) => {
       describeHook = hook;
@@ -558,6 +562,18 @@ test("owner-held native adoption initializes before reporting brief acceptance",
   expect(persisted.launchState).toBe("ready");
   expect(persisted.initialization.state).toBe("accepted");
   expect(persisted.initialization.text).not.toBeNull();
+  expect(w.launches()).toBe(0);
+  expect(w.sends()).toBe(1);
+});
+
+test("owner-held native adoption surfaces a rejected initialization", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setAbsenceHook(async () => w.setVisibility(true));
+  w.setSendState("rejected");
+  const adopted = await w.start();
+  expect(adopted).toMatchObject({ ok: false, error: { code: "brief_rejected" } });
+  const persisted = w.registry((registry) => value(registry.get("execute")));
+  expect(persisted.initialization.state).toBe("rejected");
   expect(w.launches()).toBe(0);
   expect(w.sends()).toBe(1);
 });

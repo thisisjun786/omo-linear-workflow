@@ -39,7 +39,8 @@ export interface RoleModel {
 const managerSettingsSchema = z.object({
   defaultProvider: z.string().min(1),
   defaultModel: z.string().min(1),
-  defaultThinkingLevel: thinkingLevelSchema,
+  defaultThinkingLevel: thinkingLevelSchema.optional(),
+  modelThinkingLevels: z.record(z.string(), thinkingLevelSchema).optional(),
 });
 
 export interface ManagerModelResolution {
@@ -65,6 +66,80 @@ const managerFallback: RoleModel = {
   thinking: "medium",
 };
 
+/** Match pinned Senpi's JSONC semantics without loading its complete runtime into OLW workers. */
+function parseSettingsJson(content: string): Record<string, unknown> {
+  const text = content.replace(/^\uFEFF/, "");
+  const normalized: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] ?? "";
+    const next = text[index + 1];
+    if (inString) {
+      normalized.push(char);
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      normalized.push(char);
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      normalized.push(" ", " ");
+      index += 2;
+      while (index < text.length && text[index] !== "\n" && text[index] !== "\r") {
+        normalized.push(" ");
+        index += 1;
+      }
+      if (index < text.length) normalized.push(text[index] ?? "");
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      normalized.push(" ", " ");
+      index += 2;
+      let closed = false;
+      for (; index < text.length; index += 1) {
+        if (text[index] === "*" && text[index + 1] === "/") {
+          normalized.push(" ", " ");
+          index += 1;
+          closed = true;
+          break;
+        }
+        normalized.push(text[index] === "\n" || text[index] === "\r" ? (text[index] ?? "") : " ");
+      }
+      if (!closed) throw new SyntaxError("Unterminated block comment in settings");
+      continue;
+    }
+    normalized.push(char);
+  }
+  inString = false;
+  escaped = false;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char !== ",") continue;
+    let nextIndex = index + 1;
+    while (nextIndex < normalized.length && /\s/.test(normalized[nextIndex] ?? "")) nextIndex += 1;
+    if (normalized[nextIndex] === "}" || normalized[nextIndex] === "]") normalized[index] = " ";
+  }
+  const parsed: unknown = JSON.parse(normalized.join(""));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new TypeError("Settings must contain a JSON object");
+  return z.record(z.string(), z.unknown()).parse(parsed);
+}
+
 export function resolveManagerModel(
   settingsPath = join(homedir(), ".omo/agent/settings.json"),
 ): ManagerModelResolution {
@@ -84,7 +159,7 @@ export function resolveManagerModel(
   }
   let settingsValue: unknown;
   try {
-    settingsValue = JSON.parse(settingsText);
+    settingsValue = parseSettingsJson(settingsText);
   } catch (cause) {
     throw new ManagerSettingsError(
       `Could not parse manager settings: ${String(cause)}`,
@@ -106,11 +181,15 @@ export function resolveManagerModel(
     throw new ManagerSettingsError("Manager default model settings are invalid", settingsPath, {
       cause: settings.error,
     });
+  const modelKey = `${settings.data.defaultProvider}/${settings.data.defaultModel}`;
   return {
     model: {
       provider: settings.data.defaultProvider,
       modelId: settings.data.defaultModel,
-      thinking: settings.data.defaultThinkingLevel,
+      thinking:
+        settings.data.modelThinkingLevels?.[modelKey] ??
+        settings.data.defaultThinkingLevel ??
+        "medium",
     },
     source: "settings",
   };

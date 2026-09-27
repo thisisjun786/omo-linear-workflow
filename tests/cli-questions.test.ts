@@ -13,7 +13,7 @@ import type {
 import { modelForRole } from "../src/core/policy";
 import { openRegistry } from "../src/core/store";
 import type { OrchestratorDependencies } from "../src/orchestrator";
-import { type ListedQuestion, Orchestrator } from "../src/orchestrator";
+import { Orchestrator } from "../src/orchestrator";
 
 const question: DeliveryRecord = {
   envelope: {
@@ -38,7 +38,7 @@ const question: DeliveryRecord = {
   },
 };
 
-type QuestionMethod = "ask" | "answer" | "answerAsUser" | "questions";
+type QuestionMethod = "ask" | "answer" | "answerAsUser";
 
 function mockQuestionMethod(method: QuestionMethod, reply: Result<unknown>) {
   switch (method) {
@@ -48,12 +48,6 @@ function mockQuestionMethod(method: QuestionMethod, reply: Result<unknown>) {
       return spyOn(Orchestrator.prototype, "answer").mockImplementation(async () => reply);
     case "answerAsUser":
       return spyOn(Orchestrator.prototype, "answerAsUser").mockImplementation(async () => reply);
-    case "questions": {
-      const typed: Result<ListedQuestion[]> = reply.ok
-        ? { ok: true, value: Array.isArray(reply.value) ? reply.value : [] }
-        : reply;
-      return spyOn(Orchestrator.prototype, "questions").mockImplementation(() => typed);
-    }
   }
 }
 

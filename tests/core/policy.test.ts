@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { SettingsManager } from "@code-yeongyu/senpi";
 import type { Assignment, Binding } from "../../src/core/contracts";
 import type { RoleModel } from "../../src/core/policy";
 import {
@@ -73,16 +74,56 @@ describe("launch models by role and child stage", () => {
       await Bun.write(
         path,
         JSON.stringify({
-          defaultProvider: "opencodex",
-          defaultModel: "gpt-6-astra",
+          defaultProvider: "fixture-native-provider",
+          defaultModel: "fixture-native-model",
           defaultThinkingLevel: thinking,
         }),
       );
       expect(resolveManagerModel(path)).toEqual({
-        model: { provider: "opencodex", modelId: "gpt-6-astra", thinking },
+        model: {
+          provider: "fixture-native-provider",
+          modelId: "fixture-native-model",
+          thinking,
+        },
         source: "settings",
       });
     }
+  });
+
+  test("manager accepts settings written and parsed by pinned Senpi", async () => {
+    const root = await mkdtemp(join(tmpdir(), "olw-manager-native-settings-"));
+    roots.push(root);
+    const agentDir = join(root, ".omo/agent");
+    const path = join(agentDir, "settings.json");
+    await mkdir(dirname(path), { recursive: true });
+    const settings = SettingsManager.create(root, agentDir);
+    settings.setDefaultModelAndProvider("fixture-native-provider", "fixture-native-model");
+    await settings.flush();
+    expect(resolveManagerModel(path)).toEqual({
+      model: {
+        provider: "fixture-native-provider",
+        modelId: "fixture-native-model",
+        thinking: "medium",
+      },
+      source: "settings",
+    });
+    await Bun.write(
+      path,
+      `{
+        // Native settings support JSONC and trailing commas.
+        "defaultProvider": "fixture-native-provider",
+        "defaultModel": "fixture-native-model",
+        "defaultThinkingLevel": "low",
+      }`,
+    );
+    expect(resolveManagerModel(path)).toEqual({
+      model: {
+        provider: "fixture-native-provider",
+        modelId: "fixture-native-model",
+        thinking: "low",
+      },
+      source: "settings",
+    });
   });
 
   test("manager fallback is explicit and applies only when no default model exists", async () => {

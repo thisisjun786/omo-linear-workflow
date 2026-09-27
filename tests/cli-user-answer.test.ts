@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { runCli } from "../src/cli";
 import type { Binding, Registry } from "../src/core/contracts";
 import { envelopeSchema } from "../src/core/schema";
@@ -9,6 +10,14 @@ import { registerInitiativeRuntime } from "../src/extension/runtime";
 import type { OrchestratorDependencies } from "../src/orchestrator";
 import { attachBindingWithClient } from "../src/transport/client";
 import { context, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
+
+const cliResultSchema = z.union([
+  z.object({ ok: z.literal(true), value: z.unknown() }),
+  z.object({
+    ok: z.literal(false),
+    error: z.looseObject({ code: z.string() }),
+  }),
+]);
 
 test("answer --as-user delivers a claimed inbox answer through the real send boundary", async () => {
   await fixture(async ({ root, parent }) => {
@@ -125,11 +134,7 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
       const code = await runCli(["--root", root, ...args, "--json"], deps);
       return {
         code,
-        output: JSON.parse(output) as {
-          ok: boolean;
-          value?: { state?: string; envelope?: { toBindingId?: string | null; id?: string } };
-          error?: { code?: string };
-        },
+        output: cliResultSchema.parse(JSON.parse(output)),
       };
     };
     try {
@@ -362,11 +367,7 @@ test("a paused manager posts new parent questions to the inbox, answered as the 
       const code = await runCli(["--root", root, ...args, "--json"], deps);
       return {
         code,
-        output: JSON.parse(output) as {
-          ok: boolean;
-          value?: { state?: string; envelope?: { toBindingId?: string | null; id?: string } };
-          error?: { code?: string };
-        },
+        output: cliResultSchema.parse(JSON.parse(output)),
       };
     };
     try {

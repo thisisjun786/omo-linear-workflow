@@ -139,14 +139,22 @@ test("equal versions are current", async () => {
 
 test("runner timeout is unknown with a successful check result", async () => {
   const root = await fixture();
-  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const timers: Array<{
+    callback: () => void;
+    delay: number;
+    handle: ReturnType<typeof setTimeout>;
+  }> = [];
   const timer: UpdateTimer = {
     now: () => 0,
     setTimeout(callback, delay) {
-      timers.push({ callback, delay });
-      return 0 as unknown as ReturnType<typeof setTimeout>;
+      const handle = setTimeout(() => {}, 2_147_483_647);
+      handle.unref();
+      timers.push({ callback, delay, handle });
+      return handle;
     },
-    clearTimeout() {},
+    clearTimeout(handle) {
+      clearTimeout(handle);
+    },
   };
   let calls = 0;
   const allStarted = Promise.withResolvers<void>();
@@ -234,16 +242,20 @@ test("all commands run concurrently against one injected deadline", async () => 
     delay: number;
     scheduledAt: number;
     cleared: boolean;
+    handle: ReturnType<typeof setTimeout>;
   }> = [];
   const timer: UpdateTimer = {
     now: () => now,
     setTimeout(callback, delay) {
-      const item = { callback, delay, scheduledAt: now, cleared: false };
-      timers.push(item);
-      return item as unknown as ReturnType<typeof setTimeout>;
+      const handle = setTimeout(() => {}, 2_147_483_647);
+      handle.unref();
+      timers.push({ callback, delay, scheduledAt: now, cleared: false, handle });
+      return handle;
     },
-    clearTimeout(id) {
-      (id as unknown as { cleared: boolean }).cleared = true;
+    clearTimeout(handle) {
+      clearTimeout(handle);
+      const item = timers.find((candidate) => candidate.handle === handle);
+      if (item !== undefined) item.cleared = true;
     },
   };
   const started: string[] = [];
@@ -285,16 +297,20 @@ setInterval(() => {}, 1000);`,
     callback: () => void;
     delay: number;
     cleared: boolean;
+    handle: ReturnType<typeof setTimeout>;
   }> = [];
   const timer: UpdateTimer = {
     now: () => 0,
     setTimeout(callback, delay) {
-      const item = { callback, delay, cleared: false };
-      scheduled.push(item);
-      return item as unknown as ReturnType<typeof setTimeout>;
+      const handle = setTimeout(() => {}, 2_147_483_647);
+      handle.unref();
+      scheduled.push({ callback, delay, cleared: false, handle });
+      return handle;
     },
-    clearTimeout(id) {
-      (id as unknown as { cleared: boolean }).cleared = true;
+    clearTimeout(handle) {
+      clearTimeout(handle);
+      const item = scheduled.find((candidate) => candidate.handle === handle);
+      if (item !== undefined) item.cleared = true;
     },
   };
   let childPid: number | undefined;

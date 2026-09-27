@@ -104,7 +104,11 @@ async function fixture(
     await rm(dir, { recursive: true, force: true });
   }
 }
-function question(from: Binding, to: Binding | null, digest: string): Envelope {
+function question(
+  from: Pick<Binding, "id" | "designationId">,
+  to: Pick<Binding, "id"> | null,
+  digest: string,
+): Envelope {
   return {
     version: 1,
     id: `question:${from.id}:1`,
@@ -124,7 +128,12 @@ function question(from: Binding, to: Binding | null, digest: string): Envelope {
     },
   };
 }
-function answer(from: Binding | null, to: Binding, q: Envelope, digest: string): Envelope {
+function answer(
+  from: Pick<Binding, "id"> | null,
+  to: Pick<Binding, "id" | "designationId">,
+  q: Envelope,
+  digest: string,
+): Envelope {
   return {
     version: 1,
     id: `answer:${q.id}`,
@@ -148,7 +157,7 @@ const receipt = (to: Binding) => ({
 });
 
 test("question/answer boundary rejects malformed structures and IDs", () => {
-  const q = question({ id: "child", designationId: "d" } as Binding, null, "digest");
+  const q = question({ id: "child", designationId: "d" }, null, "digest");
   expect(envelopeSchema.safeParse(q).success).toBe(true);
   for (const bad of [
     { ...q, id: "wrong" },
@@ -160,7 +169,7 @@ test("question/answer boundary rejects malformed structures and IDs", () => {
     { ...q, outcome: "completed" },
   ])
     expect(envelopeSchema.safeParse(bad).success).toBe(false);
-  const a = answer(null, { id: "parent", designationId: "d" } as Binding, q, "digest");
+  const a = answer(null, { id: "parent", designationId: "d" }, q, "digest");
   expect(envelopeSchema.safeParse(a).success).toBe(true);
   for (const bad of [
     { ...a, id: "wrong" },

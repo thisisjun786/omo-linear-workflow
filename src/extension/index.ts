@@ -3,14 +3,10 @@ import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
 
-export default function initiativeExtension(pi: ExtensionAPI): void {
-  const port: RuntimePort = {
-    onSessionStart(handler): void {
-      pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
-    },
-    onMessageStart(handler): void {
-      pi.on("message_start", (event, ctx) => handler(event.message, contextPort(ctx)));
-    },
+export function questionWaitWire(
+  pi: Pick<ExtensionAPI, "events" | "appendEntry">,
+): Pick<RuntimePort, "emitQuestionWait" | "appendQuestionWait"> {
+  return {
     emitQuestionWait(active, ids): void {
       pi.events.emit("continuation_hold_state", { source: "olw-question", active });
       pi.events.emit("wake_source_state", {
@@ -22,6 +18,18 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
     appendQuestionWait(data): void {
       pi.appendEntry("olw-question-wait", data);
     },
+  };
+}
+
+export default function initiativeExtension(pi: ExtensionAPI): void {
+  const port: RuntimePort = {
+    onSessionStart(handler): void {
+      pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
+    },
+    onMessageStart(handler): void {
+      pi.on("message_start", (event, ctx) => handler(event.message, contextPort(ctx)));
+    },
+    ...questionWaitWire(pi),
     pauseGoal,
     ownsGoalPause,
     resumeGoal,

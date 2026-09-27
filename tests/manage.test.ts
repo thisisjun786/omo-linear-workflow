@@ -270,6 +270,7 @@ async function world(agent = "omo") {
     });
   return {
     root,
+    settingsPath,
     orchestrator,
     readRegistry,
     createParent,
@@ -290,7 +291,11 @@ function managers(bindings: readonly Binding[]): Binding[] {
 
 test("a hanging injected update check cannot delay manager creation or focus", async () => {
   const w = await world();
-  const timers: Array<{ callback: () => void; cleared: boolean }> = [];
+  const timers: Array<{
+    callback: () => void;
+    cleared: boolean;
+    handle: ReturnType<typeof setTimeout>;
+  }> = [];
   let now = 0;
   let calls = 0;
   const checkEntered = Promise.withResolvers<void>();
@@ -302,12 +307,15 @@ test("a hanging injected update check cannot delay manager creation or focus", a
   w.hooks.updateTimer = {
     now: () => now,
     setTimeout(callback) {
-      const timer = { callback, cleared: false };
-      timers.push(timer);
-      return timer as unknown as ReturnType<typeof setTimeout>;
+      const handle = setTimeout(() => {}, 2_147_483_647);
+      handle.unref();
+      timers.push({ callback, cleared: false, handle });
+      return handle;
     },
-    clearTimeout(id) {
-      (id as unknown as { cleared: boolean }).cleared = true;
+    clearTimeout(handle) {
+      clearTimeout(handle);
+      const timer = timers.find((candidate) => candidate.handle === handle);
+      if (timer !== undefined) timer.cleared = true;
     },
   };
   const firstPromise = w.orchestrator.manage();
@@ -337,6 +345,27 @@ test("a hanging injected update check cannot delay manager creation or focus", a
   });
   const second = value(await w.orchestrator.manage());
   expect(second.action).toBe("focused");
+});
+
+test("manage reports the manager model source and rejects malformed settings before launch", async () => {
+  const fallbackWorld = await world();
+  await rm(fallbackWorld.settingsPath);
+  const fallback = value(await fallbackWorld.orchestrator.manage());
+  expect(fallback.modelSource).toBe("fallback_no_default");
+  expect(fallbackWorld.created).toHaveLength(1);
+
+  const invalidWorld = await world();
+  await Bun.write(invalidWorld.settingsPath, "{invalid");
+  const invalid = await invalidWorld.orchestrator.manage();
+  expect(invalid).toMatchObject({
+    ok: false,
+    error: {
+      code: "manager_settings_error",
+      details: { settingsPath: invalidWorld.settingsPath },
+    },
+  });
+  expect(invalidWorld.created).toHaveLength(0);
+  expect(invalidWorld.runs).toHaveLength(0);
 });
 
 test("manager create passes real-shaped update versions once into its brief", async () => {

@@ -324,6 +324,67 @@ test("bare entry cannot displace a live reattachment owner after its lease expir
   expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(true);
 });
 
+test("plain manage cannot displace a live bare-entry owner beyond the lease", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+  const atVerification = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const exit = Promise.withResolvers<number>();
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => deadline.reject(new Error("Mixed-entry verification deadline")),
+    3000,
+  );
+  let kills = 0;
+  w.hooks.beforeAttach = async () => {
+    w.hooks.beforeAttach = undefined;
+    atVerification.resolve();
+    await release.promise;
+  };
+  const owner = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      const launch = w.deps.launchHere?.(argv, cwd, env);
+      if (!launch) throw new Error("Missing fixture launcher");
+      return {
+        exited: launch.exited.then(() => exit.promise),
+        kill() {
+          kills++;
+          exit.resolve(143);
+        },
+      };
+    },
+  });
+  const attaching = owner.manage({ here: true });
+  try {
+    await Promise.race([atVerification.promise, deadline.promise]);
+    w.hooks.now = "2026-09-26T00:03:00.000Z";
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "manager_busy" },
+    });
+    expect(value(await w.orchestrator.manage()).action).toBe("reattaching");
+    expect(w.readRegistry((r) => value(r.reattachPending(first.id)))).toBe(true);
+    release.resolve();
+    expect(value(await Promise.race([attaching, deadline.promise])).action).toBe("reattached");
+    expect(kills).toBe(0);
+    expect(w.runs).toHaveLength(2);
+  } finally {
+    clearTimeout(timer);
+    release.resolve();
+    exit.resolve(0);
+    await attaching;
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("displaced foreground entry never kills the manager TUI after verification", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage()).binding;
@@ -1258,6 +1319,15 @@ test("an expired reattach owner resumes without launching or clearing the new ow
   const a = w.orchestrator.manage();
   await aAtTab.promise;
 
+  // Model a legacy unknown owner: known live processes no longer expire for any caller.
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    db.query(
+      "UPDATE manager_reattach SET owner_pid = NULL, owner_starttime = NULL WHERE binding_id = ?",
+    ).run(first.binding.id);
+  } finally {
+    db.close();
+  }
   // Past the 120 s lease, B reclaims, launches, sees readiness and is held at verification.
   w.hooks.now = "2026-09-26T00:02:00.001Z";
   const bAtVerify = Promise.withResolvers<void>();

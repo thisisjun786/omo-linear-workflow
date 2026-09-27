@@ -741,9 +741,8 @@ export function openRegistry(
         binding.value.paneId !== expectedPaneId ||
         (held !== null &&
           held.claimed_at !== "" &&
-          (reclaimDeadOwner && held.owner_pid !== null
-            ? processAlive(held.owner_pid, held.owner_starttime)
-            : held.claimed_at >= staleBefore))
+          ((held.owner_pid !== null && processAlive(held.owner_pid, held.owner_starttime)) ||
+            (held.claimed_at >= staleBefore && !(reclaimDeadOwner && held.owner_pid !== null))))
       )
         return ok({ claimed: false, binding: binding.value });
       const token = randomUUID();

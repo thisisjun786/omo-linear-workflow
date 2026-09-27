@@ -1736,6 +1736,29 @@ test.each(["pi", "omo"])("manage reattaches %s in a new tab with the same env", 
   expect(w.runs).toHaveLength(2);
 });
 
+test("a failed Herdr republish does not fail reattach or kill the new manager TUI", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage());
+  w.panes.delete(first.binding.paneId ?? "");
+  let kills = 0;
+  const orchestrator = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      void w.deps.launchHere?.(argv, cwd, env);
+      return { exited: new Promise<number>(() => {}), kill: () => void kills++ };
+    },
+    republishHerdrState: async () => {
+      throw new Error("republish unavailable");
+    },
+  });
+
+  const result = await orchestrator.manage();
+
+  expect(value(result).action).toBe("reattached");
+  expect(kills).toBe(0);
+  expect(w.runs).toHaveLength(2);
+});
+
 test("manage relaunches when the recorded pane survives but its TUI exited", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage());

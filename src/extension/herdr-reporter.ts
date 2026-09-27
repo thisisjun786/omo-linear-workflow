@@ -67,6 +67,8 @@ interface Reporter {
   lastReport: string | undefined;
   statePending: boolean;
   releasePending: boolean;
+  releaseTarget: Target | undefined;
+  releaseAttempts: number;
   draining: Promise<void> | undefined;
   stopped: boolean;
   sessionSource: string;
@@ -165,6 +167,7 @@ export function registerRoleHerdrReporter(
       if (reporter.releasePending) {
         reporter.releasePending = false;
         reporter.statePending = false;
+        const destination = reporter.releaseTarget;
         let current: (Binding & { paneId: string }) | undefined;
         try {
           const stored = dependencies.lookupBinding(reporter.sessionManager.getSessionId());
@@ -174,19 +177,49 @@ export function registerRoleHerdrReporter(
             cause instanceof Error ? cause.message : "Herdr binding lookup failed",
           );
         }
-        if (current !== undefined) {
-          const destination =
-            reporter.target?.socket === current.herdrSocket &&
-            reporter.target.pane === current.paneId
-              ? reporter.target
-              : {
-                  socket: current.herdrSocket,
-                  pane: current.paneId,
-                  client: dependencies.createClient(current.herdrSocket, current.paneId),
-                };
-          await destination.client.send("pane.release_agent", { agent: "pi" });
+        if (
+          destination === undefined ||
+          current === undefined ||
+          current.herdrSocket !== destination.socket ||
+          current.paneId !== destination.pane
+        ) {
+          reporter.releaseTarget = undefined;
+          continue;
         }
-        reporter.stopped = true;
+        reporter.releaseAttempts += 1;
+        try {
+          await destination.client.send("pane.release_agent", { agent: "pi" });
+          reporter.releaseTarget = undefined;
+        } catch (cause) {
+          dependencies.debug(cause instanceof Error ? cause.message : "Herdr release failed");
+          if (reporter.releaseAttempts < 3) {
+            reporter.cancelRetry = scheduleRetry(
+              () => {
+                reporter.cancelRetry = undefined;
+                let latest: Binding | undefined;
+                try {
+                  latest = dependencies.lookupBinding(reporter.sessionManager.getSessionId());
+                } catch (lookupCause) {
+                  dependencies.debug(
+                    lookupCause instanceof Error
+                      ? lookupCause.message
+                      : "Herdr binding lookup failed",
+                  );
+                }
+                if (
+                  reporter.releaseTarget !== undefined &&
+                  releasable(latest) &&
+                  latest.herdrSocket === reporter.releaseTarget.socket &&
+                  latest.paneId === reporter.releaseTarget.pane
+                ) {
+                  reporter.releasePending = true;
+                  startDrain(reporter);
+                } else reporter.releaseTarget = undefined;
+              },
+              100 * 2 ** (reporter.releaseAttempts - 1),
+            );
+          } else reporter.releaseTarget = undefined;
+        }
         continue;
       }
       reporter.statePending = false;
@@ -221,7 +254,7 @@ export function registerRoleHerdrReporter(
       return () => clearTimeout(timer);
     });
   function retry(reporter: Reporter): void {
-    if (reporter.stopped || reporter.releasePending || reporter.retryCount >= 3) return;
+    if (reporter.stopped || reporter.releasePending || reporter.retryCount >= 2) return;
     reporter.retryCount += 1;
     reporter.cancelRetry?.();
     reporter.cancelRetry = scheduleRetry(
@@ -269,6 +302,8 @@ export function registerRoleHerdrReporter(
       lastReport: undefined,
       statePending: false,
       releasePending: false,
+      releaseTarget: undefined,
+      releaseAttempts: 0,
       draining: undefined,
       stopped: false,
       sessionSource: reason,
@@ -343,13 +378,29 @@ export function registerRoleHerdrReporter(
     if (reporter === undefined) return;
     reporter.cancelRetry?.();
     reporter.cancelRetry = undefined;
+    reporter.stopped = true;
+    reporter.statePending = false;
     if (reason === "quit") {
-      reporter.releasePending = true;
-      reporter.statePending = false;
-      startDrain(reporter);
-    } else {
-      reporter.stopped = true;
-      reporter.statePending = false;
+      let current: (Binding & { paneId: string }) | undefined;
+      try {
+        const stored = dependencies.lookupBinding(sessionId);
+        current = releasable(stored) ? stored : undefined;
+      } catch (cause) {
+        dependencies.debug(cause instanceof Error ? cause.message : "Herdr binding lookup failed");
+      }
+      if (current !== undefined) {
+        reporter.releaseTarget =
+          reporter.target?.socket === current.herdrSocket && reporter.target.pane === current.paneId
+            ? reporter.target
+            : {
+                socket: current.herdrSocket,
+                pane: current.paneId,
+                client: dependencies.createClient(current.herdrSocket, current.paneId),
+              };
+        reporter.releaseAttempts = 0;
+        reporter.releasePending = true;
+        startDrain(reporter);
+      }
     }
     if (currentSessionId === sessionId) currentSessionId = undefined;
   });

@@ -1288,7 +1288,11 @@ export class Orchestrator {
       token = undefined;
       if (!finished.value) return leaseLost();
       if (here !== undefined) here.settled = true;
-      await this.#deps.republishHerdrState?.(moved.value);
+      try {
+        await this.#deps.republishHerdrState?.(moved.value);
+      } catch (cause) {
+        console.debug(`Herdr state republish failed: ${messageOf(cause)}`);
+      }
       if (here?.failure !== undefined) throw here.failure;
       if (here === undefined) await herdr.focusWorkspace(workspaceId);
       if (here?.failure !== undefined) throw here.failure;

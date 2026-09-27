@@ -204,7 +204,7 @@ describe("OLW role Herdr reporter", () => {
     ]);
   });
 
-  test("retries only the latest failed state with bounded backoff", async () => {
+  test("counts the initial state send in the three-attempt retry cap", async () => {
     const harness = new Harness();
     const sent: string[] = [];
     let failures = 2;
@@ -237,6 +237,115 @@ describe("OLW role Herdr reporter", () => {
     scheduled.shift()?.();
     await control.drained();
     expect(sent).toEqual(["idle", "idle", "idle"]);
+    expect(scheduled).toHaveLength(0);
+  });
+
+  test("exhausts failed state publication after three total attempts", async () => {
+    const harness = new Harness();
+    const sent: string[] = [];
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const control = registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => role(),
+      createClient: () => ({
+        send: async (method) => {
+          if (method !== "pane.report_agent") return;
+          sent.push(method);
+          throw new Error("offline");
+        },
+      }),
+      debug: () => undefined,
+      scheduleRetry: (callback, delay) => {
+        scheduled.push({ callback, delay });
+        return () => undefined;
+      },
+    });
+    harness.sessionStart?.("new", session());
+    await control.drained();
+    expect(scheduled.map(({ delay }) => delay)).toEqual([100]);
+    scheduled.shift()?.callback();
+    await control.drained();
+    expect(scheduled.map(({ delay }) => delay)).toEqual([200]);
+    scheduled.shift()?.callback();
+    await control.drained();
+    expect(sent).toHaveLength(3);
+    expect(scheduled).toHaveLength(0);
+  });
+
+  test("quit retries only release to the same pane and never resurrects state", async () => {
+    const harness = new Harness();
+    let binding = role({ paneId: "pane-old" });
+    const sent: Array<[string, string]> = [];
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    let releaseFailures = 1;
+    const control = registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => binding,
+      createClient: (_socket, pane) => ({
+        send: async (method) => {
+          sent.push([pane, method]);
+          if (method === "pane.release_agent" && releaseFailures-- > 0)
+            throw new Error("offline");
+        },
+      }),
+      debug: () => undefined,
+      scheduleRetry: (callback, delay) => {
+        scheduled.push({ callback, delay });
+        return () => undefined;
+      },
+    });
+    const ctx = session();
+    harness.sessionStart?.("new", ctx);
+    await control.drained();
+    harness.agentStart?.(ctx);
+    await control.drained();
+    sent.length = 0;
+
+    harness.sessionShutdown?.("quit", ctx);
+    await control.drained();
+    expect(scheduled.map(({ delay }) => delay)).toEqual([100]);
+    binding = role({ paneId: "pane-new" });
+    scheduled.shift()?.callback();
+    await control.drained();
+
+    expect(sent).toEqual([["pane-old", "pane.release_agent"]]);
+    harness.agentSettled?.(ctx);
+    harness.republish?.("session-parent");
+    await control.drained();
+    expect(sent).toEqual([["pane-old", "pane.release_agent"]]);
+  });
+
+  test("exhausts a failed release after three total attempts", async () => {
+    const harness = new Harness();
+    const sent: string[] = [];
+    const scheduled: Array<() => void> = [];
+    const control = registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => role(),
+      createClient: () => ({
+        send: async (method) => {
+          if (method !== "pane.release_agent") return;
+          sent.push(method);
+          throw new Error("offline");
+        },
+      }),
+      debug: () => undefined,
+      scheduleRetry: (callback) => {
+        scheduled.push(callback);
+        return () => undefined;
+      },
+    });
+    const ctx = session();
+    harness.sessionStart?.("new", ctx);
+    await control.drained();
+    harness.sessionShutdown?.("quit", ctx);
+    await control.drained();
+    scheduled.shift()?.();
+    await control.drained();
+    scheduled.shift()?.();
+    await control.drained();
+    expect(sent).toHaveLength(3);
+    expect(scheduled).toHaveLength(0);
   });
 
   test("reports a bound RPC role turn to its recorded pane", async () => {

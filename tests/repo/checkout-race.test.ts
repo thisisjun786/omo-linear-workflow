@@ -1,6 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Checkout } from "../../src/core/contracts";
@@ -68,8 +78,7 @@ test.each(["a/secret", "a/b/secret"])(
     const outcome = await initialized;
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error).toMatchObject({ code: "local_file_target_unsafe" });
-    expect(await Bun.file(join(w.outside, "secret")).exists()).toBe(false);
-    expect(await Bun.file(join(w.outside, "b")).exists()).toBe(false);
+    expect(await readdir(w.outside)).toEqual([]);
     expect(JSON.parse(await readFile(w.receiptPath, "utf8"))).toMatchObject({ copies: [] });
   },
 );

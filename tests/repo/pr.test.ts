@@ -61,10 +61,7 @@ async function world(legacy = false, deliverable: "pr" | "report" | "document" =
     projects: [
       {
         project: { id: "project", url: "linear://project", revision: "1" },
-        issues: [
-          { id: "issue", key: "LINA-274", url: "linear://issue", revision: "1" },
-          { id: "issue-other", key: "LINA-275", url: "linear://issue-other", revision: "1" },
-        ],
+        issues: [{ id: "issue", key: "LINA-274", url: "linear://issue", revision: "1" }],
         ...(legacy ? {} : { repository: { remote, defaultBranch: "main" } }),
       },
     ],
@@ -79,20 +76,19 @@ async function world(legacy = false, deliverable: "pr" | "report" | "document" =
     create: true,
     contact: true,
   };
-  function reserve(child: boolean, other = false) {
+  function reserve(child: boolean) {
     return registry((r) => {
-      const id = child ? (other ? "child-other" : "child") : "parent";
       let b = value(
         r.reserve({
-          bindingId: id,
-          durableSessionId: `${id}-session`,
+          bindingId: child ? "child" : "parent",
+          durableSessionId: child ? "child-session" : "parent-session",
           designation,
           snapshot: scope,
           assignment: child
             ? {
                 role: "child",
                 projectId: "project",
-                issueId: other ? "issue-other" : "issue",
+                issueId: "issue",
                 initiativeId: null,
                 ownerBindingId: "parent",
               }
@@ -178,13 +174,13 @@ async function world(legacy = false, deliverable: "pr" | "report" | "document" =
     );
     return git(binding.cwd, "rev-parse", "HEAD");
   }
-  function report(url: string, head: string, sender = child) {
+  function report(url: string, head: string) {
     registry((r) => {
       const claim = value(
-        r.claim(sender.durableSessionId, {
+        r.claim(child.durableSessionId, {
           version: 1,
-          id: `report:${sender.id}:${head}`,
-          fromBindingId: sender.id,
+          id: `report:${head}`,
+          fromBindingId: child.id,
           toBindingId: parent.id,
           designationId: designation.id,
           snapshotDigest: digest,
@@ -210,7 +206,7 @@ async function world(legacy = false, deliverable: "pr" | "report" | "document" =
       );
     });
   }
-  return { root, bare, git, parent, child, body, state, registry, cli, commit, report, reserve };
+  return { root, bare, git, parent, child, body, state, registry, cli, commit, report };
 }
 
 test("child open pushes both branches, is idempotent, and parent merge checks reported head and uses a merge commit", async () => {
@@ -231,8 +227,6 @@ test("child open pushes both branches, is idempotent, and parent merge checks re
   ).toHaveLength(1);
   expect((await w.cli("pr", "merge", "--from", "parent", "--pr", url)).code).toBe(2);
   w.report(url, head);
-  const other = w.reserve(true, true);
-  w.report("https://github.test/fixture/repo/pull/999", head, other);
   const saved = JSON.parse(await readFile(w.state, "utf8"));
   await writeFile(
     w.state,

@@ -111,7 +111,8 @@ New issue children in `direct` mode start in **mass-ulw mode**, but wait for the
 | Manager (`olw`) | your default model from `~/.omo/agent/settings.json` (fallback `opencodex/anthropic/claude-opus-5-5` / `medium`) | calling Herdr pane; `manage` can create a control-root workspace |
 | Supervisor (optional) | `opencodex/gpt-6-astra` / `high` | control root Herdr workspace |
 | Parent | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | project integration branch checkout |
-| Child, `direct` or `research` | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
+| Child, `direct` | `opencodex/anthropic/claude-opus-5-5` / `medium` | issue worktree based on the parent branch |
+| Child, `research` | `opencodex/anthropic/claude-opus-5-5` / `xhigh` | issue worktree based on the parent branch |
 | Child, `plan` stage | `opencodex/anthropic/claude-fable-5-1` / `xhigh` | the same issue worktree, its own tab |
 | Child, `execute` stage | `opencodex/anthropic/claude-opus-5-5` / `medium` | the same issue worktree, a second tab |
 

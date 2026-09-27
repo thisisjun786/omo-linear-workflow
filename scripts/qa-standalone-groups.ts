@@ -526,7 +526,7 @@ async function main() {
       clients.push(client);
       const state = await client.getState();
       assert.equal(state.model?.id, "claude-opus-5-5");
-      assert.equal(state.thinkingLevel, "xhigh");
+      assert.equal(state.thinkingLevel, modelForRole(binding.assignment.role).thinking);
     }
     assert.equal(await readFile(artifact, "utf8"), "STANDALONE\n");
     const finalRuns = z

@@ -95,7 +95,8 @@ olw status --project ID --json
 | --- | --- |
 | 매니저 | `~/.omo/agent/settings.json`의 OMO 기본 모델 (없으면 `anthropic/claude-opus-5-5` / medium) |
 | 부모 | `anthropic/claude-opus-5-5` / xhigh |
-| 자식, `direct` 또는 `research` | `anthropic/claude-opus-5-5` / xhigh |
+| 자식, `direct` | `anthropic/claude-opus-5-5` / medium |
+| 자식, `research` | `anthropic/claude-opus-5-5` / xhigh |
 | 자식, `planned` plan 단계 | `anthropic/claude-fable-5-1` / xhigh |
 | 자식, `planned` execute 단계 | `anthropic/claude-opus-5-5` / medium |
 | 감독 (선택) | `gpt-6-astra` / high |

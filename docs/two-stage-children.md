@@ -48,7 +48,7 @@ The parent picks the mode per issue at creation with `child create --mode direct
 
 | Mode | When | Stages |
 |---|---|---|
-| `direct` | Small, well-specified development work. JUN-273, 274 and 275 were all this size. | one tab: Opus 5.5 xhigh (today's model), mass-ulw |
+| `direct` | Small, well-specified development work. JUN-273, 274 and 275 were all this size. | one tab: Opus 5.5 medium, mass-ulw |
 | `planned` | Large or ambiguous development work: several components, open design decisions, cross-module changes. | plan tab (Fable 5.1 xhigh, ulw-plan), then execute tab (Opus 5.5 medium, ulw-execute + mass-ulw) |
 | `research` | The deliverable is findings, not code. | one tab: Opus 5.5 xhigh, ulw-research. Its collection can run as mass-ulw DAG waves (ulw-research Phase 1 "mass research" path) inside the same tab. |
 
@@ -120,7 +120,7 @@ The draft above talks about one issue owner record with stage sessions under it.
 
 This list is the original plan, kept as history. Where it differs from the shipped code, "Implemented data model" above and the `olw-run` skill are correct. In particular, unit 5 shipped as a block plus a separate tool: native `ask_user_question`/`request_user_input` calls in bound child and parent sessions are rejected with a reason pointing at `olw_ask`, not converted; only `olw_ask` delivers a question. Unit 7's `execution_mode` packet field became `child create --mode`.
 
-1. **Model policy:** add `medium` to `RoleModel.thinking` and the seed schema. Make the model depend on role and stage: parent Opus 5.5 xhigh, plan Fable 5.1 xhigh, execute Opus 5.5 medium, direct Opus 5.5 xhigh, research Opus 5.5 xhigh.
+1. **Model policy:** add `medium` to `RoleModel.thinking` and the seed schema. Make the model depend on role and stage: parent Opus 5.5 xhigh, plan Fable 5.1 xhigh, execute Opus 5.5 medium, direct Opus 5.5 medium (changed from xhigh on 2026-09-27 at the user's request), research Opus 5.5 xhigh.
 2. **Registry:** add stage sessions to the child owner: a stage list, the live stage, and hand-off records. Route delivery to the live stage session and keep the ownership key.
 3. **Orchestrator:** add `stage start` to launch a stage in the existing child worktree. It creates a new Herdr tab in the child workspace, a new session, the stage model and the first prompt. Close the previous stage's contact after its hand-off and keep its tab.
 4. **Messages:** add the `question` and `answer` kinds, their authorization routes, and IDs and deduplication. Add the CLI commands `ask` and `answer`.

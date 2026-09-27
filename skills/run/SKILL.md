@@ -238,7 +238,7 @@ plan; its phases drive mass-ulw under the contract below. Report once with
 **research stage** (Opus 5.5 xhigh, ulw-research): the deliverable is findings. Collection
 may run as mass-ulw waves inside the same session.
 
-**direct stage** (Opus 5.5 xhigh, mass-ulw): startup selects `mass-ulw` mode
+**direct stage** (Opus 5.5 medium, mass-ulw): startup selects `mass-ulw` mode
 and the `olw-run` and `mass-ulw` execution skills; it does not create a goal, run or worker.
 Wait for the parent's explicit issue packet. Check its issue ID against the binding and read
 its full criteria and limits. If they disagree, report `blocked` without launching work.

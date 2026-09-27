@@ -840,7 +840,7 @@ try {
       ]),
     ).binding;
     const directClient = await connect(direct);
-    await identity(direct, directClient, "anthropic/claude-opus-5-5", "xhigh");
+    await identity(direct, directClient, "anthropic/claude-opus-5-5", "medium");
     await until(
       "direct-report",
       () => delivery("report:qa-direct")?.state === "accepted",

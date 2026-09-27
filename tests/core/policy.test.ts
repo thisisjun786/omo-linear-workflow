@@ -36,12 +36,12 @@ describe("launch models by role and child stage", () => {
     {
       role: "child",
       stage: null,
-      expected: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" },
+      expected: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" },
     },
     {
       role: "child",
       stage: "direct",
-      expected: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" },
+      expected: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" },
     },
     {
       role: "child",

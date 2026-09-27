@@ -30,6 +30,7 @@ published.
 
 ### Changed
 
+- Issue children in `direct` mode (the default) run Opus 5.5 at `medium` thinking instead of `xhigh`. Parents stay `xhigh`; `planned` keeps Fable 5.1 `xhigh` then Opus 5.5 `medium`; `research` stays Opus 5.5 `xhigh`. Existing bindings keep the model they were launched with.
 - Type `olw` in Herdr to open or reattach the single durable manager in the current pane, or focus its live pane. `manage --here` shares this entry; plain `manage` retains separate-workspace behavior.
 - Parent reports and questions wait for manager idle admission and arrive as compact notices with retrievable full payloads and unchanged delivery receipts. Accepted limitation: a turn starting between the idle check and native acceptance may receive the notice mid-turn; delivery remains exactly once.
 - Manager guidance applies only when handling OLW messages, leaving ordinary assistant work unrestricted.

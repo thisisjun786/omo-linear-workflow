@@ -95,7 +95,8 @@ Every command takes `--root PATH`, `--herdr-socket PATH` and `--json`. Run `olw 
 | --- | --- |
 | Manager | your OMO default from `~/.omo/agent/settings.json` (fallback `anthropic/claude-opus-5-5` / medium) |
 | Parent | `anthropic/claude-opus-5-5` / xhigh |
-| Child, `direct` or `research` | `anthropic/claude-opus-5-5` / xhigh |
+| Child, `direct` | `anthropic/claude-opus-5-5` / medium |
+| Child, `research` | `anthropic/claude-opus-5-5` / xhigh |
 | Child, `planned` plan stage | `anthropic/claude-fable-5-1` / xhigh |
 | Child, `planned` execute stage | `anthropic/claude-opus-5-5` / medium |
 | Supervisor (optional) | `gpt-6-astra` / high |

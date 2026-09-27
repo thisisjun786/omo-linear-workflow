@@ -1683,7 +1683,7 @@ describe("orchestrator startup", () => {
   });
 
   test.each([
-    ["direct", "direct", "opencodex/anthropic/claude-opus-5-5", "xhigh", false],
+    ["direct", "direct", "opencodex/anthropic/claude-opus-5-5", "medium", false],
     ["planned", "plan", "opencodex/anthropic/claude-fable-5-1", "xhigh", true],
     ["research", "research", "opencodex/anthropic/claude-opus-5-5", "xhigh", false],
   ] as const)(

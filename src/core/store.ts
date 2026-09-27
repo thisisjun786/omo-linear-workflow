@@ -806,7 +806,10 @@ export function openRegistry(
                 ? { ownedWorkspaceId: binding.value.ownedWorkspaceId ?? binding.value.workspaceId }
                 : {}),
               workspaceId,
-              workspaceOwned: false,
+              workspaceOwned:
+                workspaceId ===
+                (binding.value.ownedWorkspaceId ??
+                  (binding.value.workspaceOwned !== false ? binding.value.workspaceId : null)),
             }),
       });
     });

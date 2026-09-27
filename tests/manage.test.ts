@@ -627,6 +627,60 @@ test("moving an owned manager to a user pane retains its owned workspace for clo
   }
 });
 
+test.each([false, true])(
+  "round-trip owned workspace cleanup closes M exactly once and preserves U (stored legacy flag=%s)",
+  async (legacyFlag) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    if (!first.paneId || !first.workspaceId) throw new Error("Manager workspace missing");
+    w.panes.set(first.paneId, { workspaceId: first.workspaceId });
+    w.workspaces.set("user", { workspaceId: "user", rootPaneId: "user:p1", cwd: "/user" });
+    w.panes.set("user:p1", { workspaceId: "user" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "user:p1";
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const closed = spyOn(herdr, "closeWorkspace");
+    try {
+      value(await w.orchestrator.manage({ here: true }));
+      w.panes.set("user:p1", { workspaceId: "user" });
+      process.env["HERDR_PANE_ID"] = first.paneId;
+      const returned = value(await w.orchestrator.manage({ here: true })).binding;
+      if (legacyFlag) {
+        const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+        try {
+          db.query("UPDATE bindings SET json = ? WHERE id = ?").run(
+            JSON.stringify({ ...returned, workspaceOwned: false }),
+            first.id,
+          );
+        } finally {
+          db.close();
+        }
+      } else
+        expect(returned).toMatchObject({
+          workspaceId: first.workspaceId,
+          ownedWorkspaceId: first.workspaceId,
+          workspaceOwned: true,
+        });
+      value(await w.orchestrator.close(first.id));
+      value(await w.orchestrator.close(first.id));
+      expect(closed.mock.calls).toEqual([[first.workspaceId]]);
+      expect(w.workspaces.has(first.workspaceId)).toBe(false);
+      expect(w.workspaces.has("user")).toBe(true);
+      expect(w.panes.has("user:p1")).toBe(true);
+    } finally {
+      closed.mockRestore();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
 test("here entry rejects a different server even when its pane ID matches", async () => {
   const w = await world();
   const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };

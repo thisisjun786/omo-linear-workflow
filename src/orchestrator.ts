@@ -2688,7 +2688,10 @@ export class Orchestrator {
           "Inspect Herdr, then use --confirm-absent if no workspace was created",
         );
       }
-      if (workspace !== undefined && binding.workspaceOwned !== false) {
+      if (
+        workspace !== undefined &&
+        (binding.workspaceOwned !== false || workspace.workspaceId === binding.ownedWorkspaceId)
+      ) {
         if (
           workspace.cwd !== binding.cwd ||
           (binding.workspaceId === null &&

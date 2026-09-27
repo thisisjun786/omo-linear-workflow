@@ -16,7 +16,7 @@ published.
 ### Fixed
 
 - Keep manager live ownership beyond lease expiry for both bare entry and plain `manage`, fence termination, and handle interruption from before reservation, including rejected pre-launch operations; safely recover abandoned unstarted claims.
-- Retain the manager's original OLW-owned workspace after moving to a user pane, and remove only that owned workspace at close.
+- Retain the manager's original OLW-owned workspace across moves to user panes and back, and remove that owned workspace exactly once at close.
 - Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.
 - Reject here-mode socket or foreground-process mismatches rather than binding to a same-named pane on another server.
 - Identify manager reattachment owners by PID and process start time, so recycled PIDs do not block recovery. Legacy claims with unknown start time keep PID-only liveness.

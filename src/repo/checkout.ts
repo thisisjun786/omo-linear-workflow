@@ -1,8 +1,8 @@
-import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import type { Checkout } from "../core/contracts";
+import { CheckoutPathError, copyIntoCheckout } from "./checkout-fd";
 import { mirrorPath } from "./mirror";
 
 const localFileSchema = z.strictObject({
@@ -77,9 +77,7 @@ export async function cloneCheckout(root: string, checkout: Checkout): Promise<v
   await checkoutGit(checkout.path, ["checkout", "-b", checkout.branch, checkout.baseCommit]);
 }
 
-export class CheckoutInitializationError extends Error {
-  readonly code = "local_file_target_unsafe";
-}
+export { CheckoutPathError as CheckoutInitializationError } from "./checkout-fd";
 
 interface CheckoutReceipt {
   readonly checkout: string;
@@ -105,53 +103,18 @@ export async function initializeCheckout(root: string, checkout: Checkout): Prom
   await save();
   const secrets: string[] = [];
   await mkdir(checkout.path, { recursive: true });
-  const checkoutPath = await realpath(checkout.path);
-  const insideCheckout = (path: string) => {
-    const rel = relative(checkoutPath, path);
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-  };
-  const unsafe = (message: string) => new CheckoutInitializationError(message);
   for (const file of entry?.localFiles ?? []) {
-    const destination = resolve(checkout.path, file.target);
-    let directory = checkout.path;
-    for (const part of file.target.split("/").slice(0, -1)) {
-      directory = join(directory, part);
-      try {
-        const existing = await lstat(directory);
-        if (existing.isSymbolicLink() || !existing.isDirectory())
-          throw unsafe("Local file target traverses a symlink or non-directory");
-      } catch (cause) {
-        if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) throw cause;
-        await mkdir(directory);
-      }
-    }
-    const resolvedDirectory = await realpath(directory);
-    if (!insideCheckout(resolvedDirectory))
-      throw unsafe("Local file target directory resolves outside the checkout");
-    try {
-      if ((await lstat(destination)).isSymbolicLink())
-        throw unsafe("Local file target is an existing symlink");
-    } catch (cause) {
-      if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) throw cause;
-    }
     const contents = await readFile(file.source);
     const text = contents.toString("utf8");
     secrets.push(text, ...text.split(/\r?\n/).filter(Boolean));
-    const temporary = `${destination}.olw-${crypto.randomUUID()}`;
     try {
-      const handle = await open(
-        temporary,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
-        0o600,
-      );
-      try {
-        await handle.writeFile(contents);
-      } finally {
-        await handle.close();
-      }
-      await rename(temporary, destination);
-    } finally {
-      await rm(temporary, { force: true });
+      await copyIntoCheckout(checkout.path, file.target, contents);
+    } catch (cause) {
+      throw cause instanceof CheckoutPathError
+        ? cause
+        : new CheckoutPathError("Secure local-file copy failed", {
+            cause: cause instanceof Error ? cause.message : String(cause),
+          });
     }
     receipt.copies.push({ sourceLabel: basename(file.source), target: file.target, mode: "0600" });
     await save();

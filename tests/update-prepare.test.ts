@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { z } from "zod";
 import { loadHerdrBuild } from "../src/herdr/artifact";
 import { ensureHerdrBuild } from "../src/herdr/build";
 import { type PrepareRunner, prepareUpdate } from "../src/update/prepare";
@@ -12,6 +13,13 @@ afterEach(async () => {
 });
 
 const branch = "olw/update-omo-5.0.0-0.beta.90-senpi-2026.9.25-1";
+const cleanupDetailsSchema = z.object({
+  worktree: z.string(),
+  outcome: z.looseObject({ ok: z.boolean() }),
+});
+const mutableCheckSchema = z.object({
+  packages: z.record(z.string(), z.looseObject({ state: z.string() })),
+});
 const devPackage = {
   name: "omo-linear-workflow",
   dependencies: { "@code-yeongyu/senpi": "2026.9.22-4", "omo-ai": "5.0.0-0.beta.84" },
@@ -487,10 +495,8 @@ test("an owned worktree that cannot be removed or pruned yields cleanup_incomple
   });
   const result = await prepareUpdate(root, { run: fake.run, ghBin: "gh" });
   expect(!result.ok && result.error.code).toBe("cleanup_incomplete");
-  const details = (!result.ok && result.error.details) as {
-    worktree: string;
-    outcome: { ok: boolean };
-  };
+  if (result.ok) return;
+  const details = cleanupDetailsSchema.parse(result.error.details);
   expect(details.worktree).toBe(worktree);
   expect(details.outcome.ok).toBe(true);
   expect(!result.ok && result.error.message).toContain(`worktree remove --force ${worktree}`);
@@ -515,8 +521,8 @@ test("custom remote and gh binary are used", async () => {
 test("no newer versions in the latest check prepares nothing", async () => {
   const root = await prepareFixture();
   const path = join(root, ".omo/state/update-check.json");
-  const check = JSON.parse(await readFile(path, "utf8"));
-  for (const item of Object.values(check.packages) as { state: string }[]) item.state = "current";
+  const check = mutableCheckSchema.parse(JSON.parse(await readFile(path, "utf8")));
+  for (const item of Object.values(check.packages)) item.state = "current";
   await writeFile(path, JSON.stringify(check));
   const fake = fakeRunner();
   const result = await prepareUpdate(root, { run: fake.run });

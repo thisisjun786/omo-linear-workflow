@@ -194,7 +194,20 @@ export async function checkUpdates(
     reasonList.push(cause instanceof Error ? cause.message : String(cause));
   }
 
-  const packages = {} as Record<PackageName, PackageCheck>;
+  const packages: Record<PackageName, PackageCheck> = {
+    "omo-ai": {
+      state: "unknown",
+      pinned: pinned?.["omo-ai"] ?? "unknown",
+      available: null,
+      tag: tags["omo-ai"],
+    },
+    "@code-yeongyu/senpi": {
+      state: "unknown",
+      pinned: pinned?.["@code-yeongyu/senpi"] ?? "unknown",
+      available: null,
+      tag: tags["@code-yeongyu/senpi"],
+    },
+  };
   let globalOmo: string | null = null;
   const queries = [
     ...packageNames.map(async (name) => {

@@ -21,6 +21,12 @@ import {
 } from "../../src/proxy/routing-sync";
 
 const cleanups: (() => Promise<void>)[] = [];
+const mutableCatalogSchema = z.object({
+  providers: z.record(
+    z.string(),
+    z.looseObject({ models: z.array(z.record(z.string(), z.unknown())) }),
+  ),
+});
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
@@ -500,9 +506,11 @@ describe("routing synchronization real filesystem boundary", () => {
       world.options.stateDir,
       new Date("2026-09-27T00:00:00.000Z"),
     );
-    const raw = JSON.parse(await readFile(world.catalogPath, "utf8"));
-    const models = raw.providers.opencodex.models as Array<Record<string, unknown>>;
-    raw.providers.opencodex.models = change
+    const raw = mutableCatalogSchema.parse(JSON.parse(await readFile(world.catalogPath, "utf8")));
+    const provider = raw.providers["opencodex"];
+    if (provider === undefined) throw new Error("fixture catalog has no opencodex provider");
+    const models = provider.models;
+    provider.models = change
       ? models.map((model) => (model["id"] === "gpt-6-luna" ? { ...model, ...change } : model))
       : models.filter((model) => model["id"] !== "gpt-6-luna");
     await writeFile(world.catalogPath, JSON.stringify(raw));

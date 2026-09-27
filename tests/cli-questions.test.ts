@@ -3,13 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "../src/cli";
-import type {
-  Binding,
-  DeliveryRecord,
-  NativeReceipt,
-  Result,
-  RuntimeIdentity,
-} from "../src/core/contracts";
+import type { Binding, DeliveryRecord, Result, RuntimeIdentity } from "../src/core/contracts";
 import { modelForRole } from "../src/core/policy";
 import { openRegistry } from "../src/core/store";
 import type { OrchestratorDependencies } from "../src/orchestrator";
@@ -559,8 +553,9 @@ test("a parent with no ready owner posts a question and questions lists it open"
 });
 
 test("an accepted ask receipt keeps exit 0", async () => {
-  const receipt: NativeReceipt = question.receipt as NativeReceipt;
-  expect(receipt.kind).toBe("ok");
+  expect(question.receipt).not.toBeNull();
+  if (question.receipt === null) return;
+  expect(question.receipt.kind).toBe("ok");
   const result = await invoke(
     ["ask", "--from", "child", "--id", "1", "--text-file", "payload.txt"],
     { ok: true, value: question },

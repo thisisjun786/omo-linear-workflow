@@ -25,12 +25,15 @@ import {
   planPathForIssueKey,
 } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
+import { checkoutGit } from "../../src/repo/checkout";
 import {
   attachBindingWithClient,
   type NativeSession,
   NativeSessionAbsentError,
   type RpcPort,
 } from "../../src/transport/client";
+
+import { fixtureTip, mappedScope } from "../fixtures/mapped-scope";
 
 const ownedRoots: string[] = [];
 afterEach(async () => {
@@ -169,8 +172,20 @@ class FakeHerdr implements HerdrClient {
   }
   async createWorkspace(cwd: string, _label: string): Promise<Workspace> {
     this.events.push("create");
+    if (this.root === "") this.root = cwd;
+    if (cwd !== this.root) {
+      return this.createWorktree(
+        {
+          originalRepoRoot: cwd,
+          path: cwd,
+          branch: "fixture",
+          baseBranch: "main",
+          baseCommit: "commit",
+        },
+        _label,
+      );
+    }
     this.cwd = cwd;
-    this.root = cwd;
     const workspace = {
       workspaceId: "ws",
       rootPaneId: "pane",
@@ -210,6 +225,15 @@ class FakeHerdr implements HerdrClient {
   async focusWorkspace(): Promise<void> {}
   rootTabFromCreate = true;
   async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
+    if (checkout.originalRepoRoot !== checkout.path)
+      await checkoutGit(checkout.originalRepoRoot, [
+        "worktree",
+        "add",
+        "-b",
+        checkout.branch,
+        checkout.path,
+        checkout.baseBranch,
+      ]);
     this.cwd = checkout.path;
     const id = `worktree-${++this.nextWorkspace}`;
     const workspace = {
@@ -439,7 +463,7 @@ describe("orchestrator startup", () => {
           );
           events.push("host");
         },
-        gitTip: async () => "commit",
+        gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
         now: () => clock,
         uuid: () => ["binding", "session", "message", "temp"][nextId++] ?? `id-${nextId}`,
         attachBinding: async (binding: Binding) => {
@@ -488,7 +512,7 @@ describe("orchestrator startup", () => {
         decisionRefs: [],
       };
       const scopeFile = join(root, "scope.json");
-      await Bun.write(scopeFile, JSON.stringify(scope));
+      await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
       const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
       const imported = await orchestrator.importScope(scopeFile, true);
       expect(imported.ok).toBe(true);
@@ -519,8 +543,6 @@ describe("orchestrator startup", () => {
         const parent = await restarted.createParent({
           supervisorId: "binding",
           projectId: "project",
-          repo: root,
-          base: "main",
         });
         expect(parent).toMatchObject({ ok: true });
         const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
@@ -544,8 +566,6 @@ describe("orchestrator startup", () => {
           const rejected = await rejecting.createParent({
             supervisorId: "binding",
             projectId: state,
-            repo: root,
-            base: "main",
           });
           expect(rejected).toMatchObject({ ok: false });
         }
@@ -618,8 +638,6 @@ describe("orchestrator startup", () => {
         const aliveParent = await restarted.createParent({
           supervisorId: alive.value.binding.id,
           projectId: "project",
-          repo: root,
-          base: "main",
         });
         if (!aliveParent.ok) throw new Error(aliveParent.error.message);
         const launches = events.filter((event) => event === "run").length;
@@ -657,7 +675,7 @@ describe("orchestrator startup", () => {
         events.push("host");
       },
       checkHostProfile: async () => {},
-      gitTip: async () => "commit",
+      gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
       now: () => "2026-09-22T00:00:00.000Z",
       uuid: () => ["binding", "session"][nextId++] ?? `id-${nextId}`,
       attachBinding: async (binding) => {
@@ -678,7 +696,7 @@ describe("orchestrator startup", () => {
       decisionRefs: [],
     };
     const scopeFile = join(root, "scope.json");
-    await Bun.write(scopeFile, JSON.stringify(scope));
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
     const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
     const imported = await orchestrator.importScope(scopeFile, true);
     if (!imported.ok) throw new Error(imported.error.message);
@@ -715,7 +733,7 @@ describe("orchestrator startup", () => {
       ensureHost: async () => {
         events.push("host");
       },
-      gitTip: async () => "commit",
+      gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
       now: () => "2026-09-23T00:00:00.000Z",
       uuid: () => "must-not-reserve",
       attachBinding: async () => {
@@ -734,7 +752,7 @@ describe("orchestrator startup", () => {
       decisionRefs: [],
     };
     const scopeFile = join(root, "scope.json");
-    await Bun.write(scopeFile, JSON.stringify(scope));
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
     const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
     const imported = await orchestrator.importScope(scopeFile, true);
     if (!imported.ok) throw new Error(imported.error.message);
@@ -778,7 +796,7 @@ describe("orchestrator startup", () => {
         ensureHost: async () => {
           if (hostFailure) throw new Error("Host failed before any role was launched");
         },
-        gitTip: async () => "commit",
+        gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
         now: () => "2026-09-22T00:00:00.000Z",
         uuid: () =>
           ["binding-disconnect", "session-disconnect", "temp-disconnect"][nextId++] ??
@@ -803,7 +821,7 @@ describe("orchestrator startup", () => {
         decisionRefs: [],
       };
       const scopeFile = join(root, "scope.json");
-      await Bun.write(scopeFile, JSON.stringify(scope));
+      await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
       const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
       const imported = await orchestrator.importScope(scopeFile, true);
       if (!imported.ok) throw new Error(imported.error.message);
@@ -858,7 +876,7 @@ describe("orchestrator startup", () => {
         artifactDir: join(controlRoot, ".managed-herdr"),
       }),
       ensureHost: async () => {},
-      gitTip: async () => tip,
+      gitTip: (cwd, ref) => fixtureTip(root, tip, cwd, ref),
       now: () => "2026-09-26T00:00:00.000Z",
       uuid: () => `stage-id-${++nextId}`,
       attachBinding: async (binding) => {
@@ -896,7 +914,7 @@ describe("orchestrator startup", () => {
       decisionRefs: [],
     };
     const scopeFile = join(root, "scope.json");
-    await Bun.write(scopeFile, JSON.stringify(scope));
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
     const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
     const imported = await orchestrator.importScope(scopeFile, true);
     if (!imported.ok) throw new Error(imported.error.message);
@@ -911,8 +929,6 @@ describe("orchestrator startup", () => {
     const parent = await orchestrator.createParent({
       supervisorId: supervisor.value.binding.id,
       projectId: "project",
-      repo: root,
-      base: "main",
     });
     if (!parent.ok) throw new Error(parent.error.message);
     const plan = await orchestrator.createChild({
@@ -1276,7 +1292,7 @@ describe("orchestrator startup", () => {
         artifactDir: join(controlRoot, ".managed-herdr"),
       }),
       ensureHost: async () => {},
-      gitTip: async () => "handoff-head-123",
+      gitTip: (cwd, ref) => fixtureTip(root, "handoff-head-123", cwd, ref),
       now: () => "2026-09-26T00:00:00.000Z",
       uuid: () => `execute-reconcile-${++sequence}`,
       attachBinding: async (binding) => {
@@ -1338,7 +1354,7 @@ describe("orchestrator startup", () => {
       decisionRefs: [],
     };
     const scopeFile = join(root, "scope.json");
-    await Bun.write(scopeFile, JSON.stringify(scope));
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
     const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
     const imported = await orchestrator.importScope(scopeFile, true);
     if (!imported.ok) throw new Error(imported.error.message);
@@ -1353,8 +1369,6 @@ describe("orchestrator startup", () => {
     const parent = await orchestrator.createParent({
       supervisorId: supervisor.value.binding.id,
       projectId: "project-execute",
-      repo: root,
-      base: "main",
     });
     if (!parent.ok) throw new Error(parent.error.message);
     const plan = await orchestrator.createChild({
@@ -1416,7 +1430,7 @@ describe("orchestrator startup", () => {
         artifactDir: join(controlRoot, ".managed-herdr"),
       }),
       ensureHost: async () => {},
-      gitTip: async () => "commit",
+      gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
       now: () => "2026-09-26T00:00:00.000Z",
       uuid: () => `reconcile-${++sequence}`,
       attachBinding: async (binding) => {
@@ -1464,7 +1478,7 @@ describe("orchestrator startup", () => {
       decisionRefs: [],
     };
     const scopeFile = join(root, "scope.json");
-    await Bun.write(scopeFile, JSON.stringify(scope));
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
     const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
     const imported = await orchestrator.importScope(scopeFile, true);
     if (!imported.ok) throw new Error(imported.error.message);
@@ -1479,8 +1493,6 @@ describe("orchestrator startup", () => {
     const parent = await orchestrator.createParent({
       supervisorId: supervisor.value.binding.id,
       projectId: "project-reconcile",
-      repo: root,
-      base: "main",
     });
     if (!parent.ok) throw new Error(parent.error.message);
 
@@ -1526,7 +1538,7 @@ describe("orchestrator startup", () => {
         ensureHost: async () => {
           events.push("host");
         },
-        gitTip: async () => "commit",
+        gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
         now: () => "2026-09-26T00:00:00.000Z",
         uuid: () =>
           [
@@ -1578,7 +1590,7 @@ describe("orchestrator startup", () => {
         decisionRefs: [],
       };
       const scopeFile = join(root, "scope.json");
-      await Bun.write(scopeFile, JSON.stringify(scope));
+      await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
       const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
       const imported = await orchestrator.importScope(scopeFile, true);
       if (!imported.ok) throw new Error(imported.error.message);
@@ -1593,8 +1605,6 @@ describe("orchestrator startup", () => {
       const parent = await orchestrator.createParent({
         supervisorId: supervisor.value.binding.id,
         projectId: "project",
-        repo: root,
-        base: "main",
       });
       if (!parent.ok) throw new Error(parent.error.message);
       const runsBefore = events.filter((event) => event === "run").length;
@@ -1742,7 +1752,7 @@ describe("orchestrator startup", () => {
       ensureHost: async () => {
         events.push("host");
       },
-      gitTip: async () => "commit",
+      gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
       now: () => "2026-09-26T00:00:00.000Z",
       uuid: () =>
         ["supervisor-binding", "supervisor-session", "parent-binding", "parent-session"][
@@ -1770,7 +1780,7 @@ describe("orchestrator startup", () => {
       ],
       decisionRefs: [],
     };
-    await Bun.write(join(root, "scope.json"), JSON.stringify(scope));
+    await Bun.write(join(root, "scope.json"), JSON.stringify(await mappedScope(root, scope)));
     const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
     const imported = await orchestrator.importScope(join(root, "scope.json"), true);
     if (!imported.ok) throw new Error(imported.error.message);
@@ -1785,8 +1795,6 @@ describe("orchestrator startup", () => {
     const parent = await orchestrator.createParent({
       supervisorId: supervisor.value.binding.id,
       projectId: "project",
-      repo: root,
-      base: "main",
     });
     if (!parent.ok) throw new Error(parent.error.message);
     const runsBefore = events.filter((event) => event === "run").length;
@@ -1831,7 +1839,7 @@ describe("orchestrator startup", () => {
         ensureHost: async () => {
           events.push("host");
         },
-        gitTip: async () => "commit",
+        gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
         now: () => "2026-09-26T00:00:00.000Z",
         uuid: () => `id-${++nextId}`,
         attachBinding: async (binding: Binding) => {
@@ -1869,7 +1877,7 @@ describe("orchestrator startup", () => {
         ],
         decisionRefs: [],
       };
-      await Bun.write(join(root, "scope.json"), JSON.stringify(scope));
+      await Bun.write(join(root, "scope.json"), JSON.stringify(await mappedScope(root, scope)));
       const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
       const imported = await orchestrator.importScope(join(root, "scope.json"), true);
       if (!imported.ok) throw new Error(imported.error.message);
@@ -1884,8 +1892,6 @@ describe("orchestrator startup", () => {
       const parent = await orchestrator.createParent({
         supervisorId: supervisor.value.binding.id,
         projectId: "project",
-        repo: root,
-        base: "main",
       });
       if (!parent.ok) throw new Error(parent.error.message);
       const first = await orchestrator.createChild({

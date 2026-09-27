@@ -104,7 +104,7 @@ bun run cli -- scope import --file tests/fixtures/scope.json --fixture --json
 
 ```sh
 bun run cli -- --root "$PWD" scope import --file approved-scope.json
-bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID --repo /abs/repo --base main
+bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID
 bun run cli -- --root "$PWD" child create --parent BINDING --issue ID --mode planned
 bun run cli -- --root "$PWD" send --from BINDING --to BINDING --id MSG --kind instruction --text-file brief.txt
 bun run cli -- --root "$PWD" ask --from BINDING --id MSG --text-file question.txt
@@ -161,7 +161,7 @@ bun run cli -- supervisor create --initiative ID --scope-digest MANAGER_SHA --de
 bun run cli -- parent link --parent PARENT --supervisor MANAGER
 bun run cli -- parent unlink --parent PARENT
 # 아직 부모가 없는 프로젝트를 기존 감독 승인으로 만드는 대안:
-bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo --base main
+bun run cli -- parent create --supervisor MANAGER --project ID
 ```
 
 `--supervisor`와 독립 승인 옵션을 섞지 않습니다. 초기 지시가 수락된 부모는 다른 designation의
@@ -171,7 +171,7 @@ bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo 
 `--project` 또는 `--initiative`로 필터링합니다. 나중에 연결한 감독이 아니라 각 역할의 원래 승인
 범위를 기준으로 하므로 initiative 없는 프로젝트에는 `--project`를 사용합니다. `reports`, `questions`, `notices`는 필터 없이도 읽을 수 있습니다.
 
-`--root`는 이 도구의 control root이며 위 예제의 `$PWD`는 이 저장소입니다. 실제 작업 대상 저장소는 parent create의 `--repo`로 별도 지정합니다.
+`--root`는 이 도구의 control root이며 위 예제의 `$PWD`는 이 저장소입니다. 대상 remote와 기본 브랜치는 승인된 [scope 저장소 매핑](docs/repositories.md)에 지정합니다. 기존 `parent create --repo` 경로는 거부됩니다.
 
 기본 Herdr socket은 현재 pane의 `HERDR_SOCKET_PATH`를 사용합니다. 다른 서버를 선택할 때만 `--herdr-socket /abs/socket`을 지정합니다. 격리 QA 서버의 생성·종료는 아래 QA 스크립트가 맡습니다. 종료 코드는 성공 0, 잘못된 범위/입력 2, runtime unavailable 3, uncertain outcome 4입니다.
 
@@ -205,7 +205,7 @@ bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo 
 
 Herdr가 workspace와 부모·자식 worktree를 만듭니다. 부모 브랜치는 `omo/<designation>/projects/<project>-<binding>`, 자식 브랜치는 `omo/<designation>/issues/<issue>-<binding>`이며, 자식의 base는 부모 브랜치의 확인된 commit입니다. 새 binding suffix 덕분에 이전 작업 브랜치를 보존한 채 역할을 교체할 수 있습니다.
 
-새 부모는 Herdr의 명시적인 최상위 그룹 대표가 되고 자식은 실제 부모 workspace ID로 소속을 정합니다. 같은 Git 저장소의 프로젝트도 서로 섞이지 않습니다. 감독 연결·일시정지·재개는 그룹을 이동하지 않습니다. 기존 legacy 부모의 배치와 무관한 workspace·포커스는 보존합니다. 새 부모 그룹에는 관리형 grouped-worktree RPC를 지원하는 서버가 필요하며, 구형 서버에서 다른 배치로 조용히 대체하지 않습니다.
+새 부모는 독립된 clone을 소유하며 공식 Herdr는 그 Git common directory로 자식을 묶습니다. 같은 remote를 쓰는 프로젝트도 서로 섞이지 않습니다. 기존 linked-worktree 부모의 자식·후속 단계 생성은 외부 부작용 전에 `legacy_parent_unsupported`로 거부됩니다. 승인 후 부모를 닫거나 이전하거나, [롤백 안내](docs/operations.md#one-release-rollback)에 따라 이전 OLW와 패치 Herdr를 함께 사용하십시오. 기존 workspace를 조용히 재배치하지 않습니다.
 
 컨트롤러가 파일 이벤트를 먼저 구독한 뒤 OMO를 실행합니다. TUI의 `session_start`가 `.omo/state/ready/`에 원자적으로 준비 기록을 남기면, 공개 OMO RPC로 정확한 세션에 연결해 모델과 reasoning을 설정·검증한 후(관리자는 제외) 첫 지시를 보냅니다. Herdr의 OMO 탐지나 미지원 session-path 보고에 의존하지 않습니다.
 

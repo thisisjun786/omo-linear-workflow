@@ -18,6 +18,7 @@ import { HostProfileMismatchError, runtimeCacheEnvironment } from "../src/host-p
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
 import type { NativeSession } from "../src/transport";
+import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -177,7 +178,7 @@ async function world(agent = "omo") {
     resolveHerdrArtifact: async () => ({ artifactDir: join(root, ".managed-herdr") }),
     ensureHost: async () => {},
     checkHostProfile: async () => hooks.hostCheck?.(),
-    gitTip: async () => "base-commit",
+    gitTip: (cwd, ref) => fixtureTip(root, "base-commit", cwd, ref),
     now: () => hooks.now,
     uuid: () => `id-${++sequence}`,
     managerSettingsPath: settingsPath,
@@ -256,14 +257,13 @@ async function world(agent = "omo") {
     ],
     decisionRefs: [],
   };
-  const digest = readRegistry((registry) => value(registry.importScope(projectScope)).digest);
+  const mapped = await mappedScope(root, projectScope);
+  const digest = readRegistry((registry) => value(registry.importScope(mapped)).digest);
   const createParent = (projectId: string, noManager?: boolean) =>
     orchestrator.createParent({
       scopeDigest: digest,
       designationId: "project-approval",
       projectId,
-      repo: root,
-      base: "main",
       execute: true,
       fixture: true,
       ...(noManager === undefined ? {} : { noManager }),

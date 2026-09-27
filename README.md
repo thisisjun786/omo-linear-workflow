@@ -113,7 +113,7 @@ For `--scope-digest`, use `value.digest` from the import response. It isn't a ha
 
 ```sh
 bun run cli -- --root "$PWD" scope import --file approved-scope.json
-bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID --repo /abs/repo --base main
+bun run cli -- --root "$PWD" parent create --scope-digest SHA --designation ID --execute --project ID
 bun run cli -- --root "$PWD" child create --parent BINDING --issue ID --mode planned
 bun run cli -- --root "$PWD" send --from BINDING --to BINDING --id MSG --kind instruction --text-file brief.txt
 bun run cli -- --root "$PWD" ask --from BINDING --id MSG --text-file question.txt
@@ -171,7 +171,7 @@ bun run cli -- supervisor create --initiative ID --scope-digest MANAGER_SHA --de
 bun run cli -- parent link --parent PARENT --supervisor MANAGER
 bun run cli -- parent unlink --parent PARENT
 # Alternative creation mode for a project that has no live parent:
-bun run cli -- parent create --supervisor MANAGER --project ID --repo /abs/repo --base main
+bun run cli -- parent create --supervisor MANAGER --project ID
 ```
 
 Do not mix `--supervisor` with standalone approval flags. Linking an initialized parent may
@@ -181,7 +181,7 @@ approval, issue set, worktree, pause state or identity. No hidden role or automa
 created. `status`, `reports`, `questions`, `notices`, and `reconcile` accept `--project` or `--initiative`; filters use
 approved scope provenance, not later manager membership. `reports`, `questions` and `notices` also allow no filter.
 
-`--root` is this tool's control root, and `$PWD` in the examples above is this repository. The actual target repository is given separately through `--repo` on `parent create`.
+`--root` is this tool's control root, and `$PWD` in the examples above is this repository. Each project must declare its target remote/default branch in the approved [scope repository mapping](docs/repositories.md). The deprecated `parent create --repo` path is rejected.
 
 The default Herdr socket comes from the current pane's `HERDR_SOCKET_PATH`. Pass `--herdr-socket /abs/socket` only when selecting a different server. Creating and shutting down isolated QA servers is handled by the QA scripts below. Exit codes: 0 success, 2 invalid scope or input, 3 runtime unavailable, 4 uncertain outcome.
 
@@ -216,7 +216,7 @@ aren't reinitialized automatically.
 
 Herdr creates the workspace and the parent and child worktrees. The parent branch is `omo/<designation>/projects/<project>-<binding>`, the child branch is `omo/<designation>/issues/<issue>-<binding>`, and the child's base is a verified commit on the parent branch. The new binding suffix lets you replace a role while keeping the earlier working branch.
 
-Each new parent is an explicit top-level Herdr group head; its children join by the actual parent workspace ID. Two projects in one Git repository stay separate. Manager links and pause/resume do not move groups. Existing legacy parents keep their existing layout, and unrelated workspaces/focus are not changed. An older server must support the managed grouped-worktree RPC before creating new parent groups; no fallback silently changes the layout.
+Each new parent owns an independent clone; official Herdr groups its children by that clone's Git common directory. Two projects targeting one remote stay separate. Manager links and pause/resume do not move groups. Child and successor creation for a legacy linked-worktree parent fails with `legacy_parent_unsupported` before external side effects. Close or migrate it with approval, or continue it on the retained pre-switch OLW/patched Herdr stack per [rollback](docs/operations.md#one-release-rollback). Existing workspaces are never silently regrouped.
 
 The controller subscribes to file events first, then launches OMO. When the TUI's `session_start` atomically writes a readiness record under `.omo/state/ready/`, the controller connects to that exact session through the public OMO RPC, sets and verifies the model and reasoning (skipped for the manager), and then sends the first instruction. It doesn't rely on Herdr's OMO detection or on unsupported session-path reports.
 

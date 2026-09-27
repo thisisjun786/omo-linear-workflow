@@ -16,7 +16,7 @@ Report reproducible problems with the [bug form](https://github.com/thisisjun786
 
 ### Local setup
 
-You need Bun 1.4.0 or newer, pnpm 10.33.3, Node 24.20 and `git` on PATH. The first uncached Herdr build also needs Rust 1.96.1 with `rustfmt` from Rustup and Zig 0.16.0. Later builds reuse the verified artifact.
+You need Bun 1.4.0 or newer, pnpm 10.33.3, Node 24.20 and `git` on PATH. The first uncached build downloads the official Herdr asset pinned in `herdr-release.json` and verifies its SHA-256 before publication. Later builds verify and reuse the managed artifact. No Rust or Zig is required; a checksum mismatch fails closed.
 
 ```sh
 git clone https://github.com/thisisjun786/omo-linear-workflow.git ~/code/omo-linear-workflow

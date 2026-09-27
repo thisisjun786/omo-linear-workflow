@@ -28,6 +28,7 @@ import type { HerdrClient, Workspace } from "../src/herdr";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
 import type { NativeSession } from "../src/transport";
+import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -373,6 +374,7 @@ test("user inbox records immutable reports without a user binding or native rece
 async function world() {
   const control = await root();
   const dbPath = join(control, ".omo/state/registry.sqlite");
+  const mappedProject = await mappedScope(control, projectScope);
   const identities = new Map<string, RuntimeIdentity>();
   const prompts = new Map<string, Set<string>>();
   const workspaces = new Map<string, Workspace>();
@@ -469,7 +471,7 @@ async function world() {
     createHerdrClient: () => herdr,
     resolveHerdrArtifact: async () => ({ artifactDir: "/fixture/herdr" }),
     ensureHost: async () => {},
-    gitTip: async () => "base-commit",
+    gitTip: (cwd, ref) => fixtureTip(control, "base-commit", cwd, ref),
     now: () => "2026-09-23",
     uuid: () => `id-${++sequence}`,
     terminateBinding: async (binding) => {
@@ -545,19 +547,28 @@ async function world() {
     },
   };
   const orchestrator = new Orchestrator(control, "/fixture/herdr", deps);
-  const digest = registry((r) => value(r.importScope(projectScope)).digest);
+  const digest = registry((r) => value(r.importScope(mappedProject)).digest);
   const create = () =>
     orchestrator.createParent({
       scopeDigest: digest,
       designationId: "project-approval",
       projectId: "project",
-      repo: control,
-      base: "main",
       execute: true,
       fixture: true,
     });
   const createManager = async () => {
-    const scopeDigest = registry((r) => value(r.importScope(managerScope)).digest);
+    const scopeDigest = registry(
+      (r) =>
+        value(
+          r.importScope({
+            ...managerScope,
+            projects: managerScope.projects.map((project) => ({
+              ...project,
+              repository: mappedProject.projects[0]?.repository,
+            })),
+          }),
+        ).digest,
+    );
     return value(
       await orchestrator.createSupervisor({
         scopeDigest,
@@ -646,8 +657,6 @@ test.each(["manager", "same-designation supervisor", "cross-designation supervis
         ? await w.orchestrator.createParent({
             supervisorId: owner.id,
             projectId: "project",
-            repo: w.control,
-            base: "main",
           })
         : await w.create(),
     ).binding;
@@ -816,7 +825,7 @@ test("child worktree creation uses the recorded parent repository", async () => 
   const w = await world();
   const parent = value(await w.create()).binding;
   if (parent.workspaceId === null) throw new Error("Missing parent workspace");
-  expect(w.worktreeRequests.get(parent.workspaceId)).toBe(w.control);
+  expect(w.worktreeRequests.has(parent.workspaceId)).toBe(false);
   const child = value(
     await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
   ).binding;
@@ -838,7 +847,7 @@ test.each(["missing", "cwd"] as const)(
       await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
     ).toMatchObject({ ok: false, error: { code: "owner_unavailable" } });
     expect(w.registry((registry) => value(registry.list()))).toEqual([parent]);
-    expect(w.worktreeRequests.size).toBe(1);
+    expect(w.worktreeRequests.size).toBe(0);
   },
 );
 
@@ -847,16 +856,17 @@ test.each(["linked-worktree", "missing-kind"])(
   async (kind) => {
     const w = await world();
     const parent = value(await w.create()).binding;
-    if (kind === "missing-kind") {
-      const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
-      try {
-        db.query(
-          "UPDATE bindings SET json = json_remove(json, '$.checkout.kind') WHERE id = ?",
-        ).run(parent.id);
-      } finally {
-        db.close();
-      }
+    const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+    try {
+      db.query(
+        kind === "missing-kind"
+          ? "UPDATE bindings SET json = json_remove(json, '$.checkout.kind') WHERE id = ?"
+          : "UPDATE bindings SET json = json_set(json, '$.checkout.kind', 'linked-worktree') WHERE id = ?",
+      ).run(parent.id);
+    } finally {
+      db.close();
     }
+    const before = w.registry((r) => value(r.list()));
     const child = Bun.spawn(
       [
         process.execPath,
@@ -891,7 +901,7 @@ test.each(["linked-worktree", "missing-kind"])(
         },
       },
     });
-    expect(w.registry((r) => value(r.list()))).toEqual([parent]);
+    expect(w.registry((r) => value(r.list()))).toEqual(before);
   },
 );
 
@@ -924,7 +934,9 @@ test("no-supervisor creation through child instruction, report and user inbox us
   });
   expect(w.prompts.get(p.id)?.size).toBe(1);
   expect(w.registry((r) => value(r.list())).map((b) => b.assignment.role)).toEqual(["parent"]);
-  const c = value(await w.orchestrator.createChild({ parentId: p.id, issueId: "issue" })).binding;
+  const c = value(
+    await w.orchestrator.createChild({ parentId: p.id, issueId: "issue", deliverable: "report" }),
+  ).binding;
   expect(c.checkout?.baseBranch).toBe(p.checkout?.branch);
   expect(c.checkout?.originalRepoRoot).toBe(p.checkout?.originalRepoRoot);
   expect(
@@ -943,6 +955,7 @@ test("no-supervisor creation through child instruction, report and user inbox us
       outcome: "completed",
       text: "verified",
       evidence: [],
+      delivery: { kind: "report", path: "/fixture/evidence" },
     }),
   ).toMatchObject({ ok: true, value: { state: "accepted", envelope: { toBindingId: p.id } } });
   const input = {

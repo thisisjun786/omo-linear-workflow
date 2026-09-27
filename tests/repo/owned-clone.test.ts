@@ -292,11 +292,11 @@ test("research defaults to a report, carries the packet kind and requires an exp
   );
 });
 
-test("mapping conflicts with --repo without creating a checkout", async () => {
+test("--repo is rejected even with a mapping, without creating a checkout", async () => {
   const w = await world();
   expect(
     await w.orchestrator.createParent({ ...w.input, repo: w.root, base: "main" }),
-  ).toMatchObject({ ok: false, error: { code: "invalid_arguments" } });
+  ).toMatchObject({ ok: false, error: { code: "legacy_parent_unsupported" } });
   expect(w.registry((r) => value(r.list()))).toEqual([]);
   expect(w.calls).toEqual([]);
 });

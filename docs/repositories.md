@@ -45,10 +45,13 @@ parent integration branch. Their directories remain under `<root>/.omo/worktrees
 administration and objects belong to the parent's clone. Plan/execute tabs share that one worktree.
 Neither owned parents nor their children use `worktree.create_grouped`.
 
-Unmapped projects can still use `--repo PATH --base REF`; `--repo` is deprecated in help JSON.
-A mapping and `--repo` together are an error, not an override. Existing rows without a checkout
-kind decode as `linked-worktree`, including read-only status. No old checkout is moved or migrated,
-and legacy `originalRepoRoot` continues to identify the user's repository.
+New parents require an approved repository mapping. The deprecated `--repo` option is rejected,
+not used as an override. Existing rows without a checkout kind decode as `linked-worktree`,
+including read-only status. Child and successor creation for those parents is rejected with
+`legacy_parent_unsupported` before any external side effect. Close or migrate the parent with
+approval, or continue it on the retained pre-switch OLW/patched Herdr stack; see
+[rollback](operations.md#one-release-rollback). No old checkout is moved or migrated, and legacy
+`originalRepoRoot` continues to identify the user's repository.
 
 ## Issue deliverables and PR integration
 

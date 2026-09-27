@@ -63,7 +63,7 @@ cd ~/code/omo-linear-workflow
 bun run install:local
 ```
 
-Add `--bin-dir PATH` if you want the launcher somewhere other than the default. The installer checks for Bun 1.4.0 or newer, pnpm 10.33.3, Node 24.20 and `git`, and reports what is missing. It doesn't install those for you. The first uncached build also needs Rust 1.96.1 with `rustfmt` from Rustup and Zig 0.16.0 for the managed Herdr. Linux x64 is the only supported target.
+Add `--bin-dir PATH` if you want the launcher somewhere other than the default. The installer checks for Bun 1.4.0 or newer, pnpm 10.33.3, Node 24.20 and `git`, and reports what is missing. It doesn't install those for you. The first uncached build downloads the official Herdr release pinned in `herdr-release.json` and verifies its SHA-256 before publishing it to `.omo/herdr`. No Rust or Zig is required; checksum mismatches fail closed without a PATH fallback. Linux x64 is the only supported target.
 
 The example selects the first release. Choose another published tag to install that version, or omit `--branch v0.1.0` to install the current `main`, which is always the latest released commit.
 
@@ -86,7 +86,7 @@ Before you switch:
 
 - Read the `## [0.2.0]` changelog section. If it has a `### Migration` subsection, do those steps in the order written.
 - Finish or `pause` active role bindings if the notes say the runtime changes. An upgrade doesn't restart existing Herdr servers or OMO sessions on its own; running sessions keep the old code until they're closed and recreated.
-- If the Herdr pin changed, the next `bun run build` compiles Herdr again. Existing servers aren't replaced; see the vendor README for handoff.
+- If the Herdr pin changed, the next `bun run build` downloads the pinned official asset and verifies its SHA-256. Cached executables are also verified before use. Existing servers aren't replaced; follow the [switch gate and rollback procedure](../operations.md#official-herdr-runtime-and-switch-gate). Resolve any parents listed by `olw doctor --json` before a separately approved server switch.
 
 Skipping versions is fine as long as you apply each intermediate migration subsection in order.
 

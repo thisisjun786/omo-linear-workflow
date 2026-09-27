@@ -20,6 +20,9 @@ published.
   duplicate session reports. Owned clones use upstream groups and `worktree.create`.
   `olw doctor` blocks the operational switch and lists remaining legacy parents. Existing
   servers, installed binaries and caches are untouched; one-release rollback is documented.
+  New linked parents (`--repo`), children and successors of legacy parents are rejected with
+  `legacy_parent_unsupported` before external side effects; close/migrate with approval or
+  continue those parents with the retained pre-switch OLW and patched Herdr together.
 - Pinned-by-default OMO model routing with accepted baselines, route-level upstream advice,
   selective `apply`/`dismiss`, optional `follow` mode, launcher and manager notices, and catalog
   health review for removed or degraded models. Advice is read-only until explicit acceptance.

@@ -271,6 +271,18 @@ function ok<T>(value: T): Result<T> {
   return { ok: true, value };
 }
 
+function legacyParentCreationError(parent: Binding): Result<never> {
+  return failure(
+    "legacy_parent_unsupported",
+    "Cannot create a child or successor for a legacy linked-worktree parent. Close or migrate the legacy parent with user approval, or keep using the retained patched OLW/Herdr stack for it per docs/operations.md#one-release-rollback.",
+    {
+      bindingId: parent.id,
+      checkoutKind: parent.checkout?.kind ?? "legacy",
+      rollback: "docs/operations.md#one-release-rollback",
+    },
+  );
+}
+
 function failure<T>(code: string, message: string, details?: unknown): Result<T> {
   return details === undefined
     ? { ok: false, error: { code, message } }
@@ -535,6 +547,14 @@ export class Orchestrator {
         parsed.error.issues,
       );
     const input = parsed.data;
+    if (!("supervisorId" in input) && !input.execute)
+      return failure("execute_denied", "Standalone parent creation requires --execute");
+    if (input.repo !== undefined)
+      return failure(
+        "legacy_parent_unsupported",
+        "Linked-worktree parent creation is unsupported. Use an approved scope repository mapping for an owned-clone parent, or keep using the retained patched OLW/Herdr stack per docs/operations.md#one-release-rollback.",
+        { projectId: input.projectId, rollback: "docs/operations.md#one-release-rollback" },
+      );
     let ownerId: string | null = null;
     let managerLink: CreationResult["managerLink"];
     let context: Result<{ readonly designation: Designation; readonly snapshot: ScopeSnapshot }>;
@@ -548,8 +568,6 @@ export class Orchestrator {
       ownerId = owner.value.id;
       context = await this.#context(owner.value);
     } else {
-      if (!input.execute)
-        return failure("execute_denied", "Standalone parent creation requires --execute");
       context = this.#approval(input);
       const link = this.#managerLink(input.noManager === true);
       if (!link.ok) return link;
@@ -562,58 +580,39 @@ export class Orchestrator {
     );
     if (project === undefined)
       return failure("scope_violation", "Project is outside the approved snapshot");
-    if (project.repository !== undefined && input.repo !== undefined)
+    if (project.repository === undefined)
       return failure(
         "invalid_arguments",
-        "--repo cannot be combined with a scope repository mapping",
-      );
-    if (project.repository === undefined && (input.repo === undefined || input.base === undefined))
-      return failure(
-        "invalid_arguments",
-        "Without a repository mapping, --repo and --base are required",
+        "Parent creation requires an approved scope repository mapping",
       );
     const bindingId = this.#deps.uuid();
     const branch = `omo/${context.value.designation.id}/projects/${input.projectId}-${bindingId}`;
-    let checkout: Checkout;
-    if (project.repository !== undefined) {
-      const repository = project.repository;
-      const mirror = await fetchMirror(this.#root, repository.remote);
-      const base = input.base ?? repository.base ?? `refs/heads/${repository.defaultBranch}`;
-      const revision = base.startsWith("origin/") ? `refs/heads/${base.slice(7)}` : base;
-      const baseCommit = await checkoutGit(mirror.path, [
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        `${revision}^{commit}`,
-      ]);
-      const path = ownedCheckoutPath(
-        this.#root,
-        repository.remote,
-        project.project.key ?? project.project.id,
-        bindingId,
-      );
-      checkout = {
-        kind: "owned-clone",
-        remote: repository.remote,
-        receiptPath: join(this.#root, ".omo/state/checkouts", `${bindingId}.json`),
-        originalRepoRoot: path,
-        path,
-        branch,
-        baseBranch: input.base ?? repository.base ?? `origin/${repository.defaultBranch}`,
-        baseCommit,
-      };
-    } else {
-      const originalRepoRoot = resolve(input.repo ?? "");
-      const baseBranch = input.base ?? "";
-      checkout = {
-        kind: "linked-worktree",
-        originalRepoRoot,
-        path: join(this.#root, ".omo/worktrees", bindingId),
-        branch,
-        baseBranch,
-        baseCommit: await this.#deps.gitTip(originalRepoRoot, baseBranch),
-      };
-    }
+    const repository = project.repository;
+    const mirror = await fetchMirror(this.#root, repository.remote);
+    const base = input.base ?? repository.base ?? `refs/heads/${repository.defaultBranch}`;
+    const revision = base.startsWith("origin/") ? `refs/heads/${base.slice(7)}` : base;
+    const baseCommit = await checkoutGit(mirror.path, [
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${revision}^{commit}`,
+    ]);
+    const path = ownedCheckoutPath(
+      this.#root,
+      repository.remote,
+      project.project.key ?? project.project.id,
+      bindingId,
+    );
+    const checkout: Checkout = {
+      kind: "owned-clone",
+      remote: repository.remote,
+      receiptPath: join(this.#root, ".omo/state/checkouts", `${bindingId}.json`),
+      originalRepoRoot: path,
+      path,
+      branch,
+      baseBranch: input.base ?? repository.base ?? `origin/${repository.defaultBranch}`,
+      baseCommit,
+    };
     const assignment: Assignment = {
       role: "parent",
       initiativeId: context.value.snapshot.initiative?.id ?? null,
@@ -1094,10 +1093,9 @@ export class Orchestrator {
     if (!owner.ok) return owner;
     if (owner.value.assignment.role !== "parent" || owner.value.checkout === null)
       return failure("owner_mismatch", "Child owner must be a parent worktree");
+    if (owner.value.checkout.kind !== "owned-clone") return legacyParentCreationError(owner.value);
     if (owner.value.launchState !== "ready" || owner.value.contactState !== "active")
       return failure("owner_unavailable", "Parent is not available for role creation");
-    if (owner.value.assignment.role !== "parent")
-      return failure("owner_mismatch", "Owner is not a parent");
     const parentAssignment = owner.value.assignment;
     const context = await this.#context(owner.value);
     if (!context.ok) return context;
@@ -1124,12 +1122,8 @@ export class Orchestrator {
     const bindingId = this.#deps.uuid();
     const checkout: Checkout = {
       kind: "linked-worktree",
-      ...(owner.value.checkout.kind === "owned-clone"
-        ? {
-            remote: owner.value.checkout.remote,
-            receiptPath: join(this.#root, ".omo/state/checkouts", `${bindingId}.json`),
-          }
-        : {}),
+      remote: owner.value.checkout.remote,
+      receiptPath: join(this.#root, ".omo/state/checkouts", `${bindingId}.json`),
       originalRepoRoot: owner.value.checkout.originalRepoRoot,
       path: join(this.#root, ".omo/worktrees", bindingId),
       branch: `omo/${owner.value.designationId}/issues/${input.issueId}-${bindingId}`,
@@ -1248,6 +1242,7 @@ export class Orchestrator {
     if (!owner.ok) return owner;
     if (owner.value.assignment.role !== "parent" || owner.value.launchState !== "ready")
       return failure("owner_mismatch", "Named parent is not ready");
+    if (owner.value.checkout?.kind !== "owned-clone") return legacyParentCreationError(owner.value);
     const host = await this.#checkHostProtocol(owner.value);
     if (host !== undefined) return host;
     const planHost = await this.#checkHostProtocol(plan.value);

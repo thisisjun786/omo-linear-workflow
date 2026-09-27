@@ -15,7 +15,12 @@ Before any operational switch, run `olw doctor --json` against the control root.
 including binding ID, project ID, cwd and workspace ID. The switch is blocked until
 those parents are resolved with user approval. Do not rewrite binding identities
 or silently regroup linked worktrees. Create new parents with repository mappings;
-`--repo` is a deprecated legacy path, not a supported official-server group setup.
+`parent create --repo` is rejected. `child create` (all modes) and `stage start`
+for a legacy linked-worktree parent return `legacy_parent_unsupported` before
+Herdr, Git, host access or role reservation. Close or migrate that parent with
+user approval, or continue it using the retained pre-switch OLW checkout together
+with its matching patched Herdr stack as described below. Using the new CLI with
+the old server does not restore explicit-group support.
 
 Senpi's built-in integration reports `pi`; OLW also recognizes older `omo` labels.
 It owns session reports and active/blocked/idle state, including detached eval work.

@@ -260,6 +260,25 @@ test.each(["stage", "close"] as const)(
     const exit = Promise.withResolvers<void>();
     const timeout = setTimeout(() => quit.reject(new Error("Expected /quit")), 2000);
     try {
+      if (operation === "stage") {
+        const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+        try {
+          db.query(
+            "UPDATE bindings SET json = json_set(json, '$.checkout', json(?)) WHERE id = 'parent'",
+          ).run(
+            JSON.stringify({
+              kind: "owned-clone",
+              originalRepoRoot: w.root,
+              path: w.root,
+              branch: "parent",
+              baseBranch: "main",
+              baseCommit: "commit",
+            }),
+          );
+        } finally {
+          db.close();
+        }
+      }
       const plan = w.ready(w.reserve("plan"), "childws", "childws:plan");
       value(
         w.registry.recordHandoff(plan.id, {

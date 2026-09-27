@@ -1,6 +1,11 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { debuglog } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@code-yeongyu/senpi";
+import { openRegistry } from "../core/store";
 import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
+import { createRoleHerdrClient, registerRoleHerdrReporter } from "./herdr-reporter";
 import { isManagerIdle, registerManagerIdle } from "./manager-idle";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
 
@@ -24,6 +29,47 @@ export function questionWaitWire(
 
 export default function initiativeExtension(pi: ExtensionAPI): void {
   registerManagerIdle(pi);
+  const { OMO_INITIATIVE_HOST: hostMarker, OMO_INITIATIVE_ROOT: initiativeRoot } = process.env;
+  const root = initiativeRoot ?? pi.cwd;
+  const debug = debuglog("olw:herdr");
+  registerRoleHerdrReporter(
+    {
+      onSessionStart: (handler) => {
+        pi.on("session_start", (event, ctx) => handler(event.reason, ctx));
+      },
+      onAgentStart: (handler) => {
+        pi.on("agent_start", (_event, ctx) => handler(ctx));
+      },
+      onAgentSettled: (handler) => {
+        pi.on("agent_settled", (_event, ctx) => handler(ctx));
+      },
+      onSessionShutdown: (handler) => {
+        pi.on("session_shutdown", (event, ctx) => handler(event.reason, ctx));
+      },
+      onBlocked: (handler) => {
+        pi.events.on("herdr:blocked", (data) => {
+          if (!isBlockedEvent(data)) return;
+          return handler(data);
+        });
+      },
+    },
+    {
+      hostRuntime: hostMarker === "1",
+      lookupBinding(sessionId) {
+        const dbPath = join(root, ".omo/state/registry.sqlite");
+        if (!existsSync(dbPath)) return undefined;
+        const registry = openRegistry(dbPath, { readonly: true });
+        try {
+          const binding = registry.bySession(sessionId);
+          return binding.ok ? binding.value : undefined;
+        } finally {
+          registry.close();
+        }
+      },
+      createClient: createRoleHerdrClient,
+      debug,
+    },
+  );
   const port: RuntimePort = {
     onSessionStart(handler): void {
       pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
@@ -90,11 +136,23 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
       return { details: result.details };
     },
   };
-  const { OMO_INITIATIVE_HOST: hostMarker, OMO_INITIATIVE_ROOT: initiativeRoot } = process.env;
   registerInitiativeRuntime(port, {
-    root: initiativeRoot ?? pi.cwd,
+    root,
     hostRuntime: hostMarker === "1",
   });
+}
+
+function isBlockedEvent(data: unknown): data is { active: boolean; id: string; label?: string } {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "active" in data &&
+    typeof data.active === "boolean" &&
+    "id" in data &&
+    typeof data.id === "string" &&
+    data.id.length > 0 &&
+    (!("label" in data) || data.label === undefined || typeof data.label === "string")
+  );
 }
 
 function contextPort(ctx: ExtensionContext): SessionContextPort {

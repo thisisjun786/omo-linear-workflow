@@ -21,22 +21,6 @@ export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
   const stream: NonNullable<ProviderConfig["streamSimple"]> = (model, context) => {
     const events = createAssistantMessageEventStream();
     queueMicrotask(async () => {
-      if (gate !== undefined && JSON.stringify(context.messages).includes("OLW_ENTRY_BUSY_GATE")) {
-        const released = Promise.withResolvers<void>();
-        const inspect = () => {
-          if (existsSync(join(gate, "release"))) released.resolve();
-        };
-        const watcher = watch(gate, inspect);
-        const deadline = setTimeout(() => released.reject(new Error("QA release deadline")), 60000);
-        try {
-          await writeFile(join(gate, "entered"), "entered");
-          inspect();
-          await released.promise;
-        } finally {
-          watcher.close();
-          clearTimeout(deadline);
-        }
-      }
       const message = {
         role: "assistant" as const,
         api: model.api,
@@ -55,6 +39,22 @@ export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
         timestamp: Date.now(),
       };
       events.push({ type: "start", partial: message });
+      if (gate !== undefined && JSON.stringify(context.messages).includes("OLW_ENTRY_BUSY_GATE")) {
+        const released = Promise.withResolvers<void>();
+        const inspect = () => {
+          if (existsSync(join(gate, "release"))) released.resolve();
+        };
+        const watcher = watch(gate, inspect);
+        const deadline = setTimeout(() => released.reject(new Error("QA release deadline")), 60000);
+        try {
+          await writeFile(join(gate, "entered"), "entered");
+          inspect();
+          await released.promise;
+        } finally {
+          watcher.close();
+          clearTimeout(deadline);
+        }
+      }
       events.push({ type: "done", reason: "stop", message });
       events.end(message);
     });

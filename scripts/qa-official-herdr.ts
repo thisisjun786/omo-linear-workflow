@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,6 +21,7 @@ export async function runOfficialHerdrQa(
   evidenceName = "lina-275-official-qa.json",
   entry = false,
   autoHandoff = false,
+  roleReport = false,
 ): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const scratch = await mkdtemp(join(tmpdir(), "olw-official-"));
@@ -287,6 +288,73 @@ export async function runOfficialHerdrQa(
     }
     const parent = parents[0];
     assert.ok(parent);
+    if (roleReport) {
+      assert.ok(parent.paneId);
+      const gate = join(scratch, "gate");
+      const entered = Promise.withResolvers<void>();
+      const inspectGate = () => {
+        if (existsSync(join(gate, "entered"))) entered.resolve();
+      };
+      const watcher = watch(gate, inspectGate);
+      const started = Promise.withResolvers<void>();
+      const settled = Promise.withResolvers<void>();
+      const parentClient = clients[1];
+      assert.ok(parentClient);
+      const stopEvents = parentClient.onEvent((event) => {
+        if (event.type === "agent_start") started.resolve();
+        if (event.type === "agent_settled") settled.resolve();
+      });
+      const deadline = setTimeout(() => {
+        const error = new Error("Role-report provider hold deadline");
+        entered.reject(error);
+        started.reject(error);
+      }, 30000);
+      const turn = parentClient.prompt("OLW_ENTRY_BUSY_GATE");
+      try {
+        inspectGate();
+        await Promise.all([entered.promise, started.promise]);
+        const working = await checkedQaCommand(
+          ["herdr", "agent", "explain", parent.paneId, "--json"],
+          world.repository,
+          world.environment,
+        );
+        const workingAgent = await checkedQaCommand(
+          ["herdr", "agent", "get", parent.paneId],
+          world.repository,
+          world.environment,
+        );
+        evidence["roleReportWorkingRaw"] = { explain: working, agent: workingAgent };
+        const workingExplain = JSON.parse(working) as unknown;
+        check(
+          "roleReportWorking",
+          workingAgent.includes('"agent_status":"working"') &&
+            JSON.stringify(workingExplain).includes("default_known_agent_idle_fallback") &&
+            JSON.stringify(workingExplain).includes('"state":"idle"'),
+        );
+        await writeFile(join(gate, "release"), "release");
+        await turn;
+        await settled.promise;
+        await idle(parentClient);
+        const idleReport = await checkedQaCommand(
+          ["herdr", "agent", "get", parent.paneId],
+          world.repository,
+          world.environment,
+        );
+        evidence["roleReportIdleRaw"] = idleReport;
+        check(
+          "roleReportIdle",
+          idleReport.includes('"agent_status":"done"') ||
+            idleReport.includes('"agent_status":"idle"'),
+        );
+        evidence["roleReport"] = { paneId: parent.paneId, working, idle: idleReport };
+      } finally {
+        watcher.close();
+        stopEvents();
+        clearTimeout(deadline);
+        if (!existsSync(join(gate, "release"))) await writeFile(join(gate, "release"), "release");
+        await turn;
+      }
+    }
     if (entry)
       evidence["busyNotice"] = await managerBusyNoticeQa(world, manager, parent, managerClient);
     const plan = z
@@ -537,5 +605,6 @@ if (import.meta.main) {
         : "lina-275-official-qa.json",
     process.argv.includes("--entry"),
     autoHandoff,
+    process.argv.includes("--role-report"),
   );
 }

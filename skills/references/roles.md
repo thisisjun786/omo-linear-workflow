@@ -186,7 +186,7 @@ Commands and flags below follow the frozen implementation contract; confirm agai
 | Instruct the level below | `send --from BINDING --to BINDING --id MESSAGE_ID --kind instruction --text-file brief.txt` |
 | Report to the level above | `report --from BINDING --id MESSAGE_ID --outcome completed\|blocked\|failed --evidence ABS_PATH --text-file result.txt [--pr URL --head SHA \| --deliverable-path PATH_OR_URL]` |
 | Post explicitly to the user (parent only) | `report --from BINDING --id MESSAGE_ID --outcome blocked\|failed\|completed --text-file result.txt --to-user` |
-| Ask the level above | `ask --from BINDING --id ID --text-file question.txt [--questions-file JSON] [--to-user]` |
+| Ask the level above (parent only; children use the `olw_ask` tool) | `ask --from BINDING --id ID --text-file question.txt [--questions-file JSON] [--to-user]` |
 | Answer one question | `answer --from BINDING --question QUESTION_ID --text-file answer.txt [--answers-file JSON]`, or `answer --as-user ...` for a posted inbox question |
 | Read without waking | `status --project ID`, `reports --project ID`, `questions --project ID`, `notices --project ID` |
 | Pause / resume contact | `pause --binding BINDING`, `resume --binding BINDING` |

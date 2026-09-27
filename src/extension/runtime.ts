@@ -62,7 +62,8 @@ export interface RuntimePort {
   ): Promise<void>;
   onUserInterrupt(handler: (ctx: SessionContextPort) => Promise<void>): void;
   onGoalCheck(handler: (ctx: SessionContextPort) => Promise<void>): void;
-  waitForIdle(target: Binding): Promise<void>;
+  waitForIdle(target: Binding, timeoutMs?: number): Promise<void>;
+  isIdle(target: Binding): boolean;
   onTurnEnd(handler: (message: unknown, ctx: SessionContextPort) => Promise<void>): void;
   notifyOperational(message: string, ctx: SessionContextPort): void;
   onResourcesDiscover(handler: () => { readonly skillPaths: string[] }): void;
@@ -123,7 +124,7 @@ type WorkerAction =
 const nativeSendInputSchema = z.strictObject({
   thread: z.string().min(1),
   message: z.string(),
-  delivery: z.enum(["auto", "follow_up"]),
+  delivery: z.literal("auto"),
   all_scope: z.literal(true),
   idempotency_key: z.string().min(1),
 });
@@ -164,6 +165,9 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly messageId: string;
     readonly input: z.infer<typeof nativeSendInputSchema>;
     readonly userAnswer: boolean;
+    readonly managerTarget?: Binding;
+    readonly admissionDeadline?: number;
+    admissionFailure?: string;
     used: boolean;
   }>();
 
@@ -610,6 +614,14 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     return deliver(released.value, ctx, true);
   });
 
+  async function admitManager(target: Binding, deadline: number): Promise<void> {
+    do {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Manager idle admission deadline exceeded");
+      await port.waitForIdle(target, remaining);
+    } while (!port.isIdle(target));
+  }
+
   async function deliver(
     claim: ClaimResult,
     ctx: SessionContextPort,
@@ -638,9 +650,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       const command = envelope.kind === "report" ? "reports" : "questions";
       message = `[OLW] ${project} ${envelope.kind}: ${summary} - details: olw ${command} --project ${project}\n${message}`;
     }
+    const admissionDeadline = Date.now() + 25_000;
     if (envelope.kind === "answer" || managerNotice) {
       try {
-        await port.waitForIdle(claim.target);
+        if (managerNotice) await admitManager(claim.target, admissionDeadline);
+        else await port.waitForIdle(claim.target);
       } catch (cause) {
         return worker(
           "finish",
@@ -666,9 +680,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       const input = nativeSendInputSchema.parse({
         thread: claim.target.durableSessionId,
         message,
-        // Idle admission is event-driven. follow_up also prevents steering if a user starts
-        // another turn between the idle observation and native acceptance.
-        delivery: managerNotice ? "follow_up" : "auto",
+        delivery: "auto",
         all_scope: true,
         idempotency_key: nativeKey,
       });
@@ -678,9 +690,36 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           messageId: envelope.id,
           input,
           userAnswer,
+          ...(managerNotice ? { managerTarget: claim.target, admissionDeadline } : {}),
           used: false,
         },
-        () => port.executeTool("thread_send", input),
+        async () => {
+          let result: { readonly details: unknown } | undefined;
+          try {
+            result = await port.executeTool("thread_send", input);
+          } catch (cause) {
+            if (dispatch.getStore()?.admissionFailure === undefined) throw cause;
+            // The tool-call guard recorded proof that the native implementation never ran.
+          }
+          const failed = dispatch.getStore()?.admissionFailure;
+          if (failed === undefined) {
+            if (result === undefined) throw new Error("Native tool returned no result");
+            return result;
+          }
+          return {
+            details: {
+              result: {
+                kind: "error",
+                error: {
+                  code: "turn_conflict_before_delivery",
+                  details: "idle_admission_failed",
+                  message: failed,
+                  next_action: "Retry this same ID after the manager is idle.",
+                },
+              },
+            },
+          };
+        },
       );
       details = executed.details;
     } catch (cause) {
@@ -826,6 +865,17 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         block: true,
         reason: "Direct thread_send target does not match the authorized route",
       };
+    }
+    if (permit.managerTarget !== undefined && permit.admissionDeadline !== undefined) {
+      try {
+        // All worker/preflight awaits are over. Read the live target context synchronously
+        // immediately before releasing thread_send; a raced turn returns to event admission.
+        while (!port.isIdle(permit.managerTarget))
+          await admitManager(permit.managerTarget, permit.admissionDeadline);
+      } catch (cause) {
+        permit.admissionFailure = messageOf(cause);
+        return { block: true, reason: permit.admissionFailure };
+      }
     }
     permit.used = true;
     return undefined;

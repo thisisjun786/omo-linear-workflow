@@ -17,6 +17,7 @@ published.
 
 - Preserve foreground manager exit codes before readiness and release failed startup reservations immediately.
 - Forward foreground entry signals and recover dead-owner reattachment claims without a lease wait; live owners return `manager_busy` instead of an empty-pane success.
+- Recheck manager idle state at native send admission without the native follow-up polling queue.
 
 ### Changed
 

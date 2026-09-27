@@ -65,7 +65,7 @@ test.each(["report", "question"] as const)(
         expect(notice?.length).toBeLessThan(240);
         expect(extra).toEqual([]);
         expect(JSON.parse(encoded ?? "null")).toEqual(message);
-        expect(input.delivery).toBe("follow_up");
+        expect(input.delivery).toBe("auto");
         expect(value(registry.delivery(message.id)).envelope).toEqual(message);
         if (kind === "report")
           expect(value(registry.postedReports({ projectId: "project-1" }))[0]?.envelope).toEqual(
@@ -83,6 +83,91 @@ test.each(["report", "question"] as const)(
     });
   },
 );
+
+test("manager admission rechecks synchronous idle state and waits for the next event without sending", async () => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    const manager = linkReadyManager(registry, parent, root);
+    const harness = new Harness();
+    let idle = false;
+    let waits = 0;
+    const rewaiting = Promise.withResolvers<void>();
+    const nextIdle = Promise.withResolvers<void>();
+    Object.assign(harness, { isIdle: () => idle });
+    harness.waitForIdle = async () => {
+      waits++;
+      if (waits > 1) {
+        rewaiting.resolve();
+        await nextIdle.promise;
+      }
+    };
+    harness.receipt = {
+      kind: "ok",
+      thread_id: manager.durableSessionId,
+      message_seq: 1,
+      deduplicated: false,
+      delivery: { kind: "started", turn_id: "notice" },
+    };
+    registerInitiativeRuntime(harness, { root, hostRuntime: true });
+    await harness.start()(context(parent));
+    const send = harness.rpc("omo.initiative.send")(
+      envelope(parent, manager, digest, "busy-race", "report"),
+    );
+    const timer = setTimeout(
+      () => rewaiting.reject(new Error("Did not reenter event admission")),
+      2000,
+    );
+    try {
+      await rewaiting.promise;
+      expect(harness.executeCount).toBe(0);
+      idle = true;
+      nextIdle.resolve();
+      expect(value(resultSchema(deliveryRecordSchema).parse(await send)).state).toBe("accepted");
+      expect(harness.executeCount).toBe(1);
+    } finally {
+      clearTimeout(timer);
+      nextIdle.resolve();
+      registry.close();
+    }
+  });
+});
+
+test("preflight idle rejection remains proven pre-delivery even when executeTool throws", async () => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const harness = new Harness();
+      let idle = true;
+      harness.isIdle = () => idle;
+      harness.waitForIdle = async () => {
+        if (!idle) throw new Error("preflight idle deadline");
+      };
+      const execute = harness.executeTool.bind(harness);
+      harness.executeTool = async (name, input) => {
+        idle = false;
+        return execute(name, input);
+      };
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const result = value(
+        resultSchema(deliveryRecordSchema).parse(
+          await harness.rpc("omo.initiative.send")(
+            envelope(parent, manager, digest, "preflight-rejection", "report"),
+          ),
+        ),
+      );
+      expect(result.state).toBe("rejected");
+      expect(result.receipt).toMatchObject({
+        kind: "error",
+        error: { code: "turn_conflict_before_delivery" },
+      });
+      expect(harness.executeCount).toBe(0);
+    } finally {
+      registry.close();
+    }
+  });
+});
 
 test("manager idle rejection permits same-ID retry; uncertain never resends", async () => {
   await fixture(async ({ root, parent, digest }) => {

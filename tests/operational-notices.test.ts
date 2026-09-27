@@ -194,6 +194,9 @@ class Harness implements RuntimePort {
   }
   async resumeGoal() {}
   async waitForIdle() {}
+  isIdle() {
+    return true;
+  }
   onToolCall(handler: Parameters<RuntimePort["onToolCall"]>[0]) {
     this.toolCall = handler;
   }

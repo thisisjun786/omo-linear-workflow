@@ -1,11 +1,21 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { nativeReceiptSchema } from "../../src/core/schema";
+import { deliveryRecordSchema, nativeReceiptSchema, resultSchema } from "../../src/core/schema";
+import { openRegistry } from "../../src/core/store";
+import { registerInitiativeRuntime } from "../../src/extension/runtime";
+import {
+  context,
+  envelope,
+  Harness,
+  linkReadyManager,
+  fixture as runtimeFixture,
+  value,
+} from "../runtime-harness";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -58,7 +68,7 @@ test("native bundle marker verifies its body and recorded downstream inputs", as
   );
 });
 
-async function fixture() {
+async function fixture(targetId = "parent") {
   const root = resolve(import.meta.dir, "../..");
   const directory = await mkdtemp(join(tmpdir(), "olw-native-delivery-"));
   roots.push(directory);
@@ -111,7 +121,7 @@ async function fixture() {
     host: {
       socket: join(directory, "unused.sock"),
       listSessions: async () => [
-        { sessionId: "route-parent", durableSessionId: "parent", cwd: directory },
+        { sessionId: "route-parent", durableSessionId: targetId, cwd: directory },
       ],
       getState: async () => {
         state.stateReads += 1;
@@ -146,6 +156,11 @@ async function fixture() {
     releaseSnapshot,
     promptEntered,
     releasePrompt,
+    async execute(input: unknown) {
+      return z
+        .object({ details: z.object({ result: z.unknown() }) })
+        .parse(await send.execute("native-manager", input));
+    },
     async call(key: string) {
       const result = await send.execute(`call-${key}`, {
         thread: "parent",
@@ -159,6 +174,74 @@ async function fixture() {
     },
   };
 }
+
+test("manager busy race reenters event admission before native auto; no mailbox polling or duplicate", async () => {
+  await runtimeFixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const native = await fixture(manager.durableSessionId);
+      const harness = new Harness();
+      const nextIdle = Promise.withResolvers<void>();
+      const waitingAgain = Promise.withResolvers<void>();
+      let waits = 0;
+      let nativeCalls = 0;
+      harness.isIdle = () => !native.state.active;
+      harness.waitForIdle = async () => {
+        waits++;
+        if (waits === 1) native.state.active = false;
+        else {
+          waitingAgain.resolve();
+          await nextIdle.promise;
+        }
+      };
+      harness.executeTool = async (name, input) => {
+        // Race after initial admission, during the actual tool preflight.
+        native.state.active = true;
+        const decision = await harness.guard()(
+          name,
+          z.record(z.string(), z.unknown()).parse(input),
+          context(parent),
+        );
+        expect(decision).toBeUndefined();
+        nativeCalls++;
+        return native.execute(input);
+      };
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const timeout = globalThis.setTimeout;
+      const delays: number[] = [];
+      const timerSpy = spyOn(globalThis, "setTimeout");
+      const message = envelope(parent, manager, digest, "native-busy-race", "report");
+      const send = harness.rpc("omo.initiative.send");
+      const pending = send(message);
+      const deadline = timeout(() => waitingAgain.reject(new Error("No event readmission")), 3000);
+      try {
+        await waitingAgain.promise;
+        expect(nativeCalls).toBe(0);
+        expect(native.state.promptCalls).toBe(0);
+        native.state.active = false;
+        native.state.turnId = undefined;
+        nextIdle.resolve();
+        expect(value(resultSchema(deliveryRecordSchema).parse(await pending)).state).toBe(
+          "accepted",
+        );
+        await send(message);
+        expect(nativeCalls).toBe(1);
+        expect(native.state.accepted).toBe(1);
+        for (const call of timerSpy.mock.calls)
+          if (typeof call[1] === "number") delays.push(call[1]);
+        expect(delays).not.toContain(50);
+      } finally {
+        clearTimeout(deadline);
+        nextIdle.resolve();
+        timerSpy.mockRestore();
+      }
+    } finally {
+      registry.close();
+    }
+  });
+});
 
 test("native pre-delivery turn conflict is distinct and replay cannot re-read the target", async () => {
   const f = await fixture();

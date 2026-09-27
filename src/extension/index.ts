@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@code-yeongyu/senpi";
 import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
+import { isManagerIdle, registerManagerIdle } from "./manager-idle";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
 
 export function questionWaitWire(
@@ -22,6 +23,7 @@ export function questionWaitWire(
 }
 
 export default function initiativeExtension(pi: ExtensionAPI): void {
+  registerManagerIdle(pi);
   const port: RuntimePort = {
     onSessionStart(handler): void {
       pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
@@ -33,7 +35,8 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
     pauseGoal,
     ownsGoalPause,
     resumeGoal,
-    waitForIdle: waitForAnswerIdle,
+    waitForIdle: (target, timeoutMs) => waitForAnswerIdle(target, undefined, timeoutMs),
+    isIdle: isManagerIdle,
     onUserInterrupt(handler): void {
       pi.on("session_abort", (_event, ctx) => handler(contextPort(ctx)));
       pi.on("agent_end", (event, ctx) => {

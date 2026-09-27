@@ -1,5 +1,6 @@
 import { delimiter, join, resolve } from "node:path";
 import { RoutingError } from "./routing-plan";
+import { readRoutingAdvice } from "./routing-sync";
 
 /** Resolve the global installation, never this wrapper or a repository's pinned CLI. */
 export function globalOmo(): string {
@@ -23,4 +24,8 @@ export async function ensureRouting(root: string, upstream = globalOmo()): Promi
     throw new RoutingError(
       `Upstream routing check failed (${code}); previous settings were retained`,
     );
+}
+
+export async function routingAdvice(home: string) {
+  return readRoutingAdvice(join(home, ".omo/proxy-routing"));
 }

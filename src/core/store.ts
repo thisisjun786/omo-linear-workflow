@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   Assignment,
   Binding,
+  ChildStage,
   ClaimResult,
   DeliveryAttempt,
   DeliveryRecord,
@@ -10,6 +11,7 @@ import type {
   Envelope,
   InitializationClaim,
   NativeReceipt,
+  ReattachClaim,
   Registry,
   ReserveInput,
   Result,
@@ -17,6 +19,11 @@ import type {
   RuntimeIdentity,
   ScopeFilter,
   ScopeSnapshot,
+  StageHandoff,
+  StageLineage,
+  StageRecord,
+  SuccessorLaunchClaim,
+  SuccessorLaunchIntent,
 } from "./contracts";
 import { createDeliveryAttempts } from "./delivery-attempts";
 import { canRetryDelivery, initializationMessageId, matchesRuntime } from "./policy";
@@ -31,6 +38,7 @@ import {
   runtimeIdentitySchema,
   scopeSnapshotSchema,
 } from "./schema";
+import { createStageLineage, StageHandoffStorageError } from "./stage-lineage";
 
 interface JsonRow {
   readonly json: string;
@@ -81,6 +89,7 @@ function validateSnapshot(value: unknown): Result<ScopeSnapshot> {
 }
 
 function ownershipKey(assignment: Assignment): string {
+  if (assignment.role === "manager") return "manager";
   if (assignment.role === "supervisor") return `initiative:${assignment.initiativeId}`;
   if (assignment.role === "parent") return `project:${assignment.projectId}`;
   return `issue:${assignment.issueId}`;
@@ -103,6 +112,13 @@ function parseDesignation(row: JsonRow | null): Result<Designation> {
 }
 
 function assignmentAllowed(snapshot: ScopeSnapshot, assignment: Assignment): Result<true> {
+  if (assignment.role === "manager")
+    return snapshot.source === "linear-export" &&
+      snapshot.initiative === null &&
+      snapshot.projects.length === 0 &&
+      snapshot.decisionRefs.length === 0
+      ? ok(true)
+      : error("scope_violation", "Manager requires an empty scope-free snapshot");
   if (assignment.initiativeId !== (snapshot.initiative?.id ?? null))
     return error("scope_violation", "Initiative is outside the designated snapshot");
   if (assignment.role === "supervisor") return ok(true);
@@ -146,6 +162,23 @@ export function openRegistry(
     db.run(
       "CREATE UNIQUE INDEX IF NOT EXISTS bindings_live_owner ON bindings(ownership_key) WHERE launch_state <> 'closed'",
     );
+    db.run(`CREATE TABLE IF NOT EXISTS manager_reattach (
+    binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+    claimed_at TEXT NOT NULL,
+    owner TEXT NOT NULL
+  )`);
+    db.run(`CREATE TABLE IF NOT EXISTS successor_launch (
+    binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+    state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
+    claimed_at TEXT NOT NULL,
+    owner TEXT NOT NULL
+  )`);
+    const successorColumns = db
+      .query<{ readonly name: string }, []>("PRAGMA table_info(successor_launch)")
+      .all();
+    if (!successorColumns.some((column) => column.name === "state")) {
+      db.run("ALTER TABLE successor_launch ADD COLUMN state TEXT NOT NULL DEFAULT 'claimed'");
+    }
     db.run(`CREATE TABLE IF NOT EXISTS deliveries (
     message_id TEXT PRIMARY KEY,
     envelope_json TEXT NOT NULL,
@@ -156,6 +189,7 @@ export function openRegistry(
   }
 
   const attempts = createDeliveryAttempts(db, options.readonly ?? false);
+  const lineage = createStageLineage(db, options.readonly ?? false);
   const bindingById = db.query<JsonRow, [string]>("SELECT json FROM bindings WHERE id = ?");
   const bindingBySession = db.query<JsonRow, [string]>(
     "SELECT json FROM bindings WHERE durable_session_id = ?",
@@ -179,6 +213,12 @@ export function openRegistry(
     return ok(history.length === 0 ? parsed.data : { ...parsed.data, attempts: history });
   }
 
+  function storageFailure<T>(cause: unknown, message: string): Result<T> {
+    return cause instanceof StageHandoffStorageError
+      ? error("storage_corrupt", cause.message, cause.details)
+      : error("storage_error", message, messageOf(cause));
+  }
+
   function transaction<T>(operation: () => Result<T>): Result<T> {
     try {
       db.run("BEGIN IMMEDIATE");
@@ -194,7 +234,7 @@ export function openRegistry(
           rollback: messageOf(rollbackCause),
         });
       }
-      return error("storage_error", "Registry transaction failed", messageOf(cause));
+      return storageFailure(cause, "Registry transaction failed");
     }
   }
 
@@ -238,7 +278,16 @@ export function openRegistry(
       return error("digest_mismatch", "Designation does not match the snapshot");
     const membership = assignmentAllowed(validScope.value, input.assignment);
     if (!membership.ok) return membership;
-    if (input.assignment.role !== "supervisor" && !input.designation.create) {
+    if (
+      input.assignment.role === "manager" &&
+      (!input.designation.execute || !input.designation.create || !input.designation.contact)
+    )
+      return error("scope_violation", "Manager designation requires execute, create and contact");
+    if (
+      input.assignment.role !== "supervisor" &&
+      input.assignment.role !== "manager" &&
+      !input.designation.create
+    ) {
       return error("create_denied", "Designation does not permit role creation");
     }
     if (
@@ -248,92 +297,295 @@ export function openRegistry(
     ) {
       return error("execute_denied", "Standalone parent creation requires execution approval");
     }
-    return transaction(() => {
-      const existingScope = scopeByDigest.get(digest);
-      if (existingScope === null)
-        db.query("INSERT INTO scopes (digest, json) VALUES (?, ?)").run(
-          digest,
-          encoded(validScope.value),
-        );
-      else if (existingScope.json !== encoded(validScope.value))
-        return error("digest_conflict", "Scope digest has different content");
+    return transaction(() => reserveInTransaction(input, validScope.value, digest));
+  }
 
-      const priorDesignation = designationById.get(input.designation.id);
-      if (priorDesignation === null) {
-        db.query("INSERT INTO designations (id, scope_digest, json) VALUES (?, ?, ?)").run(
-          input.designation.id,
-          digest,
-          encoded(input.designation),
-        );
-      } else {
-        const prior = parseDesignation(priorDesignation);
-        if (!prior.ok) return prior;
-        if (!same(prior.value, input.designation))
-          return error("designation_conflict", "Designation ID is immutable");
+  function reserveInTransaction(
+    input: ReserveInput,
+    snapshot: ScopeSnapshot,
+    digest: string,
+  ): Result<Binding> {
+    const existingScope = scopeByDigest.get(digest);
+    if (existingScope === null)
+      db.query("INSERT INTO scopes (digest, json) VALUES (?, ?)").run(digest, encoded(snapshot));
+    else if (existingScope.json !== encoded(snapshot))
+      return error("digest_conflict", "Scope digest has different content");
+
+    const priorDesignation = designationById.get(input.designation.id);
+    if (priorDesignation === null) {
+      db.query("INSERT INTO designations (id, scope_digest, json) VALUES (?, ?, ?)").run(
+        input.designation.id,
+        digest,
+        encoded(input.designation),
+      );
+    } else {
+      const prior = parseDesignation(priorDesignation);
+      if (!prior.ok) return prior;
+      if (!same(prior.value, input.designation))
+        return error("designation_conflict", "Designation ID is immutable");
+    }
+
+    if (
+      input.assignment.role !== "supervisor" &&
+      input.assignment.role !== "manager" &&
+      input.assignment.ownerBindingId !== null
+    ) {
+      const owner = get(input.assignment.ownerBindingId);
+      if (!owner.ok) return error("owner_mismatch", "Owner binding does not exist");
+      if (
+        owner.value.launchState === "closing" ||
+        owner.value.launchState === "closed" ||
+        owner.value.contactState === "cancelled"
+      ) {
+        return error("owner_unavailable", "Owner is closing or cancelled");
       }
-
-      if (input.assignment.role !== "supervisor" && input.assignment.ownerBindingId !== null) {
-        const owner = get(input.assignment.ownerBindingId);
-        if (!owner.ok) return error("owner_mismatch", "Owner binding does not exist");
-        if (
-          owner.value.launchState === "closing" ||
-          owner.value.launchState === "closed" ||
-          owner.value.contactState === "cancelled"
-        ) {
-          return error("owner_unavailable", "Owner is closing or cancelled");
-        }
-        const expectedRole = input.assignment.role === "parent" ? "supervisor" : "parent";
-        if (
-          owner.value.assignment.role !== expectedRole ||
+      const managerOwner =
+        input.assignment.role === "parent" && owner.value.assignment.role === "manager";
+      if (managerOwner) {
+        const approval = designationFor(owner.value.designationId);
+        if (!approval.ok) return approval;
+        if (!approval.value.contact || !input.designation.contact)
+          return error("contact_denied", "Both approvals must permit contact");
+        if (!input.designation.execute)
+          return error("execute_denied", "Parent approval must permit execution");
+      }
+      if (
+        !managerOwner &&
+        (owner.value.assignment.role !==
+          (input.assignment.role === "parent" ? "supervisor" : "parent") ||
           owner.value.designationId !== input.designation.id ||
           owner.value.assignment.initiativeId !== input.assignment.initiativeId ||
           (input.assignment.role === "child" &&
             owner.value.assignment.role === "parent" &&
-            owner.value.assignment.projectId !== input.assignment.projectId)
-        ) {
-          return error("owner_mismatch", "Owner edge does not match the assignment");
-        }
+            owner.value.assignment.projectId !== input.assignment.projectId))
+      ) {
+        return error("owner_mismatch", "Owner edge does not match the assignment");
       }
-      const owner = db
-        .query<{ readonly id: string }, [string]>(
-          "SELECT id FROM bindings WHERE ownership_key = ? AND launch_state <> 'closed'",
-        )
-        .get(ownershipKey(input.assignment));
-      if (owner !== null)
-        return error("ownership_conflict", "Scope already has a live owner", {
-          bindingId: owner.id,
+    }
+    const owner = db
+      .query<{ readonly id: string }, [string]>(
+        "SELECT id FROM bindings WHERE ownership_key = ? AND launch_state <> 'closed'",
+      )
+      .get(ownershipKey(input.assignment));
+    if (owner !== null)
+      return error("ownership_conflict", "Scope already has a live owner", {
+        bindingId: owner.id,
+      });
+    if (bindingById.get(input.bindingId) !== null)
+      return error("binding_conflict", "Binding ID already exists");
+    if (bindingBySession.get(input.durableSessionId) !== null)
+      return error("session_conflict", "Durable session already belongs to a binding");
+    const binding: Binding = {
+      id: input.bindingId,
+      designationId: input.designation.id,
+      assignment: input.assignment,
+      ...(input.assignment.role === "child" ? { deliverable: input.deliverable ?? "pr" } : {}),
+      durableSessionId: input.durableSessionId,
+      cwd: input.cwd,
+      checkout: input.checkout,
+      herdrSocket: input.herdrSocket,
+      omoSocket: input.omoSocket,
+      workspaceId: null,
+      paneId: null,
+      sessionPath: null,
+      launchState: "reserved",
+      contactState: "active",
+      initialization: { state: "pending", text: null },
+    };
+    db.query(
+      "INSERT INTO bindings (id, designation_id, durable_session_id, ownership_key, launch_state, json) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(
+      binding.id,
+      binding.designationId,
+      binding.durableSessionId,
+      ownershipKey(binding.assignment),
+      binding.launchState,
+      encoded(binding),
+    );
+    return ok(binding);
+  }
+
+  function stageOf(bindingId: string): Result<StageRecord | null> {
+    try {
+      return ok(lineage.get(bindingId));
+    } catch (cause) {
+      return storageFailure(cause, "Could not read stage");
+    }
+  }
+  function stageChain(issueId: string): Result<StageRecord[]> {
+    try {
+      return ok(lineage.chain(issueId));
+    } catch (cause) {
+      return storageFailure(cause, "Could not read stage chain");
+    }
+  }
+  function lineageFor(bindingId: string): Result<StageLineage> {
+    try {
+      const binding = get(bindingId);
+      if (!binding.ok) return binding;
+      if (binding.value.assignment.role !== "child")
+        return error("invalid_stage", "Only children have stage lineage");
+      const issueId = binding.value.assignment.issueId;
+      const stage = stageOf(bindingId);
+      if (!stage.ok) return stage;
+      if (stage.value === null)
+        return ok({
+          issueId,
+          mode: "direct",
+          stages: [
+            { bindingId, stage: "direct", ordinal: 0, launchState: binding.value.launchState },
+          ],
         });
-      if (bindingById.get(input.bindingId) !== null)
-        return error("binding_conflict", "Binding ID already exists");
-      if (bindingBySession.get(input.durableSessionId) !== null)
-        return error("session_conflict", "Durable session already belongs to a binding");
-      const binding: Binding = {
-        id: input.bindingId,
-        designationId: input.designation.id,
-        assignment: input.assignment,
-        durableSessionId: input.durableSessionId,
-        cwd: input.cwd,
-        checkout: input.checkout,
-        herdrSocket: input.herdrSocket,
-        omoSocket: input.omoSocket,
-        workspaceId: null,
-        paneId: null,
-        sessionPath: null,
-        launchState: "reserved",
-        contactState: "active",
-        initialization: { state: "pending", text: null },
-      };
-      db.query(
-        "INSERT INTO bindings (id, designation_id, durable_session_id, ownership_key, launch_state, json) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(
-        binding.id,
-        binding.designationId,
-        binding.durableSessionId,
-        ownershipKey(binding.assignment),
-        binding.launchState,
-        encoded(binding),
+      const stages = lineage.generationOf(bindingId).map((entry) => {
+        const current = get(entry.bindingId);
+        return {
+          bindingId: entry.bindingId,
+          stage: entry.stage,
+          ordinal: entry.ordinal,
+          launchState: current.ok ? current.value.launchState : ("closed" as const),
+        };
+      });
+      return ok({
+        issueId,
+        mode: stages[0]?.stage === "plan" ? "planned" : (stages[0]?.stage ?? "direct"),
+        stages,
+      });
+    } catch (cause) {
+      return storageFailure(cause, "Could not read stage lineage");
+    }
+  }
+  function recordStage(
+    bindingId: string,
+    issueId: string,
+    stage: ChildStage,
+    ordinal: number,
+    previousBindingId: string | null,
+  ): Result<StageRecord> {
+    return transaction(() => {
+      const binding = get(bindingId);
+      if (!binding.ok) return binding;
+      if (
+        binding.value.assignment.role !== "child" ||
+        binding.value.assignment.issueId !== issueId ||
+        !["direct", "plan", "execute", "research"].includes(stage) ||
+        !Number.isSafeInteger(ordinal) ||
+        ordinal < 0
+      )
+        return error("invalid_stage", "Stage does not match child binding");
+      if (lineage.get(bindingId) !== null) return error("stage_conflict", "Stage already recorded");
+      const chain = lineage.chain(issueId);
+      if (previousBindingId === null) {
+        if (ordinal !== 0)
+          return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+        const live = chain.some((entry) => {
+          const current = get(entry.bindingId);
+          return current.ok && current.value.launchState !== "closed";
+        });
+        if (live) return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+      } else {
+        if (chain.at(-1)?.handoff === null || chain.at(-1)?.handoff === undefined)
+          return error("handoff_missing", "Previous stage has no handoff");
+        if (
+          chain.at(-1)?.bindingId !== previousBindingId ||
+          ordinal !== (chain.at(-1)?.ordinal ?? -1) + 1
+        )
+          return error("stage_conflict", "Stage predecessor or ordinal is invalid");
+      }
+      const generation =
+        previousBindingId === null
+          ? lineage.nextGeneration(issueId)
+          : lineage.generationNumber(previousBindingId);
+      lineage.insert(bindingId, issueId, stage, ordinal, previousBindingId, generation);
+      return ok({ bindingId, issueId, stage, ordinal, previousBindingId, handoff: null });
+    });
+  }
+  function recordHandoff(bindingId: string, handoff: StageHandoff): Result<StageRecord> {
+    return transaction(() => {
+      const binding = get(bindingId);
+      if (!binding.ok) return binding;
+      const stage = lineage.get(bindingId);
+      if (
+        binding.value.launchState !== "ready" ||
+        binding.value.assignment.role !== "child" ||
+        stage?.stage !== "plan"
+      )
+        return error("handoff_not_allowed", "Handoff requires a ready plan owner");
+      if (stage.handoff !== null && !same(stage.handoff, handoff)) {
+        const legacyRecovery =
+          stage.handoff.completionReportId === undefined &&
+          handoff.completionReportId !== undefined &&
+          stage.handoff.planPath === handoff.planPath &&
+          stage.handoff.planSha256 === handoff.planSha256 &&
+          stage.handoff.head === handoff.head &&
+          stage.handoff.completedAt === handoff.completedAt;
+        if (!legacyRecovery) return error("handoff_conflict", "Handoff is immutable");
+      }
+      lineage.handoff(bindingId, handoff);
+      return ok({ ...stage, handoff });
+    });
+  }
+  function successorReservation(
+    previousBindingId: string,
+    input: ReserveInput,
+    nextStage: ChildStage,
+  ): Result<Binding> {
+    const parsed = reserveInputSchema.safeParse(input);
+    if (!parsed.success)
+      return error("invalid_input", "Reservation input is invalid", parsed.error.issues);
+    if (!["direct", "plan", "execute", "research"].includes(nextStage))
+      return error("invalid_stage", "Successor stage is invalid");
+    const scope = validateSnapshot(parsed.data.snapshot);
+    if (!scope.ok) return scope;
+    const digest = digestOf(scope.value);
+    if (parsed.data.designation.snapshotDigest !== digest)
+      return error("digest_mismatch", "Designation does not match the snapshot");
+    const membership = assignmentAllowed(scope.value, parsed.data.assignment);
+    if (!membership.ok) return membership;
+    if (!parsed.data.designation.create)
+      return error("create_denied", "Designation does not permit role creation");
+    return transaction(() => {
+      const previous = get(previousBindingId);
+      if (!previous.ok) return previous;
+      const priorStage = lineage.get(previousBindingId);
+      if (priorStage?.handoff === null || priorStage === null)
+        return error("handoff_missing", "Previous stage has no handoff");
+      if (
+        previous.value.launchState !== "ready" ||
+        previous.value.assignment.role !== "child" ||
+        parsed.data.assignment.role !== "child" ||
+        ownershipKey(previous.value.assignment) !== ownershipKey(parsed.data.assignment) ||
+        previous.value.assignment.ownerBindingId !== parsed.data.assignment.ownerBindingId ||
+        previous.value.designationId !== parsed.data.designation.id ||
+        lineage.successor(previousBindingId) !== null
+      )
+        return error(
+          "stage_conflict",
+          "Previous stage is not the live owner or already has a successor",
+        );
+      if (
+        db
+          .query(
+            "SELECT message_id FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? AND state IN ('sending', 'uncertain') LIMIT 1",
+          )
+          .get(previousBindingId) !== null
+      )
+        return error("stage_in_flight", "Previous stage has an unresolved delivery");
+      const closing = beginCloseInTransaction(previousBindingId);
+      if (!closing.ok) return closing;
+      const closed = finishCloseInTransaction(previousBindingId);
+      if (!closed.ok) return closed;
+      const successor = reserveInTransaction(parsed.data, scope.value, digest);
+      if (!successor.ok) return successor;
+      const generation = lineage.generationNumber(previousBindingId);
+      lineage.insert(
+        successor.value.id,
+        priorStage.issueId,
+        nextStage,
+        priorStage.ordinal + 1,
+        previousBindingId,
+        generation,
       );
-      return ok(binding);
+      return successor;
     });
   }
 
@@ -372,6 +624,368 @@ export function openRegistry(
       if (binding.value.sessionPath !== null && binding.value.sessionPath !== sessionPath)
         return error("identity_conflict", "Observed session path is immutable");
       return saveBinding({ ...binding.value, sessionPath });
+    });
+  }
+
+  function readyManager(id: string): Result<Binding> {
+    const binding = get(id);
+    if (!binding.ok) return binding;
+    return binding.value.assignment.role === "manager" && binding.value.launchState === "ready"
+      ? binding
+      : error("invalid_transition", "Only a ready manager can move to a new TUI pane");
+  }
+
+  function reattachClaim(
+    id: string,
+  ): { readonly claimed_at: string; readonly owner: string } | null {
+    return db
+      .query<{ readonly claimed_at: string; readonly owner: string }, [string]>(
+        "SELECT claimed_at, owner FROM manager_reattach WHERE binding_id = ?",
+      )
+      .get(id);
+  }
+
+  function ownsReattach(id: string, token: string): Result<boolean> {
+    try {
+      return ok(reattachClaim(id)?.owner === token);
+    } catch (cause) {
+      return error("storage_error", "Could not read manager reattachment", messageOf(cause));
+    }
+  }
+
+  function beginReattach(
+    id: string,
+    expectedPaneId: string | null,
+    claimedAt: string,
+    staleBefore: string,
+  ): Result<ReattachClaim> {
+    return transaction<ReattachClaim>(() => {
+      const binding = readyManager(id);
+      if (!binding.ok) return binding;
+      const held = reattachClaim(id);
+      // Compare-and-set: a changed pane or a live claim means another caller owns reattachment.
+      if (
+        binding.value.paneId !== expectedPaneId ||
+        (held !== null && held.claimed_at >= staleBefore)
+      )
+        return ok({ claimed: false, binding: binding.value });
+      const token = randomUUID();
+      db.query(
+        "INSERT INTO manager_reattach (binding_id, claimed_at, owner) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner",
+      ).run(id, claimedAt, token);
+      return ok({ claimed: true, binding: binding.value, token });
+    });
+  }
+
+  function recordReattachPane(id: string, token: string, paneId: string): Result<Binding> {
+    if (paneId.length === 0) return error("invalid_input", "Pane ID is required");
+    return transaction(() => {
+      const binding = readyManager(id);
+      if (!binding.ok) return binding;
+      if (reattachClaim(id)?.owner !== token)
+        return error("lease_lost", "Manager reattachment is owned by another caller");
+      return saveBinding({ ...binding.value, paneId });
+    });
+  }
+
+  function reattachPending(id: string): Result<boolean> {
+    try {
+      return ok(reattachClaim(id) !== null);
+    } catch (cause) {
+      return error("storage_error", "Could not read manager reattachment", messageOf(cause));
+    }
+  }
+
+  function releaseReattach(id: string, token: string): Result<boolean> {
+    try {
+      // An empty timestamp precedes every lease cutoff, so the next caller can claim at once.
+      const released = db
+        .query("UPDATE manager_reattach SET claimed_at = '' WHERE binding_id = ? AND owner = ?")
+        .run(id, token);
+      return ok(released.changes === 1);
+    } catch (cause) {
+      return error("storage_error", "Could not release manager reattachment", messageOf(cause));
+    }
+  }
+
+  function finishReattach(id: string, token: string): Result<boolean> {
+    try {
+      const finished = db
+        .query("DELETE FROM manager_reattach WHERE binding_id = ? AND owner = ?")
+        .run(id, token);
+      return ok(finished.changes === 1);
+    } catch (cause) {
+      return error("storage_error", "Could not release manager reattachment", messageOf(cause));
+    }
+  }
+
+  function successorLaunchClaim(id: string): {
+    readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
+    readonly claimed_at: string;
+    readonly owner: string;
+  } | null {
+    return db
+      .query<
+        {
+          readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
+          readonly claimed_at: string;
+          readonly owner: string;
+        },
+        [string]
+      >("SELECT state, claimed_at, owner FROM successor_launch WHERE binding_id = ?")
+      .get(id);
+  }
+
+  function beginSuccessorLaunch(
+    id: string,
+    expectedPaneId: string | null,
+    claimedAt: string,
+    staleBefore: string,
+  ): Result<SuccessorLaunchClaim> {
+    return transaction<SuccessorLaunchClaim>(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const stage = lineage.get(id);
+      if (binding.value.assignment.role !== "child" || stage?.stage !== "execute")
+        return error("invalid_stage", "Only an execute successor can be launched");
+      const held = successorLaunchClaim(id);
+      if (binding.value.paneId !== expectedPaneId)
+        return ok({
+          claimed: false,
+          binding: binding.value,
+          state: held?.state ?? "claimed",
+        });
+      if (
+        held !== null &&
+        held.state !== "ready" &&
+        (held.state !== "claimed" || held.claimed_at >= staleBefore)
+      )
+        return ok({ claimed: false, binding: binding.value, state: held.state });
+      const token = randomUUID();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES (?, 'claimed', ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state = 'claimed', claimed_at = excluded.claimed_at, owner = excluded.owner",
+      ).run(id, claimedAt, token);
+      return ok({ claimed: true, binding: binding.value, token });
+    });
+  }
+
+  function successorLaunchIntent(id: string): Result<SuccessorLaunchIntent | null> {
+    try {
+      const held = successorLaunchClaim(id);
+      return ok(held === null ? null : { attemptId: held.owner, state: held.state });
+    } catch (cause) {
+      return error("storage_error", "Could not read successor launch intent", messageOf(cause));
+    }
+  }
+
+  function ownsSuccessorLaunch(id: string, token: string): Result<boolean> {
+    try {
+      return ok(successorLaunchClaim(id)?.owner === token);
+    } catch (cause) {
+      return error("storage_error", "Could not read successor launch claim", messageOf(cause));
+    }
+  }
+
+  function successorOwner(id: string, token: string, state?: "claimed" | "dispatching") {
+    const held = successorLaunchClaim(id);
+    return held !== null && held.owner === token && (state === undefined || held.state === state);
+  }
+
+  function successorMutation(
+    id: string,
+    token: string,
+    operation: (binding: Binding) => Result<Binding>,
+    state?: "claimed" | "dispatching",
+  ): Result<Binding> {
+    return transaction(() => {
+      if (!successorOwner(id, token, state))
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      const binding = get(id);
+      return binding.ok ? operation(binding.value) : binding;
+    });
+  }
+
+  function provisionSuccessorLaunch(
+    id: string,
+    token: string,
+    workspaceId: string,
+    paneId: string,
+  ): Result<Binding> {
+    if (workspaceId.length === 0 || paneId.length === 0)
+      return error("invalid_input", "Workspace and pane IDs are required");
+    return successorMutation(
+      id,
+      token,
+      (binding) =>
+        binding.launchState === "reserved"
+          ? saveBinding({ ...binding, workspaceId, paneId, launchState: "provisioning" })
+          : error("invalid_transition", "Only a reserved binding can be provisioned"),
+      "claimed",
+    );
+  }
+
+  function prepareSuccessorLaunch(id: string, token: string): Result<Binding> {
+    return successorMutation(
+      id,
+      token,
+      (binding) =>
+        binding.launchState === "closed" || binding.launchState === "closing"
+          ? error("invalid_transition", "A closing binding cannot be reopened")
+          : saveBinding({ ...binding, launchState: "provisioning" }),
+      "claimed",
+    );
+  }
+
+  function observeSuccessorSession(
+    id: string,
+    token: string,
+    sessionPath: string,
+  ): Result<Binding> {
+    if (sessionPath.length === 0) return error("invalid_input", "Session path is required");
+    return successorMutation(id, token, (binding) => {
+      if (binding.launchState !== "provisioning")
+        return error("invalid_transition", "Session observation requires provisioning");
+      if (binding.sessionPath !== null && binding.sessionPath !== sessionPath)
+        return error("identity_conflict", "Observed session path is immutable");
+      return saveBinding({ ...binding, sessionPath });
+    });
+  }
+
+  function activateSuccessorLaunch(
+    id: string,
+    token: string,
+    identityValue: RuntimeIdentity,
+  ): Result<Binding> {
+    const identity = runtimeIdentitySchema.safeParse(identityValue);
+    if (!identity.success)
+      return error("invalid_input", "Runtime identity is invalid", identity.error.issues);
+    return successorMutation(id, token, (binding) => {
+      if (
+        binding.launchState !== "provisioning" ||
+        binding.sessionPath === null ||
+        binding.workspaceId === null ||
+        binding.paneId === null
+      )
+        return error("invalid_transition", "Activation requires an observed provisioning session");
+      if (!matchesRuntime(binding, identity.data))
+        return error("identity_mismatch", "Runtime identity does not match the reserved role");
+      return saveBinding({
+        ...binding,
+        launchState: binding.initialization.state === "accepted" ? "ready" : "initializing",
+      });
+    });
+  }
+
+  function dispatchSuccessorLaunch(id: string, token: string): Result<Binding> {
+    return transaction(() => {
+      if (!successorOwner(id, token, "claimed"))
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      db.query(
+        "UPDATE successor_launch SET state = 'dispatching' WHERE binding_id = ? AND owner = ? AND state = 'claimed'",
+      ).run(id, token);
+      return get(id);
+    });
+  }
+
+  function reconcileSuccessorLaunch(
+    id: string,
+    attemptId: string,
+    expectedState: "claimed" | "uncertain",
+    identityValue: RuntimeIdentity,
+  ): Result<Binding> {
+    const identity = runtimeIdentitySchema.safeParse(identityValue);
+    if (!identity.success)
+      return error("invalid_input", "Runtime identity is invalid", identity.error.issues);
+    return transaction(() => {
+      const held = successorLaunchClaim(id);
+      if (held === null || held.owner !== attemptId || held.state !== expectedState)
+        return error("lease_lost", "Execute recovery attempt changed during observation");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (binding.value.launchState === "closing" || binding.value.launchState === "closed")
+        return binding;
+      if (!matchesRuntime(binding.value, identity.data))
+        return error("identity_mismatch", "Runtime identity does not match the reserved role", {
+          binding: binding.value,
+          identity: identity.data,
+        });
+      return saveBinding({
+        ...binding.value,
+        launchState: binding.value.initialization.state === "accepted" ? "ready" : "initializing",
+      });
+    });
+  }
+
+  function failSuccessorLaunch(id: string, token: string): Result<Binding> {
+    return transaction(() => {
+      const held = successorLaunchClaim(id);
+      if (held === null || held.owner !== token)
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (binding.value.launchState === "closing" || binding.value.launchState === "closed") {
+        db.query(
+          "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
+        ).run(id, token);
+        return binding;
+      }
+      if (held.state === "claimed") {
+        db.query("DELETE FROM successor_launch WHERE binding_id = ? AND owner = ?").run(id, token);
+        return binding;
+      }
+      if (held.state === "dispatching") {
+        const saved =
+          binding.value.launchState === "reserved"
+            ? binding
+            : saveBinding({ ...binding.value, launchState: "uncertain" });
+        if (!saved.ok) return saved;
+        db.query(
+          "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
+        ).run(id, token);
+        return saved;
+      }
+      return error("invalid_transition", "Execute recovery is already settled");
+    });
+  }
+
+  function finishSuccessorLaunch(
+    id: string,
+    token: string,
+    state: "ready" | "uncertain",
+  ): Result<Binding> {
+    return transaction(() => {
+      if (!successorOwner(id, token))
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      const held = successorLaunchClaim(id);
+      if (
+        held?.state !== "claimed" &&
+        held?.state !== "dispatching" &&
+        !(held?.state === "uncertain" && state === "ready")
+      )
+        return error("invalid_transition", "Execute recovery is already settled");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (binding.value.launchState === "closing" || binding.value.launchState === "closed") {
+        db.query("UPDATE successor_launch SET state = ? WHERE binding_id = ? AND owner = ?").run(
+          state,
+          id,
+          token,
+        );
+        return binding;
+      }
+      const saved =
+        state === "uncertain" && binding.value.launchState !== "reserved"
+          ? saveBinding({ ...binding.value, launchState: "uncertain" })
+          : state === "ready" && binding.value.initialization.state === "accepted"
+            ? saveBinding({ ...binding.value, launchState: "ready" })
+            : binding;
+      if (!saved.ok) return saved;
+      db.query("UPDATE successor_launch SET state = ? WHERE binding_id = ? AND owner = ?").run(
+        state,
+        id,
+        token,
+      );
+      return saved;
     });
   }
 
@@ -428,8 +1042,25 @@ export function openRegistry(
   }
 
   function managerApproval(parent: Binding, supervisor: Binding): Result<true> {
-    if (parent.assignment.role !== "parent" || supervisor.assignment.role !== "supervisor")
-      return error("owner_mismatch", "Management links require a parent and a supervisor");
+    if (
+      parent.assignment.role !== "parent" ||
+      (supervisor.assignment.role !== "supervisor" && supervisor.assignment.role !== "manager")
+    )
+      return error(
+        "owner_mismatch",
+        "Management links require a parent and a manager or supervisor",
+      );
+    if (supervisor.assignment.role === "manager") {
+      const parentApproval = designationFor(parent.designationId);
+      if (!parentApproval.ok) return parentApproval;
+      const managerDesignation = designationFor(supervisor.designationId);
+      if (!managerDesignation.ok) return managerDesignation;
+      if (!parentApproval.value.contact || !managerDesignation.value.contact)
+        return error("contact_denied", "Both approvals must permit contact");
+      return parentApproval.value.execute
+        ? ok(true)
+        : error("execute_denied", "Parent approval must permit execution");
+    }
     const approval = designationFor(supervisor.designationId);
     if (!approval.ok) return approval;
     const row = scopeByDigest.get(approval.value.snapshotDigest);
@@ -471,7 +1102,11 @@ export function openRegistry(
           if (!approval.ok) return approval;
           if (!approval.value.contact)
             return error("contact_denied", "Both approvals must permit contact");
-          if (!approval.value.execute)
+          if (
+            !approval.value.execute &&
+            (binding.assignment.role !== "manager" ||
+              supervisor.value.assignment.role !== "manager")
+          )
             return error("execute_denied", "Both approvals must permit execution");
         }
       }
@@ -484,28 +1119,32 @@ export function openRegistry(
   }
 
   function beginClose(id: string): Result<Binding> {
-    return transaction(() => {
-      const binding = get(id);
-      if (!binding.ok || binding.value.launchState === "closed") return binding;
-      const child = db
-        .query<{ readonly id: string }, [string]>(
-          "SELECT id FROM bindings WHERE json_extract(json, '$.assignment.role') = 'child' AND json_extract(json, '$.assignment.ownerBindingId') = ? AND launch_state <> 'closed' LIMIT 1",
-        )
-        .get(id);
-      if (child !== null)
-        return error("children_active", "Close child owners first", { bindingId: child.id });
-      return saveBinding({ ...binding.value, launchState: "closing", contactState: "cancelled" });
-    });
+    return transaction(() => beginCloseInTransaction(id));
+  }
+
+  function beginCloseInTransaction(id: string): Result<Binding> {
+    const binding = get(id);
+    if (!binding.ok || binding.value.launchState === "closed") return binding;
+    const child = db
+      .query<{ readonly id: string }, [string]>(
+        "SELECT id FROM bindings WHERE json_extract(json, '$.assignment.role') = 'child' AND json_extract(json, '$.assignment.ownerBindingId') = ? AND launch_state <> 'closed' LIMIT 1",
+      )
+      .get(id);
+    if (child !== null)
+      return error("children_active", "Close child owners first", { bindingId: child.id });
+    return saveBinding({ ...binding.value, launchState: "closing", contactState: "cancelled" });
   }
 
   function finishClose(id: string): Result<Binding> {
-    return transaction(() => {
-      const binding = get(id);
-      if (!binding.ok || binding.value.launchState === "closed") return binding;
-      if (binding.value.launchState !== "closing")
-        return error("invalid_transition", "Closure was not started");
-      return saveBinding({ ...binding.value, launchState: "closed" });
-    });
+    return transaction(() => finishCloseInTransaction(id));
+  }
+
+  function finishCloseInTransaction(id: string): Result<Binding> {
+    const binding = get(id);
+    if (!binding.ok || binding.value.launchState === "closed") return binding;
+    if (binding.value.launchState !== "closing")
+      return error("invalid_transition", "Closure was not started");
+    return saveBinding({ ...binding.value, launchState: "closed" });
   }
 
   function beginInitialization(id: string, text: string): Result<InitializationClaim> {
@@ -562,7 +1201,7 @@ export function openRegistry(
 
   function operationalTarget(sender: Binding): Result<Binding> {
     const from = sender.assignment;
-    if (from.role === "supervisor" || from.ownerBindingId === null)
+    if (from.role === "supervisor" || from.role === "manager" || from.ownerBindingId === null)
       return error("no_owner", "No linked owner; operational notice is for the user");
     if (
       sender.contactState !== "active" ||
@@ -652,7 +1291,8 @@ export function openRegistry(
         failure,
         binding: sender.value,
         ownerBindingId:
-          sender.value.assignment.role === "supervisor"
+          sender.value.assignment.role === "supervisor" ||
+          sender.value.assignment.role === "manager"
             ? null
             : sender.value.assignment.ownerBindingId,
         localReason: target.ok ? null : `${target.error.code}: ${target.error.message}`,
@@ -696,6 +1336,11 @@ export function openRegistry(
       return error("route_denied", "User reports use the local inbox, not native delivery");
     const target = get(envelope.toBindingId);
     if (!target.ok) return error("target_unknown", "Target binding was not found");
+    if (target.value.launchState === "closed") {
+      const successorBindingId = lineage.successor(target.value.id);
+      if (successorBindingId !== null)
+        return error("target_retired", "Target binding has a successor", { successorBindingId });
+    }
     const initializing =
       target.value.launchState === "initializing" &&
       target.value.initialization.state === "sending" &&
@@ -711,7 +1356,33 @@ export function openRegistry(
       return error("contact_paused", "A route endpoint is not accepting contact");
     const from = sender.value.assignment;
     const to = target.value.assignment;
+    if (from.role === "child" && to.role === "manager")
+      return error("route_denied", "Children cannot address the manager directly");
     const managerRoute =
+      (envelope.kind === "question" &&
+        from.role === "parent" &&
+        to.role === "manager" &&
+        from.ownerBindingId === target.value.id) ||
+      (envelope.kind === "answer" &&
+        from.role === "manager" &&
+        to.role === "parent" &&
+        to.ownerBindingId === sender.value.id) ||
+      (envelope.kind === "instruction" &&
+        from.role === "manager" &&
+        to.role === "parent" &&
+        to.ownerBindingId === sender.value.id) ||
+      (envelope.kind === "report" &&
+        from.role === "parent" &&
+        to.role === "manager" &&
+        from.ownerBindingId === target.value.id) ||
+      (envelope.kind === "question" &&
+        from.role === "parent" &&
+        to.role === "supervisor" &&
+        from.ownerBindingId === target.value.id) ||
+      (envelope.kind === "answer" &&
+        from.role === "supervisor" &&
+        to.role === "parent" &&
+        to.ownerBindingId === sender.value.id) ||
       (envelope.kind === "instruction" &&
         from.role === "supervisor" &&
         to.role === "parent" &&
@@ -732,17 +1403,23 @@ export function openRegistry(
       return error("digest_mismatch", "Envelope snapshot is not designated");
     if (!designation.value.contact)
       return error("contact_denied", "Designation does not permit contact");
-    if (envelope.kind === "instruction" && !designation.value.execute)
+    if (
+      (envelope.kind === "instruction" || envelope.kind === "answer") &&
+      !designation.value.execute
+    )
       return error("execute_denied", "Designation does not permit execution");
     const targetApproval = designationFor(target.value.designationId);
     if (!targetApproval.ok) return targetApproval;
     if (!targetApproval.value.contact)
       return error("contact_denied", "Target designation does not permit contact");
-    if (envelope.kind === "instruction" && !targetApproval.value.execute)
+    if (
+      (envelope.kind === "instruction" || envelope.kind === "answer") &&
+      !targetApproval.value.execute
+    )
       return error("execute_denied", "Target designation does not permit execution");
     if (managerRoute) {
       const membership =
-        from.role === "supervisor"
+        from.role === "supervisor" || from.role === "manager"
           ? managerApproval(target.value, sender.value)
           : managerApproval(sender.value, target.value);
       if (!membership.ok) return membership;
@@ -756,7 +1433,7 @@ export function openRegistry(
 
     const instruction =
       envelope.kind === "instruction" &&
-      ((from.role === "supervisor" &&
+      (((from.role === "supervisor" || from.role === "manager") &&
         to.role === "parent" &&
         to.ownerBindingId === sender.value.id) ||
         (from.role === "parent" && to.role === "child" && to.ownerBindingId === sender.value.id));
@@ -764,7 +1441,7 @@ export function openRegistry(
       envelope.kind === "report" &&
       ((from.role === "child" && to.role === "parent" && from.ownerBindingId === target.value.id) ||
         (from.role === "parent" &&
-          to.role === "supervisor" &&
+          (to.role === "supervisor" || to.role === "manager") &&
           from.ownerBindingId === target.value.id));
     const coordination =
       envelope.kind === "coordination" &&
@@ -773,8 +1450,62 @@ export function openRegistry(
       sender.value.id !== target.value.id &&
       from.initiativeId !== null &&
       from.initiativeId === to.initiativeId;
-    if (!instruction && !report && !coordination)
+    const question =
+      envelope.kind === "question" &&
+      ((from.role === "child" && to.role === "parent" && from.ownerBindingId === target.value.id) ||
+        (from.role === "parent" &&
+          (to.role === "supervisor" || to.role === "manager") &&
+          from.ownerBindingId === target.value.id));
+    const answer =
+      envelope.kind === "answer" &&
+      ((from.role === "parent" && to.role === "child" && to.ownerBindingId === sender.value.id) ||
+        ((from.role === "supervisor" || from.role === "manager") &&
+          to.role === "parent" &&
+          to.ownerBindingId === sender.value.id));
+    if (!instruction && !report && !coordination && !question && !answer)
       return error("route_denied", "Role route is not authorized");
+    if (
+      instruction &&
+      to.role === "child" &&
+      envelope.deliverable !== undefined &&
+      envelope.deliverable !== (target.value.deliverable ?? "pr")
+    )
+      return error(
+        "deliverable_mismatch",
+        "Issue packet deliverable differs from the child binding",
+      );
+    if (report && from.role === "child" && envelope.outcome === "completed") {
+      const senderStage = stageOf(sender.value.id);
+      if (!senderStage.ok) return senderStage;
+      if (senderStage.value?.stage === "plan") return ok(target.value);
+      const kind = sender.value.deliverable;
+      if (kind === "report" || kind === "document") {
+        if (envelope.delivery?.kind !== kind)
+          return error(
+            "deliverable_missing",
+            "PR-less completion requires its deliverable path or document URL",
+          );
+      } else if (
+        target.value.checkout?.kind === "owned-clone" &&
+        envelope.delivery?.kind !== "pr"
+      ) {
+        return error(
+          "deliverable_missing",
+          "PR completion requires a PR URL and reported head SHA",
+        );
+      }
+    }
+    if (answer) {
+      const source = parseDelivery(deliveryById.get(envelope.answer?.questionId ?? ""));
+      if (
+        !source.ok ||
+        (source.value.state !== "accepted" && source.value.state !== "posted") ||
+        source.value.envelope.kind !== "question" ||
+        source.value.envelope.fromBindingId !== target.value.id ||
+        source.value.envelope.toBindingId !== sender.value.id
+      )
+        return error("question_unknown", "No accepted question from this recipient exists");
+    }
     return ok(target.value);
   }
 
@@ -969,10 +1700,14 @@ export function openRegistry(
       if (
         sender.value.assignment.role !== "parent" ||
         envelope.toBindingId !== null ||
-        envelope.kind !== "report"
+        (envelope.kind !== "report" && envelope.kind !== "question")
       )
-        return error("route_denied", "Only parents may post reports to the user inbox");
-      if (envelope.outcome === null) return error("invalid_envelope", "Reports require an outcome");
+        return error(
+          "route_denied",
+          "Only parents may post reports or questions to the user inbox",
+        );
+      if (envelope.kind === "report" && envelope.outcome === null)
+        return error("invalid_envelope", "Reports require an outcome");
       const approval = designationFor(sender.value.designationId);
       if (!approval.ok) return approval;
       if (envelope.designationId !== sender.value.designationId)
@@ -996,6 +1731,195 @@ export function openRegistry(
         "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'posted', NULL)",
       ).run(envelope.id, encoded(envelope));
       return ok({ envelope, state: "posted", receipt: null });
+    });
+  }
+
+  function postedQuestions(
+    filter: ScopeFilter,
+  ): Result<Array<{ readonly record: DeliveryRecord; readonly answered: boolean }>> {
+    try {
+      const rows = db
+        .query<DeliveryRow, [string | null, string | null, string | null, string | null]>(`
+        SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
+        JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
+        WHERE d.state = 'posted' AND json_extract(d.envelope_json, '$.kind') = 'question'
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
+        ORDER BY d.rowid
+      `)
+        .all(
+          filter.projectId ?? null,
+          filter.projectId ?? null,
+          filter.initiativeId ?? null,
+          filter.initiativeId ?? null,
+        );
+      const result: Array<{ record: DeliveryRecord; answered: boolean }> = [];
+      for (const row of rows) {
+        const record = parseDelivery(row);
+        if (!record.ok) return record;
+        const answerRow = deliveryById.get(`answer:${record.value.envelope.id}`);
+        const answer = answerRow === null ? null : parseDelivery(answerRow);
+        if (answer !== null && !answer.ok) return answer;
+        result.push({
+          record: record.value,
+          answered: answer?.value.state === "accepted",
+        });
+      }
+      return ok(result);
+    } catch (cause) {
+      return error("storage_error", "Could not read posted questions", messageOf(cause));
+    }
+  }
+
+  function questions(filter: ScopeFilter): Result<
+    Array<{
+      readonly record: DeliveryRecord;
+      readonly answered: boolean;
+      readonly answer: DeliveryRecord | null;
+    }>
+  > {
+    try {
+      const rows = db
+        .query<DeliveryRow, [string | null, string | null, string | null, string | null]>(`
+        SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
+        JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
+        WHERE json_extract(d.envelope_json, '$.kind') = 'question'
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
+          AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
+        ORDER BY d.rowid
+      `)
+        .all(
+          filter.projectId ?? null,
+          filter.projectId ?? null,
+          filter.initiativeId ?? null,
+          filter.initiativeId ?? null,
+        );
+      const result: Array<{
+        record: DeliveryRecord;
+        answered: boolean;
+        answer: DeliveryRecord | null;
+      }> = [];
+      for (const row of rows) {
+        const record = parseDelivery(row);
+        if (!record.ok) return record;
+        const answerRow = deliveryById.get(`answer:${record.value.envelope.id}`);
+        const answer = answerRow === null ? null : parseDelivery(answerRow);
+        if (answer !== null && !answer.ok) return answer;
+        result.push({
+          record: record.value,
+          answered: answer?.value.state === "accepted",
+          answer: answer?.value ?? null,
+        });
+      }
+      return ok(result);
+    } catch (cause) {
+      return error("storage_error", "Could not read questions", messageOf(cause));
+    }
+  }
+
+  function releaseUserAnswer(messageId: string, recipientSessionId: string): Result<ClaimResult> {
+    const stored = parseDelivery(deliveryById.get(messageId));
+    if (!stored.ok) return stored;
+    const envelope = stored.value.envelope;
+    const questionId = envelope.answer?.questionId;
+    if (
+      envelope.kind !== "answer" ||
+      envelope.fromBindingId !== null ||
+      questionId === undefined ||
+      envelope.id !== `answer:${questionId}` ||
+      stored.value.state !== "sending"
+    )
+      return error("route_denied", "No claimed user answer is waiting for delivery");
+    const question = parseDelivery(deliveryById.get(questionId));
+    if (
+      !question.ok ||
+      question.value.state !== "posted" ||
+      question.value.envelope.kind !== "question" ||
+      question.value.envelope.toBindingId !== null ||
+      question.value.envelope.fromBindingId !== envelope.toBindingId
+    )
+      return error("question_not_in_inbox", "Claimed answer does not match an inbox question");
+    const recipient = bySession(recipientSessionId);
+    if (!recipient.ok) return error("sender_unknown", "Recipient session is not bound");
+    if (recipient.value.id !== envelope.toBindingId)
+      return error("route_denied", "User answer is not claimed for this session");
+    const nativeKey = stored.value.attempts?.at(-1)?.nativeKey ?? envelope.id;
+    return ok({
+      disposition: "new",
+      record: stored.value,
+      target: recipient.value,
+      nativeKey,
+    });
+  }
+
+  function answerFromUser(questionId: string, envelopeValue: Envelope): Result<ClaimResult> {
+    return transaction(() => {
+      const parsed = envelopeSchema.safeParse(envelopeValue);
+      if (!parsed.success)
+        return error("invalid_envelope", "Envelope is invalid", parsed.error.issues);
+      const envelope = parsed.data;
+      if (
+        envelope.kind !== "answer" ||
+        envelope.fromBindingId !== null ||
+        envelope.answer?.questionId !== questionId
+      )
+        return error("route_denied", "User answers require an inbox question");
+      const question = parseDelivery(deliveryById.get(questionId));
+      if (
+        !question.ok ||
+        question.value.envelope.kind !== "question" ||
+        question.value.state !== "posted"
+      )
+        return error("question_not_in_inbox", "Question is not posted to the user inbox");
+      const asker = question.value.envelope.fromBindingId;
+      if (asker === null || envelope.toBindingId !== asker)
+        return error("route_denied", "User answer must target the question sender");
+      const target = get(asker);
+      if (!target.ok) return target;
+      const approval = designationFor(target.value.designationId);
+      if (!approval.ok) return approval;
+      if (
+        envelope.designationId !== target.value.designationId ||
+        envelope.snapshotDigest !== approval.value.snapshotDigest
+      )
+        return error("foreign_designation", "User answer must use the parent's approval");
+      const existing = deliveryById.get(envelope.id);
+      if (existing !== null) {
+        const record = parseDelivery(existing);
+        if (!record.ok) return record;
+        if (!same(record.value.envelope, envelope))
+          return error("message_conflict", "Question already has a different answer");
+        return ok({
+          disposition:
+            record.value.state === "sending" || record.value.state === "uncertain"
+              ? "in_progress"
+              : "replay",
+          record: record.value,
+          target: target.value,
+        });
+      }
+      if (target.value.launchState !== "ready") return error("not_ready", "Parent is not ready");
+      if (target.value.contactState !== "active")
+        return error("contact_paused", "Parent is not accepting contact");
+      if (!approval.value.contact)
+        return error("contact_denied", "Parent designation does not permit contact");
+      const first: DeliveryAttempt = {
+        number: 1,
+        nativeKey: envelope.id,
+        state: "sending",
+        receipt: null,
+        uncertaintyReason: null,
+      };
+      db.query(
+        "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'sending', NULL)",
+      ).run(envelope.id, encoded(envelope));
+      attempts.append(envelope.id, first);
+      return ok({
+        disposition: "new",
+        record: { envelope, state: "sending", receipt: null, attempts: [first] },
+        target: target.value,
+        nativeKey: envelope.id,
+      });
     });
   }
 
@@ -1042,6 +1966,12 @@ export function openRegistry(
       return validateSnapshot(parseJson(row.json));
     },
     reserve,
+    recordStage,
+    stageOf,
+    stageChain,
+    lineageFor,
+    recordHandoff,
+    successorReservation,
     get,
     bySession,
     designation: designationFor,
@@ -1061,12 +1991,33 @@ export function openRegistry(
     },
     provision,
     observeSession,
+    beginReattach,
+    ownsReattach,
+    recordReattachPane,
+    reattachPending,
+    releaseReattach,
+    finishReattach,
+    beginSuccessorLaunch,
+    successorLaunchIntent,
+    ownsSuccessorLaunch,
+    provisionSuccessorLaunch,
+    prepareSuccessorLaunch,
+    observeSuccessorSession,
+    activateSuccessorLaunch,
+    dispatchSuccessorLaunch,
+    reconcileSuccessorLaunch,
+    failSuccessorLaunch,
+    finishSuccessorLaunch,
     activate,
     setLaunchState,
     setContactState,
     setOwner,
     post,
     postedReports: (filter) => inboxRecords(filter, false),
+    postedQuestions,
+    questions,
+    answerFromUser,
+    releaseUserAnswer,
     operationalNotices: (filter) => inboxRecords(filter, true),
     beginClose,
     finishClose,
@@ -1078,6 +2029,20 @@ export function openRegistry(
     uncertain,
     delivery(messageId: string): Result<DeliveryRecord> {
       return parseDelivery(deliveryById.get(messageId));
+    },
+    childReports(parentId: string): Result<DeliveryRecord[]> {
+      const rows = db
+        .query<DeliveryRow, [string]>(
+          "SELECT envelope_json, state, receipt_json FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? AND json_extract(envelope_json, '$.kind') = 'report' AND state = 'accepted' ORDER BY rowid DESC",
+        )
+        .all(parentId);
+      const records: DeliveryRecord[] = [];
+      for (const row of rows) {
+        const parsed = parseDelivery(row);
+        if (!parsed.ok) return parsed;
+        records.push(parsed.value);
+      }
+      return ok(records);
     },
     close(): void {
       db.close();

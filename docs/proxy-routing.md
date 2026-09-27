@@ -1,252 +1,91 @@
-# OMO upstream routing through opencodex
+# Pinned OMO routing through opencodex
 
-OLW can follow the **installed global OMO's category and named-agent policy**
-while keeping every generated route on `opencodex`.
+OLW maps the installed global OMO category and named-agent policy onto models published by opencodex. The default policy is **pinned**: the current user routing is the accepted routing and upstream OMO or catalog changes never rewrite it automatically.
 
-The prerequisite is opencodex's OMO client integration
-(`ocx integration client enable --client omo`). It keeps the `opencodex` provider
-block in `~/.omo/agent/models.json` in step with the models enabled in opencodex.
-The synchronizer only reads the model IDs published there. It does not contact
-opencodex or any native provider, and it never enables or
-authenticates a provider. Model availability belongs to opencodex: enable or
-disable a model there, not in OLW.
+The prerequisite is opencodex's OMO integration (`ocx integration client enable --client omo`). It owns `providers.opencodex` in `~/.omo/agent/models.json`. OLW reads that catalog; it never contacts providers, enables models, or authenticates accounts.
 
-The synchronizer manages the existing `~/.omo/omo.jsonc`. First-time adoption
-replaces stock-name routing fields, including any older manual pins there, so
-review its diff first. The main model, model profiles, compaction, retry chains,
-vision models and OLW role pins are outside its scope. Generated routes use
-`opencodex` only; preserved manual overrides are not rewritten or rejected.
+## Policy and ownership
 
-## Automatic behavior
+Routing state is stored under `~/.omo/proxy-routing/state.json`. New and migrated installs use `routingPolicy: pinned`. Existing receipts migrate on first run without changing `~/.omo/omo.jsonc`. The former automatic behavior remains available explicitly with `--follow`; follow mode updates non-overridden managed routes as before.
 
-The managed `omo` launcher checks routing before starting upstream OMO.
-`omon` uses that launcher too. OLW checks it before ensuring its shared host.
-If the OMO version, bundle digest, user configuration and published opencodex
-model list are unchanged, nothing is rewritten. Enabling or disabling a model in
-opencodex changes that list, so the next start re-plans untouched routes without
-`--force`. If the catalog is briefly unreadable, an otherwise unchanged start keeps
-the last applied routing.
-Without adoption state, a normal checked launch fails and requests explicit
-`sync --adopt`; it never silently adopts older manual pins.
+OLW owns only category and named-agent routing fields (`model`, `models`, reasoning fields and fallback models). Prompts, tools, disable flags, main/session models, profiles, retry and compaction settings, vision settings, and OLW role pins remain outside routing synchronization. Manual route edits are still recorded as overrides.
 
-On change, the synchronizer reads the actual installed `omo-task.js` with a
-TypeScript syntax tree. It does not execute the bundle or infer policy from
-release notes. It extracts ordered model choices and reasoning levels, then maps
-each choice to an opencodex model ID:
-
-- Each upstream choice names the OMO providers that serve it. The choice maps to
-  the opencodex service for one of them. ChatGPT/OpenAI models are published
-  without a prefix (`gpt-6-sol`); other services use `anthropic/`, `kimi/`,
-  `mimo/` (Xiaomi), `xai/`, `google/` and `opencode-go/`.
-- OMO itself requests `kimi-k3` from Kimi Code as `k3`, and the route does the
-  same. A trailing `[1m]` in an opencodex ID marks its 1M-context variant and is
-  kept.
-- `…-fast` is Senpi's priority-tier selector. opencodex publishes the same tier as
-  `<model>--fast`. Without that row, the choice is skipped rather than served at
-  the standard tier. Exception (owner decision): a Sol Fast selector always uses
-  standard-tier Sol, because Sol's priority tier costs too much for its speed gain.
-- Routing receipts record the mapping revision. When the rules change, the next
-  ordinary start re-plans untouched routes without `--force`.
-- DeepSeek's rolling `deepseek-flash` ID currently identifies V4.1 Flash according
-  to [the official model table](https://api-docs.deepseek.com/quick_start/pricing),
-  so `deepseek-v4.1-flash` is used. Recheck this if the rolling ID changes.
-- If none of the named services publishes the model, the exact same ID from
-  another opencodex host is used, with hosts tried in alphabetical order (for
-  example `ollama-cloud/deepseek-v4.1-flash`). Another version, a Flash or lite
-  sibling, or another model family is never substituted.
-- An xAI choice is followed by the same model on Cursor (`xai/grok-4.7`, then
-  `cursor/grok-4.7`) when opencodex publishes it. This is a user decision; no
-  other same-model host is added as a second lane. For example, Kimi K3 stays on
-  `kimi/`, because routing it through Ollama Cloud exhausts that quota.
-
-Unserved choices are recorded under `skipped`. Repeated provider lanes for the
-same model and reasoning level collapse. Reasoning levels are copied unchanged.
-opencodex publishes no reasoning controls for some hosted models, such as those on
-Ollama Cloud, so a configured level is not guaranteed there.
-
-Native review/QA agents that inherit categories retain that upstream behavior:
-their old migration-generated model overrides are removed, rather than freezing
-the inherited category list into another model table.
-
-## Ownership and version policy
-
-- The global OMO found outside the managed wrapper and `node_modules` is the
-  policy authority. Its version and exact bundle digest are recorded.
-- The OLW-pinned OMO package is not upgraded or allowed to write a competing
-  global policy. Its task routes use the same user configuration as before.
-- OLW role pins in `src/core/policy.ts`, existing binding identities, the main
-  model, model profiles, compaction, retry settings, and `models.json` are outside
-  this synchronizer's ownership.
-- Initial `sync --adopt` adopts stock category/agent routing fields. It backs up
-  the configuration first.
-- Thereafter, a routing field changed by the user is marked `overrides` and left
-  alone. Other route properties, such as prompts, tools and disable flags, keep
-  their values. Unrelated top-level JSONC text is preserved; the two routing
-  sections are serialized again, so their original comments live in the backup.
-- To resume automatic tracking for a manually changed route, restore its
-  routing fields to the last values in `state.json`'s `managed` entry, then sync.
-  Do not delete the state file just to update one route.
-
-## Commands
-
-Run these from the OLW repository:
+Initial adoption is explicit and backed up:
 
 ```sh
-bun run proxy:routing status          # Last applied policy, overrides and omissions
-bun run proxy:routing check --force   # Read-only diff against the current opencodex catalog
-bun run proxy:routing sync --force    # Re-plan now instead of at the next start
-bun run proxy:routing chains          # Fallback chain report against the opencodex catalog
-```
-
-## Model chain warnings
-
-Nothing in the chain check blocks a start. OLW repairs category and named-agent
-routes itself: when opencodex stops publishing a model, the next start re-plans
-those routes from the upstream policy and drops that candidate. OMO itself skips
-an unknown retry-chain candidate and clamps an unsupported reasoning level at
-runtime. Chain length and provider mix follow the upstream policy as-is.
-
-After every `check`/`sync` (so every managed `omo` start) and in `olw doctor`,
-OLW warns only about:
-
-- a category or agent with **no working model**: none of its models is in the
-  opencodex catalog. A managed route in that state is published without models
-  (listed as `unroutable` in `status`), so OMO falls back to its default for it
-  and the other routes still update;
-- a category or agent with **no fallback**: only one distinct model is left;
-- an OLW role model that opencodex no longer publishes.
-
-The main model is not checked: each session chooses its own.
-
-The launcher prints one stderr line only when that warning set changes (its
-digest is kept in `chain-warnings.digest`). `bun run proxy:routing chains`
-prints the JSON report; `olw doctor` includes it under `chains` and stays `ok`.
-Agents without their own models inherit a category and are reported through it.
-An unreadable config or catalog file skips the check during a launch;
-`olw doctor` reports it as a failure.
-
-## Optional local model-picker scope (disabled)
-
-The active OMO scope is `all`. Availability is managed in opencodex, and the
-commands below remain an optional local feature, not the current policy.
-Do not automatically enable `referenced` scope.
-
-```sh
-bun run proxy:routing scope referenced  # Narrow managed omo/omon model pickers
-bun run proxy:routing scope             # Inspect the mode and referenced IDs
-bun run proxy:routing scope all         # Restore ordinary, unrestricted launch scope
-```
-
-This does not delete accounts, provider models, or routes. The launcher passes
-OMO's native `--models` option using current global categories, agents, profiles,
-main model, retry chains, compaction, vision, explicit favorites and OLW role
-defaults. Thinking-level history is not a live reference. There are no age-based
-guesses and no exception for newly added models.
-
-The list is recalculated after routing preflight on each managed launch, so newly
-referenced upstream choices appear automatically, not every newly available
-model. A failed reference read blocks the checked launch rather than
-silently expanding its scope. An explicit user `--models` takes
-precedence; an explicitly selected `--model` remains accessible. Original
-`settings.json` and its `enabledModels` value are not rewritten. Existing
-sessions and clients that bypass the managed launcher are not changed.
-
-In OMO's own `enabledModels`, write the opencodex pattern as `opencodex/**`.
-A single `*` stops at `/`, so `opencodex/*` drops namespaced IDs such as
-`opencodex/anthropic/claude-opus-5-5` from the scope, and a saved default among
-them is then ignored at startup.
-
-The preference is `~/.omo/proxy-routing/model-scope.json`; every mode change saves
-the previous preference under `~/.omo/proxy-routing/backups/model-scope-*.json`.
-Those files contain a `mode` value that can be reapplied with the scope command.
-Restoration to `all`
-works even if routing configuration is temporarily unreadable. Inside `/model`,
-Tab switches between `narrowed` and `all` without changing this saved preference.
-`--list-models` still shows every callable model; this feature limits the default
-picker/cycling scope, not API availability.
-
-## First-time activation
-
-First enable opencodex's OMO integration, then run:
-
-```sh
-bun run build
 bun run proxy:routing check --force
 bun run proxy:routing sync --adopt
+bun run proxy:routing baseline save
 ```
 
-On this machine, `~/.local/bin/omo` is already installed as a thin executable
-wrapper that runs `/home/jun/code/omo-linear-workflow/dist/omo.js`.
-It must precede the upstream executable in PATH. Normal OMO updates do not need
-another adoption; the next launcher start performs the check.
-If the OLW checkout moves, update that wrapper's absolute path.
-Calling the upstream executable directly bypasses this startup check.
+A baseline is private mode `0600` at `~/.omo/proxy-routing/baselines/<date>-user-baseline.json`. It records the current routing fields, per-route accepted upstream values, upstream version/digest/path, and the accepted effective opencodex catalog snapshot. Advice compares against the latest baseline, falling back to the last receipt on older installs. An older baseline without a catalog snapshot is never modified by a check; status reports that `proxy:routing baseline save` is needed and uses the receipt's last effective catalog when available.
 
-For another checkout location, create `~/.local/bin/omo` with the following
-content after replacing the checkout path, then run `chmod 755 ~/.local/bin/omo`.
-Back up an existing launcher instead of overwriting an unrelated one.
+## Advice instead of automatic changes
+
+In pinned mode, every sync computes the route table OMO would choose but keeps the accepted configuration unchanged. State records pending route advice with:
+
+- route path;
+- previously accepted upstream choice;
+- new upstream choice;
+- current user value;
+- `unavailable` when a currently selected catalog model disappeared;
+- alternatives from the same route's surviving rungs.
+
+A disappeared model is never silently replaced. The interactive `omo` launcher prints a short advice block and continues with pinned routing. `olw manage` returns `routingAdvice`, and the manager brief contains exactly one `routing_advice:` line. `proxy:routing status` and `olw update check --json` include route-level details. With no finding, status reports `upstream routing unchanged since baseline <date> (omo-ai <version>)`; an ordinary launcher remains quiet.
+
+Review and accept only intended changes:
 
 ```sh
-#!/bin/sh
-exec bun /absolute/path/to/omo-linear-workflow/dist/omo.js "$@"
+bun run proxy:routing status
+bun run proxy:routing check --force       # read-only current upstream comparison
+bun run proxy:routing apply categories.deep-low agents.explore
+bun run proxy:routing apply --all
+bun run proxy:routing dismiss categories.deep-low
+bun run proxy:routing sync --follow       # optional automatic tracking
 ```
 
-Upstream discovery chooses the first `omo` in the remaining PATH after excluding
-`~/.local/bin` and `node_modules` directories. Thus a repository's pinned binary
-does not win merely because `bun run` prepended it. Inspect the selected executable
-in `proxy:routing status`'s `upstream` field.
+`apply` is the only normal pinned-mode routing writer besides initial adoption and explicit force. It writes a backup, uses the recovery journal and lock, and advances per-route accepted upstream values for only the selected paths. `dismiss` and `baseline save` use the same routing lock. Dismissal lasts until that route's upstream candidate changes; changing only the current user value does not revive it. A fully dismissed upstream change is not described as unchanged. `check`, `status`, and `olw update check` perform a fresh read-only comparison and do not write routing, baseline, receipt, or catalog files.
 
-The synchronizer runs on Bun and uses Linux `flock` to serialize concurrent
-starts. `check` and `sync` accept explicit `--upstream`, `--config`,
-`--state-dir` and `--catalog` paths for isolated verification.
-`status` accepts `--state-dir`. opencodex refreshes the catalog itself; there is
-no background polling service and no running-session restart.
-`--version`, `--help` and maintenance commands remain usable without a routing
-check. Active sessions may retain their already-loaded policy until restarted.
+## Catalog health review
 
-## Failure and recovery
+The routing baseline also snapshots metadata for the accepted opencodex catalog. For models referenced by a route or OLW's role policy, OLW advises when a model:
 
-State, original configuration backups and a recovery journal live in
-`~/.omo/proxy-routing/`, with private file permissions.
-Configuration and receipt replacement are atomic per file; the journal repairs
-an interrupted publication before the next sync. A detected concurrent manual
-edit is not overwritten.
+- disappears (including a possible rename/alias requiring review);
+- has a smaller context window or output limit;
+- exposes the known `32000` output-limit stand-in;
+- loses image input;
+- flips its reasoning flag.
 
-An unknown upstream layout, an unusable complete model chain, or a missing or
-disabled opencodex catalog during an update leaves the last valid configuration
-intact and fails the preflight with an actionable error. It does not enable native
-providers or substitute an arbitrary model. Once routing has been adopted, the
-interactive `omo` launcher prints that error and still starts OMO with the
-retained routing. Before adoption it stops, as described above, and OLW role
-launches always stop. An unreadable model-scope preference also stops the
-launcher rather than widening a restricted picker. Fix the reported problem and
-run `sync --force`.
-A managed route with no surviving model candidate no longer rejects the update:
-it is published without models, listed under `unroutable`, and warned about.
-If a pending journal reports a conflicting edit, inspect it and the backup before
-choosing which configuration to retain.
+Findings name affected routes and OLW roles and suggest review actions: disable the route rung, choose another rung, or add a reviewed `MODEL_CATALOG` override in `src/proxy/model-catalog.ts`. Metadata is evaluated per model: an ID-only row still participates in presence/removal checks, skips only its own capability comparison, and contributes to one `catalog metadata unavailable for N models` limitation finding. Health review never edits the catalog, route, or override table.
 
-To retain the current manually edited configuration, stop starting new OMO
-processes briefly, move `pending.json` to a uniquely named saved file in the same
-directory, and run `sync --force`. Keep `state.json`: it is what lets the next
-sync distinguish manual edits from the last managed routing. Retain the saved
-journal and backup until the resulting `overrides` and configuration are reviewed.
+## Mapping and safety
 
-For rollback, disable the OLW-managed launcher (not upstream OMO) and stop
-starting new OLW roles before restoring an inspected original `.jsonc` backup.
-Use the official upstream executable directly during recovery. OLW also invokes
-preflight from its own host-preparation path: removing the shell wrapper alone
-does not disable that hook. To resume OLW with tracking disabled, roll back that
-integration as a reviewed code change first. Existing sessions need not be
-terminated. There is currently no single global tracking-disable switch.
+The synchronizer parses the installed `omo-task.js`; it does not execute the bundle or infer policy from release notes. Ordered upstream choices and reasoning levels map to exact opencodex IDs. OpenAI IDs are bare; other services use their opencodex namespace. Fast-tier, Kimi, rolling DeepSeek, xAI/Cursor secondary-lane, and exact-host fallback rules live in `src/proxy/routing-plan.ts`. Another model family or version is never substituted.
 
-## Verification
+Configuration and receipt replacement are atomic. A process-wide `flock`, original backups, and `pending.json` recovery journal protect publication. Concurrent manual changes stop publication. An unreadable or unfamiliar upstream policy leaves accepted routing intact. Once routing is adopted, the interactive launcher may continue after a failed preflight using retained all-opencodex routing; before adoption and for OLW role launches, preflight failure remains closed.
 
-`bun test tests/proxy` covers extraction, order/reasoning, opencodex service
-mapping, protected edits, unavailable routes, catalog changes, concurrent CLI
-starts and interrupted publication.
-`bun scripts/qa-routing.ts` uses live accounts to launch a quick-category child
-and a named explore child through the managed launcher. Both must resolve to
-`opencodex`, read an unseen random file value and deliver a real runtime
-completion; the parent merely repeating a requested string is not sufficient.
-The live probe cleans up its owned temporary directory after both children finish.
+## Chain warnings and model scope
+
+`bun run proxy:routing chains` and `olw doctor` report no-working-model, no-fallback, and missing OLW-role-model warnings. Advice is separate: warnings describe current operability, while advice compares accepted routing/catalog policy with current upstream inputs.
+
+The optional model-picker scope remains disabled by default:
+
+```sh
+bun run proxy:routing scope referenced
+bun run proxy:routing scope
+bun run proxy:routing scope all
+```
+
+It changes picker visibility only and does not alter accounts, providers, routes, or advice.
+
+## Paths and isolated verification
+
+`check` and `sync` accept `--upstream`, `--config`, `--state-dir`, and `--catalog` for fixture-only verification. `status` accepts `--state-dir`. Upstream discovery excludes the managed wrapper directory and repository `node_modules` entries.
+
+Tests use temporary directories only:
+
+```sh
+bun test tests/proxy
+bun run typecheck
+bun run lint
+```

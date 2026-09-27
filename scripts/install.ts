@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   if (args[0] === "--") args.shift();
   if (args.length === 1 && args[0] === "--help") {
     console.log(
-      "Usage: bun run install:local [--bin-dir PATH]\nBuild this Linux x64 checkout and install a non-overwriting olw launcher.\nDefault: ~/.local/bin. Requires Bun >=1.4.0, Node >=24.20.0, pnpm and Git.\nA first uncached Herdr build also requires the manifest-pinned Rustup toolchain and Zig.",
+      "Usage: bun run install:local [--bin-dir PATH]\nBuild this Linux x64 checkout and install a non-overwriting olw launcher.\nDefault: ~/.local/bin. Requires Bun >=1.4.0, Node >=24.20.0, pnpm and Git.\nAn uncached build downloads the official Herdr release pinned in herdr-release.json and verifies its SHA-256. No Rust or Zig is required; existing Herdr installations and servers are not changed.",
     );
     return;
   }

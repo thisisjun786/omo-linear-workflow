@@ -70,7 +70,8 @@ accepted plan), build the snapshot file described in
 [Scope snapshot for the CLI](../references/linear.md#scope-snapshot-for-the-cli):
 
 1. Re-read every included initiative, project and issue by ID through the connector and take
-   `id`, `url` and `revision` from those reads. Include linked decision documents in
+   `id`, `url` and `revision` from those reads, plus the project or initiative identifier as
+   `key` when the read returns one. Include linked decision documents in
    `decisionRefs`.
 2. Include only the projects and issues the approved definition covers. Say what was left out
    and why.

@@ -1,13 +1,39 @@
 import { z } from "zod";
 
 const text = z.string().min(1);
-const refSchema = z.strictObject({ id: text, url: text, revision: text });
+const repositoryRemote = z
+  .string()
+  .min(1)
+  .refine((remote) => !remote.startsWith("-"), "Repository remote must not start with '-'")
+  .pipe(z.url({ protocol: /^(https|ssh|file)$/ }));
+export const deliverableSchema = z.enum(["pr", "report", "document"]);
+export const issueDeliverySchema = z.union([
+  z.strictObject({
+    kind: z.literal("pr"),
+    url: z.url({ protocol: /^https$/ }),
+    head: z.string().regex(/^[a-f0-9]{40,64}$/),
+  }),
+  z.strictObject({ kind: z.enum(["report", "document"]), path: text }),
+]);
+const refSchema = z.strictObject({ id: text, url: text, revision: text, key: text.optional() });
 
 export const scopeSnapshotSchema = z.strictObject({
   version: z.literal(1),
   source: z.enum(["linear-export", "fixture"]),
   initiative: refSchema.nullable(),
-  projects: z.array(z.strictObject({ project: refSchema, issues: z.array(refSchema) })),
+  projects: z.array(
+    z.strictObject({
+      project: refSchema,
+      issues: z.array(refSchema),
+      repository: z
+        .strictObject({
+          remote: repositoryRemote,
+          defaultBranch: text,
+          base: text.optional(),
+        })
+        .optional(),
+    }),
+  ),
   decisionRefs: z.array(refSchema),
 });
 export const designationSchema = z.strictObject({
@@ -20,6 +46,7 @@ export const designationSchema = z.strictObject({
   contact: z.boolean(),
 });
 export const assignmentSchema = z.discriminatedUnion("role", [
+  z.strictObject({ role: z.literal("manager") }),
   z.strictObject({ role: z.literal("supervisor"), initiativeId: text }),
   z.strictObject({
     role: z.literal("parent"),
@@ -36,6 +63,9 @@ export const assignmentSchema = z.discriminatedUnion("role", [
   }),
 ]);
 export const checkoutSchema = z.strictObject({
+  kind: z.enum(["linked-worktree", "owned-clone"]).default("linked-worktree"),
+  remote: repositoryRemote.optional(),
+  receiptPath: text.optional(),
   originalRepoRoot: text,
   path: text,
   branch: text,
@@ -45,6 +75,7 @@ export const checkoutSchema = z.strictObject({
 export const bindingSchema = z.strictObject({
   id: text,
   designationId: text,
+  deliverable: deliverableSchema.optional(),
   assignment: assignmentSchema,
   durableSessionId: text,
   cwd: text,
@@ -87,18 +118,50 @@ export const runtimeFailureClaimSchema = z.strictObject({
   kind: z.literal("runtime_failure"),
   failure: runtimeFailureSchema,
 });
+export const questionPayloadSchema = z.strictObject({
+  questions: z.array(
+    z.strictObject({
+      id: text,
+      question: text,
+      options: z.array(z.strictObject({ label: text, description: text.optional() })),
+      multiSelect: z.boolean(),
+    }),
+  ),
+  escalates: text.nullable(),
+});
+export const answerFieldsSchema = z.strictObject({
+  answers: z.record(text, z.strictObject({ selected: z.array(text), text: z.string().optional() })),
+  unanswered: z.array(text),
+});
 export const envelopeSchema = z
   .strictObject({
     version: z.literal(1),
     id: text,
-    fromBindingId: text,
+    fromBindingId: text.nullable(),
     toBindingId: text.nullable(),
     designationId: text,
     snapshotDigest: text,
-    kind: z.enum(["instruction", "coordination", "report", "operational_notice"]),
+    kind: z.enum([
+      "instruction",
+      "coordination",
+      "report",
+      "operational_notice",
+      "question",
+      "answer",
+    ]),
     text: z.string(),
     outcome: z.enum(["completed", "blocked", "failed"]).nullable(),
     evidence: z.array(text),
+    deliverable: deliverableSchema.optional(),
+    delivery: issueDeliverySchema.optional(),
+    question: questionPayloadSchema.optional(),
+    answer: z
+      .strictObject({
+        questionId: text,
+        answers: answerFieldsSchema.shape.answers,
+        unanswered: answerFieldsSchema.shape.unanswered,
+      })
+      .optional(),
     operational: z
       .strictObject({
         failure: runtimeFailureSchema,
@@ -110,17 +173,35 @@ export const envelopeSchema = z
   })
   .refine(
     (envelope) =>
-      envelope.kind === "operational_notice"
-        ? envelope.operational !== undefined &&
+      envelope.kind === "question"
+        ? envelope.question !== undefined &&
+          envelope.answer === undefined &&
+          envelope.operational === undefined &&
           envelope.outcome === null &&
-          envelope.operational.binding.id === envelope.fromBindingId &&
-          envelope.operational.failure.durableSessionId ===
-            envelope.operational.binding.durableSessionId &&
-          (envelope.toBindingId === null
-            ? envelope.operational.localReason !== null
-            : envelope.operational.localReason === null &&
-              envelope.toBindingId === envelope.operational.ownerBindingId)
-        : envelope.operational === undefined,
+          envelope.fromBindingId !== null &&
+          envelope.id.startsWith(`question:${envelope.fromBindingId}:`)
+        : envelope.kind === "answer"
+          ? envelope.answer !== undefined &&
+            envelope.question === undefined &&
+            envelope.operational === undefined &&
+            envelope.outcome === null &&
+            envelope.id === `answer:${envelope.answer.questionId}`
+          : envelope.kind === "operational_notice"
+            ? envelope.question === undefined &&
+              envelope.answer === undefined &&
+              envelope.operational !== undefined &&
+              envelope.outcome === null &&
+              envelope.operational.binding.id === envelope.fromBindingId &&
+              envelope.operational.failure.durableSessionId ===
+                envelope.operational.binding.durableSessionId &&
+              (envelope.toBindingId === null
+                ? envelope.operational.localReason !== null
+                : envelope.operational.localReason === null &&
+                  envelope.toBindingId === envelope.operational.ownerBindingId)
+            : envelope.operational === undefined &&
+              envelope.question === undefined &&
+              envelope.answer === undefined &&
+              envelope.fromBindingId !== null,
     "Operational telemetry requires actual error evidence, its binding and route, and no result outcome",
   );
 const nativeErrorSchema = z.strictObject({
@@ -161,10 +242,11 @@ export const deliveryRecordSchema = z
       record.state === "posted"
         ? record.envelope.toBindingId === null &&
           ((record.envelope.kind === "report" && record.envelope.outcome !== null) ||
-            record.envelope.kind === "operational_notice") &&
+            record.envelope.kind === "operational_notice" ||
+            record.envelope.kind === "question") &&
           record.receipt === null
         : record.envelope.toBindingId !== null,
-    "Only local posted reports or operational notices address the user inbox, without a native receipt",
+    "Only local posted reports, questions or operational notices address the user inbox, without a native receipt",
   );
 export const runtimeIdentitySchema = z.strictObject({
   durableSessionId: text,
@@ -173,7 +255,7 @@ export const runtimeIdentitySchema = z.strictObject({
   provider: text,
   modelId: text,
   thinking: text,
-  extensionProtocol: z.literal(1),
+  extensionProtocol: z.union([z.literal(1), z.literal(2)]),
 });
 export const claimResultSchema = z.strictObject({
   disposition: z.enum(["new", "replay", "in_progress"]),
@@ -184,6 +266,7 @@ export const claimResultSchema = z.strictObject({
 export const reserveInputSchema = z.strictObject({
   bindingId: text,
   durableSessionId: text,
+  deliverable: deliverableSchema.optional(),
   designation: designationSchema,
   snapshot: scopeSnapshotSchema,
   assignment: assignmentSchema,
@@ -213,6 +296,30 @@ const claimRequestSchema = z.strictObject({
     envelope: z.union([envelopeSchema, runtimeFailureClaimSchema]),
   }),
 });
+const bindingRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("lookup-binding"),
+  input: z.strictObject({ bindingId: text }),
+});
+const designationRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("lookup-designation"),
+  input: z.strictObject({ designationId: text }),
+});
+const deliveryRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("lookup-delivery"),
+  input: z.strictObject({ messageId: text }),
+});
+const postRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("post"),
+  input: z.strictObject({ senderSessionId: text, envelope: envelopeSchema }),
+});
 const finishRequestSchema = z.strictObject({
   version: z.literal(1),
   dbPath: text,
@@ -229,12 +336,23 @@ const uncertainRequestSchema = z.strictObject({
   action: z.literal("uncertain"),
   input: z.strictObject({ messageId: text, reason: text, nativeKey: text.optional() }),
 });
+const releaseUserAnswerRequestSchema = z.strictObject({
+  version: z.literal(1),
+  dbPath: text,
+  action: z.literal("release-user-answer"),
+  input: z.strictObject({ messageId: text, recipientSessionId: text }),
+});
 export const workerRequestSchema = z.union([
   lookupRequestSchema,
+  bindingRequestSchema,
+  designationRequestSchema,
   routeRequestSchema,
   claimRequestSchema,
+  postRequestSchema,
+  deliveryRequestSchema,
   finishRequestSchema,
   uncertainRequestSchema,
+  releaseUserAnswerRequestSchema,
 ]);
 
 export function resultSchema<T extends z.ZodType>(value: T) {

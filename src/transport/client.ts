@@ -5,11 +5,26 @@ import type { RoleModel } from "../core/policy";
 import { envelopeSchema } from "../core/schema";
 import { describeResultSchema, sendResultSchema } from "./schema";
 
+export class NativeSessionAbsentError extends Error {
+  constructor(message = "Exact durable native session is not open") {
+    super(message);
+    this.name = "NativeSessionAbsentError";
+  }
+}
+
+export class NativeSessionNotReadyError extends Error {
+  constructor(readonly status: "opening" | "closing" | "closed") {
+    super(`Exact durable native session is present but ${status}`);
+    this.name = "NativeSessionNotReadyError";
+  }
+}
+
 export interface NativeSession {
   configure(model: RoleModel): Promise<void>;
   hasUserMessage(text: string): Promise<boolean>;
   describe(): Promise<Result<RuntimeIdentity>>;
   send(envelope: Envelope): Promise<Result<DeliveryRecord>>;
+  deliverUserAnswer(messageId: string): Promise<Result<DeliveryRecord>>;
   onEvent(listener: (event: unknown) => void): () => void;
   close(): Promise<void>;
 }
@@ -63,15 +78,15 @@ export async function attachBindingWithClient(
     const sessions = await client.listSessions();
     const matches = sessions.filter(
       (session) =>
-        session.status === "open" &&
         session.durableSessionId === binding.durableSessionId &&
         session.sessionPath === binding.sessionPath &&
         session.cwd === binding.cwd,
     );
     const exact = matches[0];
-    if (exact === undefined) throw new Error("Exact durable native session is not open");
+    if (exact === undefined) throw new NativeSessionAbsentError();
     if (matches.length !== 1)
       throw new Error("Host must contain exactly one durable native session");
+    if (exact.status !== "open") throw new NativeSessionNotReadyError(exact.status);
     const opened = await client.openSession({
       sessionPath: binding.sessionPath,
       cwd: binding.cwd,
@@ -135,6 +150,19 @@ export async function attachBindingWithClient(
       return parsed.success
         ? parsed.data
         : failure("invalid_response", "Send RPC returned an invalid result", parsed.error.issues);
+    },
+    async deliverUserAnswer(messageId: string): Promise<Result<DeliveryRecord>> {
+      const decoded = await client.requestExtension("omo.initiative.deliver-user-answer", {
+        messageId,
+      });
+      const parsed = sendResultSchema.safeParse(decoded);
+      return parsed.success
+        ? parsed.data
+        : failure(
+            "invalid_response",
+            "User answer RPC returned an invalid result",
+            parsed.error.issues,
+          );
     },
     onEvent(listener: (event: unknown) => void): () => void {
       return client.onEvent(listener);

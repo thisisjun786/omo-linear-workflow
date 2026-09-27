@@ -180,6 +180,7 @@ describe("HerdrClient", () => {
     await expect(client.createWorkspace("/requested", "supervisor")).resolves.toEqual({
       workspaceId: "ws-reply",
       rootPaneId: "pane-reply",
+      rootTabId: "tab-reply",
       cwd: "/reply/path",
     });
     const checkout = {
@@ -192,6 +193,7 @@ describe("HerdrClient", () => {
     await expect(client.createWorktree(checkout, "child")).resolves.toEqual({
       workspaceId: "ws-reply",
       rootPaneId: "pane-reply",
+      rootTabId: "tab-reply",
       cwd: "/reply/path",
     });
     expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
@@ -214,7 +216,61 @@ describe("HerdrClient", () => {
     ]);
   });
 
-  test("grouped worktrees address an exact head with a versioned RPC", async () => {
+  test("creates and renames tabs and sends raw pane input", async () => {
+    const server = await fixture((socket, request) => {
+      if (request.method === "tab.create") {
+        ok(socket, request.id, {
+          type: "tab_created",
+          tab: { tab_id: "ws:t2", workspace_id: "ws", label: "plan" },
+          root_pane: { pane_id: "ws:p2", tab_id: "ws:t2" },
+        });
+      } else if (request.method === "tab.rename") {
+        ok(socket, request.id, { type: "tab_info" });
+      } else ok(socket, request.id);
+    });
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    await expect(client.createTab("ws", "/tmp", "plan")).resolves.toEqual({
+      tabId: "ws:t2",
+      rootPaneId: "ws:p2",
+    });
+    await client.renameTab("ws:t2", "execute");
+    await client.sendKeys("ws:p2", "/quit", ["Enter"]);
+    expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: "tab.create",
+        params: { workspace_id: "ws", cwd: "/tmp", label: "plan", focus: false },
+      },
+      { method: "tab.rename", params: { tab_id: "ws:t2", label: "execute" } },
+      { method: "pane.send_input", params: { pane_id: "ws:p2", text: "/quit", keys: ["Enter"] } },
+    ]);
+  });
+
+  test("focuses a workspace only on explicit request", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, { type: "workspace_info", workspace: workspace("ws", "ws:t1") }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    await client.focusWorkspace("ws");
+    expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      { method: "workspace.focus", params: { workspace_id: "ws" } },
+    ]);
+  });
+
+  test("rejects tab.create replies that omit root_pane", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, {
+        type: "tab_created",
+        tab: { tab_id: "ws:t2", workspace_id: "ws", label: "plan" },
+      }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    await expect(client.createTab("ws", "/tmp", "plan")).rejects.toThrow();
+  });
+
+  test("children use their owned parent's checkout with the official worktree RPC", async () => {
     const server = await fixture((socket, request) => {
       ok(socket, request.id, {
         type: "worktree_created",
@@ -232,25 +288,12 @@ describe("HerdrClient", () => {
       baseBranch: "parent",
       baseCommit: "abc",
     };
-    await client.createWorktree(checkout, "head", { head: true });
-    await client.createWorktree(checkout, "child", { parentWorkspaceId: "w-parent" });
+    await client.createWorktree(checkout, "child");
     expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
       {
-        method: "worktree.create_grouped",
+        method: "worktree.create",
         params: {
           cwd: "/repo",
-          branch: "child",
-          base: "parent",
-          path: "/worktree",
-          label: "head",
-          focus: false,
-          trust_repository: false,
-        },
-      },
-      {
-        method: "worktree.create_grouped",
-        params: {
-          group_head_workspace_id: "w-parent",
           branch: "child",
           base: "parent",
           path: "/worktree",
@@ -335,14 +378,9 @@ describe("HerdrClient", () => {
     stop();
   });
 
-  test.each([
-    { repoKey: undefined, groupHeadWorkspaceId: undefined },
-    { repoKey: "/repo/.git", groupHeadWorkspaceId: undefined },
-    { repoKey: "herdr-group:ws", groupHeadWorkspaceId: "ws" },
-    { repoKey: "herdr-group:parent", groupHeadWorkspaceId: "parent" },
-  ])(
-    "maps snapshot group identity and bounded cleanup: %j",
-    async ({ repoKey, groupHeadWorkspaceId }) => {
+  test.each([undefined, "/repo/.git"])(
+    "maps snapshots and bounded cleanup without duplicating session reports: %j",
+    async (repoKey) => {
       const server = await fixture((socket, request) => {
         if (request.method === "worktree.remove") {
           ok(socket, request.id, {
@@ -400,25 +438,16 @@ describe("HerdrClient", () => {
           {
             workspaceId: "ws",
             rootPaneId: "pane",
+            rootTabId: "tab",
             cwd: "/cwd",
             label: "ws",
-            ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),
+            ...(repoKey === undefined ? {} : { repoKey }),
           },
         ],
         panes: [{ paneId: "pane", workspaceId: "ws", revision: 42, sessionPath: "/session" }],
       });
-      await client.reportSession("pane", "/session");
       await client.removeWorktree("child");
       expect(server.requests.slice(1).map(({ method, params }) => ({ method, params }))).toEqual([
-        {
-          method: "pane.report_agent_session",
-          params: {
-            pane_id: "pane",
-            source: "omo-initiative",
-            agent: "omo",
-            agent_session_path: "/session",
-          },
-        },
         {
           method: "worktree.remove",
           params: { workspace_id: "child", force: false, trust_repository: false },
@@ -426,6 +455,31 @@ describe("HerdrClient", () => {
       ]);
     },
   );
+
+  test.each(["pi", "omo"])("snapshot exposes the foreground label %s", async (agent) => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, {
+        type: "session_snapshot",
+        snapshot: {
+          focused_workspace_id: null,
+          focused_tab_id: null,
+          focused_pane_id: null,
+          workspaces: [workspace("ws", "tab")],
+          panes: [
+            { ...pane("tui", "ws", "tab", "/cwd"), agent },
+            pane("shell", "ws", "tab", "/cwd"),
+          ],
+          layouts: [{ workspace_id: "ws", tab_id: "tab", panes: [{ pane_id: "tui" }] }],
+        },
+      }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    expect((await client.snapshot()).panes).toEqual([
+      { paneId: "tui", workspaceId: "ws", revision: 0, sessionPath: null, agent },
+      { paneId: "shell", workspaceId: "ws", revision: 0, sessionPath: null },
+    ]);
+  });
 
   test("preserves upstream errors and rejects disconnects", async () => {
     let first = true;

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { runCli } from "../src/cli";
 import type {
   Assignment,
   Binding,
@@ -23,10 +24,11 @@ import {
   scopeSnapshotSchema,
 } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
-import type { HerdrClient, Workspace, WorktreeGrouping } from "../src/herdr";
+import type { HerdrClient, Workspace } from "../src/herdr";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
 import type { NativeSession } from "../src/transport";
+import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -372,10 +374,12 @@ test("user inbox records immutable reports without a user binding or native rece
 async function world() {
   const control = await root();
   const dbPath = join(control, ".omo/state/registry.sqlite");
+  const mappedProject = await mappedScope(control, projectScope);
   const identities = new Map<string, RuntimeIdentity>();
   const prompts = new Map<string, Set<string>>();
   const workspaces = new Map<string, Workspace>();
-  const groupingRequests = new Map<string, WorktreeGrouping | undefined>();
+  const worktreeRequests = new Map<string, string>();
+  const tabCalls: unknown[] = [];
   const sends: Envelope[] = [];
   const launches: string[] = [];
   let sequence = 0;
@@ -404,18 +408,23 @@ async function world() {
       workspaces.set(workspace.workspaceId, workspace);
       return workspace;
     },
-    async createWorktree(checkout, label, grouping) {
+    async createWorktree(checkout, label) {
       const workspace = await this.createWorkspace(checkout.path, label);
-      groupingRequests.set(workspace.workspaceId, grouping);
-      if (grouping === undefined) return workspace;
-      const grouped = {
-        ...workspace,
-        groupHeadWorkspaceId:
-          "head" in grouping ? workspace.workspaceId : grouping.parentWorkspaceId,
-      };
-      workspaces.set(workspace.workspaceId, grouped);
-      return grouped;
+      worktreeRequests.set(workspace.workspaceId, checkout.originalRepoRoot);
+      return workspace;
     },
+    async createTab(workspaceId, cwd, label) {
+      const call = { tabId: `${workspaceId}:t2`, rootPaneId: `${workspaceId}:p2` };
+      tabCalls.push({ method: "createTab", workspaceId, cwd, label, ...call });
+      return call;
+    },
+    async renameTab(tabId, label) {
+      tabCalls.push({ method: "renameTab", tabId, label });
+    },
+    async sendKeys(paneId, text, keys) {
+      tabCalls.push({ method: "sendKeys", paneId, text, keys });
+    },
+    async focusWorkspace() {},
     async run(paneId, argv) {
       launches.push(paneId);
       const path = argv[argv.indexOf("--session") + 1];
@@ -427,7 +436,7 @@ async function world() {
         sessionPath: path,
         cwd: binding.cwd,
         ...modelForRole(binding.assignment.role),
-        extensionProtocol: 1,
+        extensionProtocol: 2,
       });
       await publishReadiness(control, {
         bindingId: binding.id,
@@ -451,7 +460,6 @@ async function world() {
         })),
       };
     },
-    async reportSession() {},
     async closeWorkspace(id) {
       workspaces.delete(id);
     },
@@ -463,7 +471,7 @@ async function world() {
     createHerdrClient: () => herdr,
     resolveHerdrArtifact: async () => ({ artifactDir: "/fixture/herdr" }),
     ensureHost: async () => {},
-    gitTip: async () => "base-commit",
+    gitTip: (cwd, ref) => fixtureTip(control, "base-commit", cwd, ref),
     now: () => "2026-09-23",
     uuid: () => `id-${++sequence}`,
     terminateBinding: async (binding) => {
@@ -483,6 +491,10 @@ async function world() {
         configure: async () => {},
         describe: async () => ({ ok: true, value: identity }),
         hasUserMessage: async (text) => prompts.get(binding.id)?.has(text) ?? false,
+        deliverUserAnswer: async () => ({
+          ok: false as const,
+          error: { code: "route_denied", message: "User answers use the dedicated RPC" },
+        }),
         send: async (envelope) =>
           registry((r) => {
             const claim = r.claim(binding.durableSessionId, envelope);
@@ -535,19 +547,28 @@ async function world() {
     },
   };
   const orchestrator = new Orchestrator(control, "/fixture/herdr", deps);
-  const digest = registry((r) => value(r.importScope(projectScope)).digest);
+  const digest = registry((r) => value(r.importScope(mappedProject)).digest);
   const create = () =>
     orchestrator.createParent({
       scopeDigest: digest,
       designationId: "project-approval",
       projectId: "project",
-      repo: control,
-      base: "main",
       execute: true,
       fixture: true,
     });
   const createManager = async () => {
-    const scopeDigest = registry((r) => value(r.importScope(managerScope)).digest);
+    const scopeDigest = registry(
+      (r) =>
+        value(
+          r.importScope({
+            ...managerScope,
+            projects: managerScope.projects.map((project) => ({
+              ...project,
+              repository: mappedProject.projects[0]?.repository,
+            })),
+          }),
+        ).digest,
+    );
     return value(
       await orchestrator.createSupervisor({
         scopeDigest,
@@ -560,12 +581,13 @@ async function world() {
   };
   return {
     control,
+    deps,
     orchestrator,
     registry,
     create,
     createManager,
     workspaces,
-    groupingRequests,
+    worktreeRequests,
     sends,
     launches,
     identities,
@@ -581,6 +603,198 @@ async function world() {
     },
   };
 }
+
+test.each(["manager", "same-designation supervisor", "cross-designation supervisor"] as const)(
+  "initialization uses the %s owner's real authorization, including reconcile",
+  async (kind) => {
+    const w = await world();
+    let owner: Binding;
+    if (kind === "manager") {
+      owner = w.registry((r) =>
+        activate(
+          r,
+          value(
+            reserve(
+              r,
+              "scope-free-manager",
+              {
+                version: 1,
+                source: "linear-export",
+                initiative: null,
+                projects: [],
+                decisionRefs: [],
+              },
+              { role: "manager" },
+              { id: "scope-free-approval" },
+            ),
+          ),
+        ),
+      );
+      w.identities.set(owner.id, {
+        durableSessionId: owner.durableSessionId,
+        sessionPath: owner.sessionPath ?? "",
+        cwd: owner.cwd,
+        ...modelForRole("manager"),
+        extensionProtocol: 2,
+      });
+      w.workspaces.set(owner.workspaceId ?? "", {
+        workspaceId: owner.workspaceId ?? "",
+        rootPaneId: owner.paneId ?? "",
+        cwd: owner.cwd,
+      });
+      // This fixture's owner shares the same native host as launched parents.
+      const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+      db.query("UPDATE bindings SET json = json_set(json, '$.omoSocket', ?) WHERE id = ?").run(
+        join(w.control, ".omo/state/omo.sock"),
+        owner.id,
+      );
+      db.close();
+    } else {
+      owner = await w.createManager();
+    }
+    const parent = value(
+      kind === "same-designation supervisor"
+        ? await w.orchestrator.createParent({
+            supervisorId: owner.id,
+            projectId: "project",
+          })
+        : await w.create(),
+    ).binding;
+    expect(parent.initialization.state).toBe("accepted");
+    if (kind === "cross-designation supervisor") {
+      expect(
+        await runCli(
+          [
+            "--root",
+            w.control,
+            "--herdr-socket",
+            "/fixture/herdr",
+            "parent",
+            "link",
+            "--parent",
+            parent.id,
+            "--supervisor",
+            owner.id,
+            "--json",
+          ],
+          w.deps,
+        ),
+      ).toBe(0);
+    }
+    const linked = w.registry((r) => value(r.get(parent.id)));
+    expect(linked.assignment).toMatchObject({ ownerBindingId: owner.id });
+    expect(linked.designationId).toBe(parent.designationId);
+    expect(linked.designationId === owner.designationId).toBe(
+      kind === "same-designation supervisor",
+    );
+    const assertEnvelope = () => {
+      const record = w.registry((r) => value(r.delivery(`initialization:${parent.id}`)));
+      expect(record).toMatchObject({
+        state: "accepted",
+        envelope: {
+          fromBindingId: owner.id,
+          toBindingId: parent.id,
+          designationId: owner.designationId,
+          snapshotDigest: w.registry((r) => value(r.designation(owner.designationId)))
+            .snapshotDigest,
+        },
+      });
+      expect(w.registry((r) => r.authorize(owner.durableSessionId, record.envelope))).toMatchObject(
+        { ok: true },
+      );
+      expect(
+        w.registry((r) =>
+          r.authorize(owner.durableSessionId, {
+            ...record.envelope,
+            designationId: "forged-approval",
+          }),
+        ),
+      ).toMatchObject({ ok: false, error: { code: "foreign_designation" } });
+      expect(
+        w.registry((r) =>
+          r.authorize(owner.durableSessionId, {
+            ...record.envelope,
+            snapshotDigest: "forged-snapshot",
+          }),
+        ),
+      ).toMatchObject({ ok: false, error: { code: "digest_mismatch" } });
+    };
+    if (kind !== "cross-designation supervisor") assertEnvelope();
+    // Persist a pre-initialization recovery fixture with the actual management
+    // link. Reconcile must build a new envelope, not replay a stored receipt.
+    const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+    db.query("DELETE FROM delivery_attempts WHERE message_id = ?").run(
+      `initialization:${parent.id}`,
+    );
+    db.query("DELETE FROM deliveries WHERE message_id = ?").run(`initialization:${parent.id}`);
+    const recovering: Binding = {
+      ...linked,
+      launchState: "provisioning",
+      initialization: { state: "pending", text: null },
+    };
+    db.query("UPDATE bindings SET launch_state = ?, json = ? WHERE id = ?").run(
+      recovering.launchState,
+      JSON.stringify(recovering),
+      parent.id,
+    );
+    db.close();
+    const launchCount = w.launches.length;
+    expect(await w.orchestrator.reconcile({ projectId: "project" })).toMatchObject({
+      ok: true,
+      value: { observed: 1 },
+    });
+    assertEnvelope();
+    expect(w.launches).toHaveLength(launchCount);
+    expect(w.registry((r) => value(r.get(parent.id)))).toMatchObject({
+      launchState: "ready",
+      initialization: { state: "accepted" },
+    });
+    // Sender approval must not bypass the target's contact guard.
+    w.registry((r) => value(r.setContactState(parent.id, "paused")));
+    expect(
+      w.registry((r) =>
+        r.authorize(
+          owner.durableSessionId,
+          value(r.delivery(`initialization:${parent.id}`)).envelope,
+        ),
+      ),
+    ).toMatchObject({ ok: false, error: { code: "contact_paused" } });
+  },
+);
+
+test("already-activated protocol-1 bindings remain valid during reconciliation", async () => {
+  const w = await world();
+  const registry = openRegistry(join(w.control, ".omo/state/registry.sqlite"));
+  value(registry.importScope(projectScope));
+  const parentBinding = activate(
+    registry,
+    value(
+      reserve(registry, "legacy-parent", projectScope, {
+        role: "parent",
+        projectId: "project",
+        initiativeId: null,
+        ownerBindingId: null,
+      }),
+    ),
+  );
+  registry.close();
+  if (parentBinding.workspaceId === null || parentBinding.paneId === null)
+    throw new Error("Missing legacy binding workspace");
+  w.workspaces.set(parentBinding.workspaceId, {
+    workspaceId: parentBinding.workspaceId,
+    rootPaneId: parentBinding.paneId,
+    cwd: parentBinding.cwd,
+  });
+  w.identities.set(parentBinding.id, {
+    durableSessionId: parentBinding.durableSessionId,
+    sessionPath: parentBinding.sessionPath ?? `/sessions/${parentBinding.id}`,
+    cwd: parentBinding.cwd,
+    ...modelForRole(parentBinding.assignment.role),
+    extensionProtocol: 1,
+  });
+  const result = await w.orchestrator.reconcile({ projectId: "project" });
+  expect(result).toMatchObject({ ok: true, value: { bindings: [{ launchState: "ready" }] } });
+});
 
 test.each(["reconcile", "close"] as const)(
   "known workspace identity survives display-name changes: %s",
@@ -607,22 +821,19 @@ test.each(["reconcile", "close"] as const)(
   },
 );
 
-test("new parent heads its group and child placement follows the actual parent workspace", async () => {
+test("child worktree creation uses the recorded parent repository", async () => {
   const w = await world();
   const parent = value(await w.create()).binding;
   if (parent.workspaceId === null) throw new Error("Missing parent workspace");
-  expect(w.groupingRequests.get(parent.workspaceId)).toEqual({ head: true });
+  expect(w.worktreeRequests.has(parent.workspaceId)).toBe(false);
   const child = value(
     await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
   ).binding;
   if (child.workspaceId === null) throw new Error("Missing child workspace");
-  expect(w.groupingRequests.get(child.workspaceId)).toEqual({
-    parentWorkspaceId: parent.workspaceId,
-  });
-  expect(w.workspaces.get(child.workspaceId)?.groupHeadWorkspaceId).toBe(parent.workspaceId);
+  expect(w.worktreeRequests.get(child.workspaceId)).toBe(parent.checkout?.originalRepoRoot);
 });
 
-test.each(["missing", "cwd", "child"] as const)(
+test.each(["missing", "cwd"] as const)(
   "refuses a mismatched parent workspace before reserving a child: %s",
   async (caseName) => {
     const w = await world();
@@ -631,37 +842,68 @@ test.each(["missing", "cwd", "child"] as const)(
     const workspace = w.workspaces.get(parent.workspaceId);
     if (!workspace) throw new Error("Missing parent snapshot");
     if (caseName === "missing") w.workspaces.delete(parent.workspaceId);
-    else
-      w.workspaces.set(
-        parent.workspaceId,
-        caseName === "cwd"
-          ? { ...workspace, cwd: "/unrelated" }
-          : { ...workspace, groupHeadWorkspaceId: "another-parent" },
-      );
+    else w.workspaces.set(parent.workspaceId, { ...workspace, cwd: "/unrelated" });
     expect(
       await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
     ).toMatchObject({ ok: false, error: { code: "owner_unavailable" } });
     expect(w.registry((registry) => value(registry.list()))).toEqual([parent]);
-    expect(w.groupingRequests.size).toBe(1);
+    expect(w.worktreeRequests.size).toBe(0);
   },
 );
 
-test("children of existing legacy parents retain their existing layout", async () => {
-  const w = await world();
-  const parent = value(await w.create()).binding;
-  if (parent.workspaceId === null) throw new Error("Missing parent workspace");
-  const current = w.workspaces.get(parent.workspaceId);
-  if (!current) throw new Error("Missing parent workspace snapshot");
-  const legacy = { ...current };
-  delete legacy.groupHeadWorkspaceId;
-  w.workspaces.set(parent.workspaceId, legacy);
-  const child = value(
-    await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" }),
-  ).binding;
-  if (child.workspaceId === null) throw new Error("Missing child workspace");
-  expect(w.groupingRequests.get(child.workspaceId)).toBeUndefined();
-  expect(w.workspaces.get(parent.workspaceId)).toEqual(legacy);
-});
+test.each(["linked-worktree", "missing-kind"])(
+  "doctor lists legacy parents (%s) without launching anything",
+  async (kind) => {
+    const w = await world();
+    const parent = value(await w.create()).binding;
+    const db = new Database(join(w.control, ".omo/state/registry.sqlite"));
+    try {
+      db.query(
+        kind === "missing-kind"
+          ? "UPDATE bindings SET json = json_remove(json, '$.checkout.kind') WHERE id = ?"
+          : "UPDATE bindings SET json = json_set(json, '$.checkout.kind', 'linked-worktree') WHERE id = ?",
+      ).run(parent.id);
+    } finally {
+      db.close();
+    }
+    const before = w.registry((r) => value(r.list()));
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../src/cli.ts"),
+        "--root",
+        w.control,
+        "doctor",
+        "--json",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [code, stdout] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).not.toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "legacy_parents_remaining",
+        details: {
+          legacyParents: [
+            {
+              bindingId: parent.id,
+              projectId: "project",
+              cwd: parent.cwd,
+              workspaceId: parent.workspaceId,
+              checkoutKind: "linked-worktree",
+            },
+          ],
+        },
+      },
+    });
+    expect(w.registry((r) => value(r.list()))).toEqual(before);
+  },
+);
 
 test("no-supervisor creation through child instruction, report and user inbox uses the real registry", async () => {
   const w = await world();
@@ -692,7 +934,9 @@ test("no-supervisor creation through child instruction, report and user inbox us
   });
   expect(w.prompts.get(p.id)?.size).toBe(1);
   expect(w.registry((r) => value(r.list())).map((b) => b.assignment.role)).toEqual(["parent"]);
-  const c = value(await w.orchestrator.createChild({ parentId: p.id, issueId: "issue" })).binding;
+  const c = value(
+    await w.orchestrator.createChild({ parentId: p.id, issueId: "issue", deliverable: "report" }),
+  ).binding;
   expect(c.checkout?.baseBranch).toBe(p.checkout?.branch);
   expect(c.checkout?.originalRepoRoot).toBe(p.checkout?.originalRepoRoot);
   expect(
@@ -711,6 +955,7 @@ test("no-supervisor creation through child instruction, report and user inbox us
       outcome: "completed",
       text: "verified",
       evidence: [],
+      delivery: { kind: "report", path: "/fixture/evidence" },
     }),
   ).toMatchObject({ ok: true, value: { state: "accepted", envelope: { toBindingId: p.id } } });
   const input = {
@@ -822,6 +1067,30 @@ test.each(["accepted", "uncertain"] as const)(
   },
 );
 
+test("a new parent report bypasses a paused manager and replay keeps the inbox recipient", async () => {
+  const w = await world();
+  const p = value(await w.create()).binding;
+  const m = await w.createManager();
+  value(w.orchestrator.linkParent(p.id, m.id));
+  value(w.orchestrator.setPaused(m.id, true));
+  const input = {
+    fromId: p.id,
+    messageId: "paused-manager-report",
+    outcome: "completed" as const,
+    text: "finished while manager was paused",
+    evidence: [],
+  };
+
+  const posted = await w.orchestrator.report(input);
+  expect(posted).toMatchObject({
+    ok: true,
+    value: { state: "posted", envelope: { toBindingId: null } },
+  });
+  value(w.orchestrator.setPaused(m.id, false));
+  expect(await w.orchestrator.report(input)).toEqual(posted);
+  expect(w.sends).toHaveLength(0);
+});
+
 test("manager pause, loss and close are independent of parent pause and local user reporting", async () => {
   const w = await world();
   const p = value(await w.create()).binding;
@@ -838,8 +1107,8 @@ test("manager pause, loss and close are independent of parent pause and local us
     });
   value(w.orchestrator.setPaused(m.id, true));
   expect(await report("manager-paused")).toMatchObject({
-    ok: false,
-    error: { code: "contact_paused" },
+    ok: true,
+    value: { state: "posted", envelope: { toBindingId: null } },
   });
   expect(await report("question", true)).toMatchObject({ ok: true, value: { state: "posted" } });
   const c = value(await w.orchestrator.createChild({ parentId: p.id, issueId: "issue" })).binding;

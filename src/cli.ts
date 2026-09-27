@@ -5,10 +5,17 @@ import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Result, ScopeFilter } from "./core/contracts";
 import { canRetryDelivery } from "./core/policy";
-import { deliveryRecordSchema } from "./core/schema";
+import {
+  answerFieldsSchema,
+  deliverableSchema,
+  deliveryRecordSchema,
+  questionPayloadSchema,
+} from "./core/schema";
+import { openRegistry } from "./core/store";
 import { resolveHerdrArtifact } from "./herdr/artifact";
-import { Orchestrator } from "./orchestrator";
+import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
+import { fetchMirror, listMirrors, MirrorError } from "./repo/mirror";
 
 type Options = Readonly<Record<string, string | true | readonly string[]>>;
 const valueFlags = new Set([
@@ -32,8 +39,33 @@ const valueFlags = new Set([
   "outcome",
   "evidence",
   "binding",
+  "mode",
+  "question",
+  "questions-file",
+  "answers-file",
+  "plan",
+  "head",
+  "stage",
+  "tag",
+  "remote",
+  "deliverable",
+  "deliverable-path",
+  "pr",
+  "title",
+  "body-file",
 ]);
-const booleanFlags = new Set(["json", "fixture", "execute", "help", "confirm-absent", "to-user"]);
+const booleanFlags = new Set([
+  "json",
+  "fixture",
+  "execute",
+  "help",
+  "confirm-absent",
+  "to-user",
+  "as-user",
+  "no-manager",
+  "draft",
+  "discard",
+]);
 
 function parseArguments(
   argv: readonly string[],
@@ -64,7 +96,7 @@ function parseArguments(
         error: { code: "invalid_arguments", message: `Option --${key} requires a value` },
       };
     index += 1;
-    if (key === "evidence") {
+    if (key === "evidence" || key === "tag") {
       const current = mutable[key];
       mutable[key] = Array.isArray(current) ? [...current, value] : [value];
     } else mutable[key] = value;
@@ -82,6 +114,25 @@ function has(options: Options, key: string): boolean {
 function evidence(options: Options): readonly string[] {
   const value = options["evidence"];
   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+}
+async function jsonFile<T>(
+  path: string | undefined,
+  schema: z.ZodType<T>,
+  flag: string,
+): Promise<Result<T | undefined>> {
+  if (path === undefined) return { ok: true, value: undefined };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(path, "utf8"));
+  } catch (cause) {
+    return invalid(
+      `Could not read ${flag}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+  const parsed = schema.safeParse(raw);
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : invalid(`${flag} is invalid`, parsed.error.issues);
 }
 function invalid(message: string, details?: unknown): Result<never> {
   return details === undefined
@@ -103,6 +154,7 @@ function exitCode(result: Result<unknown>): number {
   if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
     return 4;
   if (result.error.code === "runtime_unavailable") return 3;
+  if (result.error.code === "interrupted") return 130;
   return 2;
 }
 function deliveryOutcome(result: Result<unknown>): Result<unknown> {
@@ -166,6 +218,40 @@ async function doctor(
   herdrSocket?: string,
 ): Promise<Result<{ sideEffects: false; paths: unknown; checks: unknown }>> {
   const paths = new Orchestrator(root, herdrSocket).paths();
+  const database = join(root, ".omo/state/registry.sqlite");
+  if (await Bun.file(database).exists()) {
+    const registry = openRegistry(database, { readonly: true });
+    try {
+      const bindings = registry.list();
+      if (!bindings.ok) return bindings;
+      const legacyParents = bindings.value
+        .filter(
+          (binding) =>
+            binding.assignment.role === "parent" &&
+            binding.launchState !== "closed" &&
+            binding.checkout?.kind !== "owned-clone",
+        )
+        .map((binding) => ({
+          bindingId: binding.id,
+          projectId: binding.assignment.role === "parent" ? binding.assignment.projectId : null,
+          cwd: binding.cwd,
+          workspaceId: binding.workspaceId,
+          checkoutKind: binding.checkout?.kind ?? "legacy",
+        }));
+      if (legacyParents.length > 0)
+        return {
+          ok: false,
+          error: {
+            code: "legacy_parents_remaining",
+            message:
+              "Official Herdr switch blocked: legacy parents remain. Resolve the listed linked-worktree parents with user approval before switching servers.",
+            details: { legacyParents },
+          },
+        };
+    } finally {
+      registry.close();
+    }
+  }
   const herdr = await resolveHerdrArtifact(root);
   const checks = {
     bun: process.execPath,
@@ -200,10 +286,11 @@ async function doctor(
 }
 
 async function doctorWithChains(root: string, herdrSocket?: string): Promise<Result<unknown>> {
+  const repositories = await listMirrors(root);
   const result = await doctor(root, herdrSocket);
   if (!result.ok) return result;
   const home = process.env["HOME"] ?? homedir();
-  const value = { ...result.value, chains: {} as unknown };
+  const value = { ...result.value, repositories, chains: {} as unknown };
   try {
     const chains = await readChainReport({
       configPath: join(home, ".omo/omo.jsonc"),
@@ -224,7 +311,10 @@ async function doctorWithChains(root: string, herdrSocket?: string): Promise<Res
   }
 }
 
-export async function runCli(argv: readonly string[]): Promise<number> {
+export async function runCli(
+  argv: readonly string[],
+  dependencies?: OrchestratorDependencies,
+): Promise<number> {
   const parsed = parseArguments(argv);
   if (!parsed.ok) {
     print(parsed, true);
@@ -239,15 +329,27 @@ export async function runCli(argv: readonly string[]): Promise<number> {
           usage: "olw [--root PATH] [--herdr-socket PATH] COMMAND [OPTIONS] [--json]",
           commands: [
             "doctor",
+            "manage",
+            "update check",
+            "update prepare",
             "scope import",
+            "repo list",
+            "repo fetch",
             "supervisor create",
             "parent create",
             "parent link",
             "parent unlink",
             "child create",
+            "pr open",
+            "pr merge",
+            "stage complete",
+            "stage start",
             "send",
             "report",
             "reports",
+            "ask",
+            "answer",
+            "questions",
             "notices",
             "status",
             "pause",
@@ -255,26 +357,45 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             "close",
             "reconcile",
           ],
+          deprecatedOptions: { "parent create": ["--repo"] },
           options: {
+            manage: "[--json]",
+            "update check": "[--tag omo-ai=beta] [--tag @code-yeongyu/senpi=latest] [--json]",
+            "update prepare":
+              "[--remote NAME|URL] [--json] (PR to dev for the latest check's versions; OLW_GH_BIN overrides gh)",
             "scope import": "--file PATH [--fixture]",
+            "repo list": "[--json]",
+            "repo fetch": "--remote URL [--json]",
             "supervisor create":
               "--initiative ID --scope-digest DIGEST --designation ID --execute [--fixture]",
             "parent create":
-              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture]) --project ID --repo PATH --base REF",
-            "parent link": "--parent BINDING --supervisor BINDING",
+              "(--supervisor BINDING | --scope-digest DIGEST --designation ID --execute [--fixture] [--no-manager]) --project ID [--repo PATH (deprecated; rejected with legacy_parent_unsupported)] [--base REF] (mapped projects use an owned clone; standalone parents link to the ready manager unless --no-manager)",
+            "parent link": "--parent BINDING --supervisor BINDING (supervisor or manager)",
             "parent unlink": "--parent BINDING",
-            "child create": "--parent BINDING --issue ID",
+            "child create":
+              "--parent BINDING --issue ID [--mode direct|planned|research] [--deliverable pr|report|document]",
+            "pr open":
+              "--from BINDING [--title T] --body-file F [--draft] [--base DEFAULT_BRANCH (parent only; body optional)] [--json]",
+            "pr merge": "--from PARENT --pr URL|NUMBER [--json]",
+            "stage complete":
+              "--from PLAN_BINDING --plan ABS_PATH --head SHA --id MESSAGE_ID --text-file PATH",
+            "stage start":
+              "--from PLAN_BINDING --parent PARENT_BINDING --stage execute --id MESSAGE_ID",
             send: "--from BINDING --to BINDING --id ID --kind instruction|coordination --text-file PATH",
             report:
-              "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--to-user]",
+              "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--pr URL --head SHA | --deliverable-path PATH_OR_URL] [--to-user]",
             reports:
               "[--initiative ID | --project ID] (read-only user inbox; posted is not native acceptance)",
+            ask: "--from BINDING --id ID --text-file PATH [--questions-file JSON] [--to-user]",
+            answer:
+              "(--from BINDING | --as-user) --question QUESTION_ID --text-file PATH [--answers-file JSON]",
+            questions: "[--initiative ID | --project ID] (read-only; never wakes a role)",
             notices:
               "[--initiative ID | --project ID] (read-only operational telemetry; not completion reports)",
             status: "[--initiative ID | --project ID]",
             pause: "--binding ID",
             resume: "--binding ID",
-            close: "--binding ID [--confirm-absent]",
+            close: "--binding ID [--confirm-absent] [--discard]",
             reconcile: "--initiative ID | --project ID",
           },
         },
@@ -284,12 +405,51 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     return 0;
   }
   const root = resolve(stringOption(options, "root") ?? join(import.meta.dir, ".."));
-  const orchestrator = new Orchestrator(root, stringOption(options, "herdr-socket"));
-  let result: Result<unknown>;
+  const orchestrator = new Orchestrator(root, stringOption(options, "herdr-socket"), dependencies);
+  let result: Result<unknown> | undefined;
   const command = words.join(" ");
   try {
-    if (command === "doctor") {
+    if (command === "update check") {
+      const tags: Record<string, string> = {};
+      const rawTags = options["tag"];
+      for (const raw of Array.isArray(rawTags)
+        ? rawTags
+        : typeof rawTags === "string"
+          ? [rawTags]
+          : []) {
+        const split = raw.indexOf("=");
+        const tagValue = split < 0 ? "" : raw.slice(split + 1);
+        if (
+          split < 1 ||
+          split !== raw.lastIndexOf("=") ||
+          split === raw.length - 1 ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(tagValue)
+        ) {
+          result = invalid("--tag must be PACKAGE=TAG with a valid dist-tag");
+          break;
+        }
+        const name = raw.slice(0, split);
+        if (name !== "omo-ai" && name !== "@code-yeongyu/senpi") {
+          result = invalid(`Unsupported package tag ${name}`);
+          break;
+        }
+        tags[name] = raw.slice(split + 1);
+      }
+      if (result === undefined) result = await orchestrator.updateCheck(tags);
+    } else if (command === "update prepare") {
+      const remote = stringOption(options, "remote");
+      result = await orchestrator.updatePrepare(remote === undefined ? {} : { remote });
+    } else if (command === "doctor") {
       result = await doctorWithChains(root, stringOption(options, "herdr-socket"));
+    } else if (command === "repo list") {
+      result = { ok: true, value: await listMirrors(root) };
+    } else if (command === "repo fetch") {
+      const values = requireOptions(options, ["remote"]);
+      result = values.ok
+        ? { ok: true, value: await fetchMirror(root, values.value["remote"] ?? "") }
+        : values;
+    } else if (command === "manage") {
+      result = await orchestrator.manage();
     } else if (command === "scope import") {
       const values = requireOptions(options, ["file"]);
       result = values.ok
@@ -308,13 +468,15 @@ export async function runCli(argv: readonly string[]): Promise<number> {
         : values;
     } else if (command === "parent create") {
       const supervisorId = stringOption(options, "supervisor");
-      const standaloneFlags = ["scope-digest", "designation", "execute", "fixture"].some(
-        (key) => options[key] !== undefined,
-      );
+      const standaloneFlags = [
+        "scope-digest",
+        "designation",
+        "execute",
+        "fixture",
+        "no-manager",
+      ].some((key) => options[key] !== undefined);
       const values = requireOptions(options, [
         "project",
-        "repo",
-        "base",
         ...(supervisorId === undefined ? ["scope-digest", "designation"] : []),
       ]);
       if (supervisorId !== undefined && standaloneFlags)
@@ -323,8 +485,12 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       else {
         const location = {
           projectId: values.value["project"] ?? "",
-          repo: values.value["repo"] ?? "",
-          base: values.value["base"] ?? "",
+          ...(stringOption(options, "repo") === undefined
+            ? {}
+            : { repo: stringOption(options, "repo") }),
+          ...(stringOption(options, "base") === undefined
+            ? {}
+            : { base: stringOption(options, "base") }),
         };
         result = await orchestrator.createParent(
           supervisorId !== undefined
@@ -335,6 +501,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
                 designationId: values.value["designation"] ?? "",
                 execute: has(options, "execute"),
                 fixture: has(options, "fixture"),
+                ...(has(options, "no-manager") ? { noManager: true } : {}),
               },
         );
       }
@@ -348,14 +515,75 @@ export async function runCli(argv: readonly string[]): Promise<number> {
           ? orchestrator.linkParent(values.value["parent"] ?? "", values.value["supervisor"] ?? "")
           : orchestrator.unlinkParent(values.value["parent"] ?? "")
         : values;
-    } else if (command === "child create") {
-      const values = requireOptions(options, ["parent", "issue"]);
+    } else if (command === "pr open") {
+      const values = requireOptions(options, ["from"]);
       result = values.ok
-        ? await orchestrator.createChild({
-            parentId: values.value["parent"] ?? "",
-            issueId: values.value["issue"] ?? "",
+        ? await orchestrator.prOpen({
+            fromId: values.value["from"] ?? "",
+            title: stringOption(options, "title"),
+            bodyFile: stringOption(options, "body-file"),
+            base: stringOption(options, "base"),
+            draft: has(options, "draft"),
           })
         : values;
+    } else if (command === "pr merge") {
+      const values = requireOptions(options, ["from", "pr"]);
+      result = values.ok
+        ? await orchestrator.prMerge(values.value["from"] ?? "", values.value["pr"] ?? "")
+        : values;
+    } else if (command === "child create") {
+      const values = requireOptions(options, ["parent", "issue"]);
+      const mode = values.ok
+        ? z
+            .enum(["direct", "planned", "research"])
+            .default("direct")
+            .safeParse(stringOption(options, "mode"))
+        : undefined;
+      const deliverable = deliverableSchema
+        .optional()
+        .safeParse(stringOption(options, "deliverable"));
+      result = !deliverable.success
+        ? invalid("--deliverable must be pr, report, or document")
+        : values.ok && mode?.success
+          ? await orchestrator.createChild({
+              parentId: values.value["parent"] ?? "",
+              issueId: values.value["issue"] ?? "",
+              mode: mode.data,
+              deliverable: deliverable.data,
+            })
+          : !values.ok
+            ? values
+            : invalid("--mode must be direct, planned, or research");
+    } else if (command === "stage complete") {
+      const values = requireOptions(options, ["from", "plan", "head", "id", "text-file"]);
+      const body = values.ok
+        ? await text(values.value["text-file"])
+        : invalid("--text-file is required");
+      result =
+        values.ok && body.ok
+          ? await orchestrator.stageComplete({
+              fromId: values.value["from"] ?? "",
+              planPath: values.value["plan"] ?? "",
+              head: values.value["head"] ?? "",
+              messageId: values.value["id"] ?? "",
+              text: body.value,
+            })
+          : values.ok
+            ? body
+            : values;
+    } else if (command === "stage start") {
+      const values = requireOptions(options, ["from", "parent", "stage", "id"]);
+      result =
+        values.ok && values.value["stage"] === "execute"
+          ? await orchestrator.stageStart({
+              fromId: values.value["from"] ?? "",
+              stage: "execute",
+              parentId: values.value["parent"] ?? "",
+              messageId: values.value["id"] ?? "",
+            })
+          : values.ok
+            ? invalid("--stage must be execute")
+            : values;
     } else if (command === "send") {
       const values = requireOptions(options, ["from", "to", "id", "kind", "text-file"]);
       const kind = values.ok
@@ -386,35 +614,120 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       const body = values.ok
         ? await text(values.value["text-file"])
         : invalid("--text-file is required");
+      const pr = stringOption(options, "pr");
+      const head = stringOption(options, "head");
+      const path = stringOption(options, "deliverable-path");
+      const source = values.ok ? orchestrator.status() : undefined;
+      const from = stringOption(options, "from");
+      const binding = source?.ok ? source.value.find((b) => b.id === from) : undefined;
+      const kind = binding?.deliverable;
       result =
-        values.ok && outcome?.success && body.ok
-          ? await orchestrator.report({
+        (pr === undefined) !== (head === undefined) || (path !== undefined && pr !== undefined)
+          ? invalid("Use --pr URL with --head SHA, or --deliverable-path PATH")
+          : path !== undefined && kind !== "report" && kind !== "document"
+            ? invalid("--deliverable-path requires a report/document binding")
+            : values.ok && outcome?.success && body.ok
+              ? await orchestrator.report({
+                  fromId: values.value["from"] ?? "",
+                  messageId: values.value["id"] ?? "",
+                  outcome: outcome.data,
+                  toUser: has(options, "to-user"),
+                  evidence: evidence(options),
+                  text: body.value,
+                  ...(pr !== undefined && head !== undefined
+                    ? { delivery: { kind: "pr", url: pr, head } as const }
+                    : path !== undefined && (kind === "report" || kind === "document")
+                      ? { delivery: { kind, path } }
+                      : {}),
+                })
+              : !values.ok
+                ? values
+                : !body.ok
+                  ? body
+                  : invalid("--outcome must be completed, blocked, or failed");
+    } else if (command === "ask") {
+      const values = requireOptions(options, ["from", "id", "text-file"]);
+      const body = values.ok ? await text(values.value["text-file"]) : invalid("");
+      const questions = await jsonFile(
+        stringOption(options, "questions-file"),
+        questionPayloadSchema,
+        "--questions-file",
+      );
+      result =
+        values.ok && body.ok && questions.ok
+          ? await orchestrator.ask({
               fromId: values.value["from"] ?? "",
               messageId: values.value["id"] ?? "",
-              outcome: outcome.data,
-              toUser: has(options, "to-user"),
-              evidence: evidence(options),
               text: body.value,
+              toUser: has(options, "to-user"),
+              questions: questions.value,
             })
           : !values.ok
             ? values
             : !body.ok
               ? body
-              : invalid("--outcome must be completed, blocked, or failed");
-    } else if (command === "status" || command === "reports" || command === "notices") {
+              : questions;
+    } else if (command === "answer") {
+      const values = requireOptions(options, ["question", "text-file"]);
+      const body = values.ok ? await text(values.value["text-file"]) : invalid("");
+      const answers = await jsonFile(
+        stringOption(options, "answers-file"),
+        answerFieldsSchema,
+        "--answers-file",
+      );
+      const fromId = stringOption(options, "from");
+      const asUser = has(options, "as-user");
+      const fields =
+        answers.ok && answers.value !== undefined
+          ? { answers: answers.value.answers, unanswered: answers.value.unanswered }
+          : {};
+      result = !values.ok
+        ? values
+        : !body.ok
+          ? body
+          : !answers.ok
+            ? answers
+            : asUser && fromId !== undefined
+              ? invalid("--as-user cannot be combined with --from")
+              : asUser
+                ? await orchestrator.answerAsUser({
+                    questionId: values.value["question"] ?? "",
+                    text: body.value,
+                    ...fields,
+                  })
+                : fromId === undefined
+                  ? invalid("--from or --as-user is required")
+                  : await orchestrator.answer({
+                      fromId,
+                      questionId: values.value["question"] ?? "",
+                      text: body.value,
+                      ...fields,
+                    });
+    } else if (
+      command === "status" ||
+      command === "reports" ||
+      command === "notices" ||
+      command === "questions"
+    ) {
       const filter = scopeFilter(options, false);
       result = filter.ok
         ? command === "reports"
           ? orchestrator.reports(filter.value)
           : command === "notices"
             ? orchestrator.notices(filter.value)
-            : orchestrator.status(filter.value)
+            : command === "questions"
+              ? orchestrator.questions(filter.value)
+              : orchestrator.status(filter.value)
         : filter;
     } else if (command === "pause" || command === "resume" || command === "close") {
       const values = requireOptions(options, ["binding"]);
       result = values.ok
         ? command === "close"
-          ? await orchestrator.close(values.value["binding"] ?? "", has(options, "confirm-absent"))
+          ? await orchestrator.close(
+              values.value["binding"] ?? "",
+              has(options, "confirm-absent"),
+              has(options, "discard"),
+            )
           : orchestrator.setPaused(values.value["binding"] ?? "", command === "pause")
         : values;
     } else if (command === "reconcile") {
@@ -422,21 +735,27 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       result = filter.ok ? await orchestrator.reconcile(filter.value) : filter;
     } else {
       result = invalid(
-        "Command must be doctor, scope import, supervisor/parent/child create, parent link/unlink, send, report, reports, notices, status, pause, resume, close, or reconcile",
+        "Command must be doctor, manage, update check/prepare, scope import, repo list/fetch, supervisor/parent/child create, parent link/unlink, stage complete/start, send, report, reports, ask, answer, questions, notices, status, pause, resume, close, or reconcile",
       );
     }
   } catch (cause) {
     result = {
       ok: false,
       error: {
-        code: "runtime_unavailable",
+        code: cause instanceof MirrorError ? cause.code : "runtime_unavailable",
         message: cause instanceof Error ? cause.message : String(cause),
+        ...(cause instanceof MirrorError && cause.details !== undefined
+          ? { details: cause.details }
+          : {}),
       },
     };
   }
-  if (command === "send" || command === "report") result = deliveryOutcome(result);
-  print(result, has(options, "json"));
-  return exitCode(result);
+  const finalResult = result ?? invalid("Invalid update check tag");
+  if (["send", "report", "stage complete", "ask", "answer"].includes(command))
+    result = deliveryOutcome(finalResult);
+  const completed = result ?? finalResult;
+  print(completed, has(options, "json"));
+  return exitCode(completed);
 }
 
 if (import.meta.main) process.exitCode = await runCli(process.argv.slice(2));

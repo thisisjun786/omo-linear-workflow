@@ -1,273 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import type {
-  Binding,
-  Designation,
-  Envelope,
-  NativeReceipt,
-  Result,
-  ScopeSnapshot,
-} from "../src/core/contracts";
+import type { Binding, NativeReceipt, ScopeSnapshot } from "../src/core/contracts";
 import { modelForRole } from "../src/core/policy";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
-import {
-  type RuntimePort,
-  registerInitiativeRuntime,
-  type SessionContextPort,
-} from "../src/extension/runtime";
-
-const snapshot: ScopeSnapshot = {
-  version: 1,
-  source: "fixture",
-  initiative: { id: "initiative-1", url: "linear://initiative-1", revision: "rev-1" },
-  projects: [
-    {
-      project: { id: "project-1", url: "linear://project-1", revision: "rev-1" },
-      issues: [{ id: "issue-1", url: "linear://issue-1", revision: "rev-1" }],
-    },
-  ],
-  decisionRefs: [],
-};
-
-function value<T>(result: Result<T>): T {
-  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
-  return result.value;
-}
-
-interface Fixture {
-  readonly root: string;
-  readonly supervisor: Binding;
-  readonly parent: Binding;
-  readonly child: Binding;
-  readonly digest: string;
-}
-
-async function fixture(run: (fixture: Fixture) => Promise<void>): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "omo-events-"));
-  await mkdir(join(root, ".omo/state"), { recursive: true });
-  const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
-  const digest = value(registry.importScope(snapshot)).digest;
-  const designation: Designation = {
-    id: "designation-1",
-    snapshotDigest: digest,
-    designatedBy: "test",
-    designatedAt: "2026-09-22T00:00:00Z",
-    execute: true,
-    create: true,
-    contact: true,
-  };
-  const reserve = (bindingId: string, assignment: Binding["assignment"]) =>
-    value(
-      registry.reserve({
-        bindingId,
-        durableSessionId: `session-${bindingId}`,
-        designation,
-        snapshot,
-        assignment,
-        cwd: `/repo/${bindingId}`,
-        checkout: null,
-        herdrSocket: join(root, "herdr.sock"),
-        omoSocket: join(root, "omo.sock"),
-      }),
-    );
-  const supervisor = reserve("supervisor", { role: "supervisor", initiativeId: "initiative-1" });
-  const parent = reserve("parent", {
-    role: "parent",
-    initiativeId: "initiative-1",
-    projectId: "project-1",
-    ownerBindingId: supervisor.id,
-  });
-  const child = reserve("child", {
-    role: "child",
-    initiativeId: "initiative-1",
-    projectId: "project-1",
-    issueId: "issue-1",
-    ownerBindingId: parent.id,
-  });
-  const models: Record<
-    Binding["assignment"]["role"],
-    { readonly provider: string; readonly modelId: string; readonly thinking: string }
-  > = {
-    supervisor: modelForRole("supervisor"),
-    parent: modelForRole("parent"),
-    child: modelForRole("child"),
-  };
-  const activate = (binding: Binding) => {
-    value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
-    value(registry.observeSession(binding.id, `/sessions/${binding.id}.jsonl`));
-    const configured = value(
-      registry.activate(binding.id, {
-        durableSessionId: binding.durableSessionId,
-        sessionPath: `/sessions/${binding.id}.jsonl`,
-        cwd: binding.cwd,
-        ...models[binding.assignment.role],
-        extensionProtocol: 1,
-      }),
-    );
-    value(registry.beginInitialization(configured.id, "Fixture initialization"));
-    return value(registry.finishInitialization(configured.id, "accepted"));
-  };
-  const ready = {
-    supervisor: activate(supervisor),
-    parent: activate(parent),
-    child: activate(child),
-  };
-  registry.close();
-  try {
-    await run({ root, ...ready, digest });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-}
-
-function envelope(
-  from: Binding,
-  to: Binding,
-  digest: string,
-  id: string,
-  kind: Envelope["kind"] = "instruction",
-): Envelope {
-  return {
-    version: 1,
-    id,
-    fromBindingId: from.id,
-    toBindingId: to.id,
-    designationId: from.designationId,
-    snapshotDigest: digest,
-    kind,
-    text: "payload",
-    outcome: kind === "report" ? "completed" : null,
-    evidence: [],
-  };
-}
-
-class Harness implements RuntimePort {
-  sessionStart: ((ctx: SessionContextPort) => Promise<void>) | undefined;
-  resources: (() => { readonly skillPaths: readonly string[] }) | undefined;
-  toolCall:
-    | ((
-        name: string,
-        input: Readonly<Record<string, unknown>>,
-        ctx: SessionContextPort,
-      ) => Promise<{ readonly block: boolean; readonly reason?: string } | undefined>)
-    | undefined;
-  readonly handlers = new Map<string, (data: unknown) => Promise<unknown>>();
-  readonly activated: string[][] = [];
-  readonly execCalls: Array<{
-    readonly command: string;
-    readonly args: readonly string[];
-    readonly options: { readonly timeout: number } | undefined;
-  }> = [];
-  readonly reports: Array<readonly [string, string, string]> = [];
-  executeCount = 0;
-  readonly nativeInputs: unknown[] = [];
-  afterNative: (() => Promise<void>) | undefined;
-  currentContext: SessionContextPort | undefined;
-  receipt: unknown = {
-    kind: "ok",
-    thread_id: "session-parent",
-    message_seq: 7,
-    deduplicated: false,
-    delivery: { kind: "started", turn_id: "turn-1" },
-  };
-
-  onSessionStart(handler: (ctx: SessionContextPort) => Promise<void>): void {
-    this.sessionStart = handler;
-  }
-  onTurnEnd(): void {}
-  notifyOperational(): void {}
-  onResourcesDiscover(handler: () => { readonly skillPaths: readonly string[] }): void {
-    this.resources = handler;
-  }
-  onToolCall(
-    handler: (
-      name: string,
-      input: Readonly<Record<string, unknown>>,
-      ctx: SessionContextPort,
-    ) => Promise<{ readonly block: boolean; readonly reason?: string } | undefined>,
-  ): void {
-    this.toolCall = handler;
-  }
-  handleRpc(name: string, handler: (data: unknown) => Promise<unknown>): void {
-    this.handlers.set(name, handler);
-  }
-  async exec(command: string, args: readonly string[], options?: { readonly timeout: number }) {
-    this.execCalls.push({ command, args: [...args], options });
-    const encoded = command === "bun" ? args[1] : args[3];
-    if (encoded === undefined)
-      return { stdout: "", stderr: "missing worker request", code: 1, killed: false };
-    const child = Bun.spawn(["bun", join(import.meta.dir, "../src/core/worker.ts"), encoded], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { stdout, stderr, code, killed: false };
-  }
-  getActiveTools(): readonly string[] {
-    return [];
-  }
-  setActiveTools(tools: readonly string[]): void {
-    this.activated.push([...tools]);
-  }
-  async executeTool(name: string, input: unknown) {
-    if (this.currentContext === undefined) throw new Error("Session was not started");
-    const decision = await this.guard()(
-      name,
-      z.record(z.string(), z.unknown()).parse(input),
-      this.currentContext,
-    );
-    if (decision?.block) throw new Error(decision.reason);
-    this.executeCount += 1;
-    this.nativeInputs.push(input);
-    await this.afterNative?.();
-    return { details: { result: this.receipt } };
-  }
-  async reportSession(socket: string, pane: string, path: string): Promise<void> {
-    this.reports.push([socket, pane, path]);
-  }
-
-  rpc(name: string): (data: unknown) => Promise<unknown> {
-    const handler = this.handlers.get(name);
-    if (handler === undefined) throw new Error(`Missing RPC handler ${name}`);
-    return handler;
-  }
-  start(): (ctx: SessionContextPort) => Promise<void> {
-    if (this.sessionStart === undefined) throw new Error("Missing session_start handler");
-    const handler = this.sessionStart;
-    return async (ctx) => {
-      this.currentContext = ctx;
-      await handler(ctx);
-    };
-  }
-  guard() {
-    if (this.toolCall === undefined) throw new Error("Missing tool_call handler");
-    return this.toolCall;
-  }
-}
-
-function context(binding: Binding, mode: SessionContextPort["mode"] = "rpc"): SessionContextPort {
-  const { provider, modelId, thinking } = modelForRole(binding.assignment.role);
-  return {
-    cwd: binding.cwd,
-    mode,
-    model: { provider, id: modelId },
-    thinkingLevel: thinking,
-    disableModelFallbackForSession: () => undefined,
-    sessionManager: {
-      getSessionId: () => binding.durableSessionId,
-      getSessionFile: () => binding.sessionPath ?? undefined,
-      getBranch: () => [],
-    },
-  };
-}
+import { registerInitiativeRuntime } from "../src/extension/runtime";
+import { context, envelope, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
 
 function resultCode(value: unknown): string {
   if (typeof value !== "object" || value === null || !("ok" in value)) return "invalid";
@@ -349,7 +88,7 @@ describe("native delivery extension", () => {
           sessionPath: parent.sessionPath,
           cwd: parent.cwd,
           ...modelForRole("parent"),
-          extensionProtocol: 1,
+          extensionProtocol: 2,
         },
       });
     });
@@ -556,7 +295,251 @@ describe("native delivery extension", () => {
     });
   });
 
-  test("publishes the bound TUI readiness receipt and discovers four skills", async () => {
+  test("routes bound role questions with stable IDs, replay and actual delivery outcomes", async () => {
+    await fixture(async ({ root, child, parent }) => {
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(child));
+      const questions = {
+        questions: [
+          {
+            id: "choice",
+            question: "Choose?",
+            options: [{ label: "Yes", description: "Proceed" }],
+            multiSelect: false,
+          },
+        ],
+      };
+      for (const name of ["request_user_input", "ask_user_question"]) {
+        expect(await harness.guard()(name, questions, context(child))).toEqual({
+          block: true,
+          reason: "OLW role: use olw_ask with the same questions; the answer arrives as a delivery",
+        });
+        expect(await harness.guard()(name, questions, context(parent))).toMatchObject({
+          block: true,
+        });
+      }
+      expect(harness.tools.has("olw_ask")).toBe(true);
+      harness.receipt = {
+        kind: "ok",
+        thread_id: parent.durableSessionId,
+        message_seq: 1,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "turn" },
+      };
+      const first = await harness.callTool("olw_ask", "call-1", questions);
+      expect(first).toMatchObject({
+        state: "accepted",
+        disposition: "new",
+        id: `question:${child.id}:call-1`,
+        instruction: "end your turn; the answer arrives as a message",
+      });
+      expect(await harness.callTool("olw_ask", "call-1", questions)).toMatchObject({
+        state: "accepted",
+        disposition: "replay",
+      });
+      expect(harness.executeCount).toBe(1);
+      harness.receipt = {
+        kind: "error",
+        error: { code: "recipient_closed", message: "closed", next_action: "inspect" },
+      };
+      expect(await harness.callTool("olw_ask", "call-2", questions)).toMatchObject({
+        state: "rejected",
+        id: `question:${child.id}:call-2`,
+      });
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        value(registry.setContactState(parent.id, "paused"));
+      } finally {
+        registry.close();
+      }
+      expect(await harness.callTool("olw_ask", "call-3", questions)).toMatchObject({
+        ok: false,
+        error: { code: "contact_paused" },
+      });
+      expect(harness.executeCount).toBe(2);
+    });
+  });
+
+  test("posts parent questions without a ready owner; manager and unbound sessions are untouched", async () => {
+    await fixture(async ({ root, parent, supervisor }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        value(registry.beginClose(supervisor.id));
+        value(registry.finishClose(supervisor.id));
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const questions = {
+        questions: [
+          { id: "q", question: "Decision?", options: [{ label: "Yes" }], multiSelect: false },
+        ],
+      };
+      expect(await harness.callTool("olw_ask", "parent-call", questions)).toMatchObject({
+        state: "posted",
+        id: `question:${parent.id}:parent-call`,
+      });
+      expect(harness.executeCount).toBe(0);
+      expect(await harness.callTool("olw_ask", "parent-call", questions)).toMatchObject({
+        state: "posted",
+        disposition: "replay",
+      });
+      const unbound = context({ ...parent, durableSessionId: "unbound" });
+      for (const name of ["request_user_input", "ask_user_question"])
+        expect(await harness.guard()(name, {}, unbound)).toBeUndefined();
+    });
+  });
+
+  test("posts a new parent question when its linked manager is paused and preserves replay", async () => {
+    await fixture(async ({ root, parent }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager = linkReadyManager(registry, parent, root);
+        value(registry.setContactState(manager.id, "paused"));
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const questions = {
+        questions: [
+          { id: "q", question: "Which way?", options: [{ label: "Yes" }], multiSelect: false },
+        ],
+      };
+      expect(await harness.callTool("olw_ask", "paused-manager", questions)).toMatchObject({
+        state: "posted",
+        disposition: "new",
+        id: `question:${parent.id}:paused-manager`,
+      });
+      expect(harness.executeCount).toBe(0);
+      expect(await harness.callTool("olw_ask", "paused-manager", questions)).toMatchObject({
+        state: "posted",
+        disposition: "replay",
+      });
+      expect(harness.executeCount).toBe(0);
+      const inbox = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        expect(value(inbox.postedQuestions({}))).toMatchObject([
+          {
+            record: {
+              state: "posted",
+              envelope: {
+                id: `question:${parent.id}:paused-manager`,
+                toBindingId: null,
+              },
+            },
+            answered: false,
+          },
+        ]);
+        value(inbox.setContactState("manager", "active"));
+      } finally {
+        inbox.close();
+      }
+      harness.receipt = {
+        kind: "ok",
+        thread_id: "session-manager",
+        message_seq: 1,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "turn" },
+      };
+      expect(await harness.callTool("olw_ask", "ready-manager", questions)).toMatchObject({
+        state: "accepted",
+        disposition: "new",
+        id: `question:${parent.id}:ready-manager`,
+      });
+      expect(harness.executeCount).toBe(1);
+    });
+  });
+
+  test("posts standalone parent's question to the user inbox", async () => {
+    await fixture(async ({ root, parent }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        value(registry.setOwner(parent.id, null));
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const result = await harness.callTool("olw_ask", "standalone-call", {
+        questions: [
+          { id: "q", question: "Which way?", options: [{ label: "Yes" }], multiSelect: false },
+        ],
+      });
+      expect(result).toMatchObject({
+        state: "posted",
+        id: `question:${parent.id}:standalone-call`,
+      });
+      expect(harness.executeCount).toBe(0);
+      const inbox = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        expect(value(inbox.postedQuestions({}))).toMatchObject([
+          {
+            record: {
+              state: "posted",
+              envelope: { id: `question:${parent.id}:standalone-call`, toBindingId: null },
+            },
+            answered: false,
+          },
+        ]);
+      } finally {
+        inbox.close();
+      }
+    });
+  });
+
+  test("manager does not intercept native asks or register olw_ask", async () => {
+    await fixture(async ({ root }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      let manager: Binding;
+      try {
+        const snapshot: ScopeSnapshot = {
+          version: 1,
+          source: "linear-export",
+          initiative: null,
+          projects: [],
+          decisionRefs: [],
+        };
+        const digest = value(registry.importScope(snapshot)).digest;
+        manager = value(
+          registry.reserve({
+            bindingId: "manager",
+            durableSessionId: "session-manager",
+            designation: {
+              id: "manager-designation",
+              snapshotDigest: digest,
+              designatedBy: "test",
+              designatedAt: "today",
+              execute: true,
+              create: true,
+              contact: true,
+            },
+            snapshot,
+            assignment: { role: "manager" },
+            cwd: "/repo/manager",
+            checkout: null,
+            herdrSocket: join(root, "herdr.sock"),
+            omoSocket: join(root, "omo.sock"),
+          }),
+        );
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      for (const name of ["request_user_input", "ask_user_question"])
+        expect(await harness.guard()(name, {}, context(manager))).toBeUndefined();
+      await harness.start()(context(manager));
+      expect(harness.tools.has("olw_ask")).toBe(false);
+    });
+  });
+
+  test("publishes TUI readiness without duplicating Senpi's Herdr session report", async () => {
     await fixture(async ({ root, parent }) => {
       const harness = new Harness();
       registerInitiativeRuntime(harness, { root, hostRuntime: false });
@@ -571,6 +554,7 @@ describe("native delivery extension", () => {
         cwd: parent.cwd,
         paneId: "pane-parent",
       });
+      expect(harness.reports).toEqual([]);
       const resources = harness.resources?.();
       expect(resources?.skillPaths).toEqual(
         ["define", "plan", "run", "check"].map((name) => join(root, "skills", name)),

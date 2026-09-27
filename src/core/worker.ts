@@ -32,10 +32,18 @@ async function run(): Promise<void> {
     let result: Result<unknown>;
     if (request.data.action === "lookup-session") {
       result = registry.bySession(request.data.input.durableSessionId);
+    } else if (request.data.action === "lookup-binding") {
+      result = registry.get(request.data.input.bindingId);
+    } else if (request.data.action === "lookup-designation") {
+      result = registry.designation(request.data.input.designationId);
     } else if (request.data.action === "authorize") {
       result = registry.authorize(request.data.input.senderSessionId, request.data.input.envelope);
     } else if (request.data.action === "claim") {
       result = registry.claim(request.data.input.senderSessionId, request.data.input.envelope);
+    } else if (request.data.action === "lookup-delivery") {
+      result = registry.delivery(request.data.input.messageId);
+    } else if (request.data.action === "post") {
+      result = registry.post(request.data.input.senderSessionId, request.data.input.envelope);
     } else if (request.data.action === "finish") {
       result = registry.finish(
         request.data.input.messageId,
@@ -47,6 +55,11 @@ async function run(): Promise<void> {
         request.data.input.messageId,
         request.data.input.reason,
         request.data.input.nativeKey,
+      );
+    } else if (request.data.action === "release-user-answer") {
+      result = registry.releaseUserAnswer(
+        request.data.input.messageId,
+        request.data.input.recipientSessionId,
       );
     } else {
       result = invalid("invalid_request", "Worker action is invalid");

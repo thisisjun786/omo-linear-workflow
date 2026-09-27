@@ -11,7 +11,10 @@ import {
   snapshotResultSchema,
   subscriptionStartedSchema,
   successFrameSchema,
+  tabCreatedResultSchema,
+  tabRenameResultSchema,
   upstreamErrorSchema,
+  workspaceInfoResultSchema,
   workspaceResultSchema,
   worktreeRemovedSchema,
 } from "./schema";
@@ -48,15 +51,18 @@ const SUBSCRIPTIONS = [
 export interface Workspace {
   readonly workspaceId: string;
   readonly rootPaneId: string;
+  readonly rootTabId?: string;
   readonly cwd: string;
   readonly label?: string;
-  readonly groupHeadWorkspaceId?: string;
+  readonly repoKey?: string;
 }
 export interface Pane {
   readonly paneId: string;
   readonly workspaceId: string;
   readonly revision: number;
   readonly sessionPath: string | null;
+  /** Senpi's built-in integration reports `pi`; older OMO detection reports `omo`. */
+  readonly agent?: string;
 }
 export interface Snapshot {
   readonly focusedWorkspaceId: string | null;
@@ -65,21 +71,22 @@ export interface Snapshot {
   readonly workspaces: readonly Workspace[];
   readonly panes: readonly Pane[];
 }
-export type WorktreeGrouping = { readonly head: true } | { readonly parentWorkspaceId: string };
-
 export interface HerdrClient {
   createWorkspace(cwd: string, label: string): Promise<Workspace>;
-  createWorktree(
-    checkout: Checkout,
+  createWorktree(checkout: Checkout, label: string): Promise<Workspace>;
+  createTab(
+    workspaceId: string,
+    cwd: string,
     label: string,
-    grouping?: WorktreeGrouping,
-  ): Promise<Workspace>;
+  ): Promise<{ tabId: string; rootPaneId: string }>;
+  renameTab(tabId: string, label: string): Promise<void>;
+  focusWorkspace(workspaceId: string): Promise<void>;
+  sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void>;
   run(
     paneId: string,
     argv: readonly string[],
     env: Readonly<Record<string, string>>,
   ): Promise<void>;
-  reportSession(paneId: string, sessionPath: string): Promise<void>;
   snapshot(): Promise<Snapshot>;
   subscribe(listener: (event: unknown) => void): Promise<() => void>;
   closeWorkspace(id: string): Promise<void>;
@@ -118,23 +125,19 @@ class SocketHerdrClient implements HerdrClient {
     const replyCwd = result.root_pane.cwd;
     if (replyCwd === null || replyCwd === undefined)
       throw new HerdrError("invalid_response", "workspace reply omitted root pane cwd");
+    const rootTabId = result.tab?.tab_id ?? result.workspace.active_tab_id;
     return {
       workspaceId: result.workspace.workspace_id,
       rootPaneId: result.root_pane.pane_id,
+      ...(rootTabId === undefined ? {} : { rootTabId }),
       cwd: replyCwd,
     };
   }
 
-  public async createWorktree(
-    checkout: Checkout,
-    label: string,
-    grouping?: WorktreeGrouping,
-  ): Promise<Workspace> {
+  public async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
     const result = workspaceResultSchema.parse(
-      await this.#request(grouping === undefined ? "worktree.create" : "worktree.create_grouped", {
-        ...(grouping !== undefined && "parentWorkspaceId" in grouping
-          ? { group_head_workspace_id: nonEmptyStringSchema.parse(grouping.parentWorkspaceId) }
-          : { cwd: absolutePathSchema.parse(checkout.originalRepoRoot) }),
+      await this.#request("worktree.create", {
+        cwd: absolutePathSchema.parse(checkout.originalRepoRoot),
         branch: nonEmptyStringSchema.parse(checkout.branch),
         base: nonEmptyStringSchema.parse(checkout.baseBranch),
         path: absolutePathSchema.parse(checkout.path),
@@ -145,11 +148,54 @@ class SocketHerdrClient implements HerdrClient {
     );
     if (result.worktree === undefined)
       throw new HerdrError("invalid_response", "worktree reply omitted worktree data");
+    const rootTabId = result.tab?.tab_id ?? result.workspace.active_tab_id;
     return {
       workspaceId: result.workspace.workspace_id,
       rootPaneId: result.root_pane.pane_id,
+      ...(rootTabId === undefined ? {} : { rootTabId }),
       cwd: result.worktree.path,
     };
+  }
+
+  public async createTab(
+    workspaceId: string,
+    cwd: string,
+    label: string,
+  ): Promise<{ tabId: string; rootPaneId: string }> {
+    const result = tabCreatedResultSchema.parse(
+      await this.#request("tab.create", {
+        workspace_id: nonEmptyStringSchema.parse(workspaceId),
+        cwd: absolutePathSchema.parse(cwd),
+        label: nonEmptyStringSchema.parse(label),
+        focus: false,
+      }),
+    );
+    return { tabId: result.tab.tab_id, rootPaneId: result.root_pane.pane_id };
+  }
+
+  public async renameTab(tabId: string, label: string): Promise<void> {
+    tabRenameResultSchema.parse(
+      await this.#request("tab.rename", {
+        tab_id: nonEmptyStringSchema.parse(tabId),
+        label: nonEmptyStringSchema.parse(label),
+      }),
+    );
+  }
+
+  public async focusWorkspace(workspaceId: string): Promise<void> {
+    workspaceInfoResultSchema.parse(
+      await this.#request("workspace.focus", {
+        workspace_id: nonEmptyStringSchema.parse(workspaceId),
+      }),
+    );
+  }
+
+  public async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
+    await this.#expectOk("pane.send_input", {
+      pane_id: nonEmptyStringSchema.parse(paneId),
+      text: z.string().parse(text),
+      keys: z.array(z.string()).parse(keys),
+    });
   }
 
   public async run(
@@ -171,14 +217,6 @@ class SocketHerdrClient implements HerdrClient {
     });
   }
 
-  public async reportSession(paneId: string, sessionPath: string): Promise<void> {
-    await this.#expectOk("pane.report_agent_session", {
-      pane_id: nonEmptyStringSchema.parse(paneId),
-      source: "omo-initiative",
-      agent: "omo",
-      agent_session_path: absolutePathSchema.parse(sessionPath),
-    });
-  }
   public async closeWorkspace(id: string): Promise<void> {
     await this.#expectOk("workspace.close", {
       workspace_id: nonEmptyStringSchema.parse(id),
@@ -202,6 +240,7 @@ class SocketHerdrClient implements HerdrClient {
       workspaceId: source.workspace_id,
       revision: source.revision,
       sessionPath: source.agent_session?.kind === "path" ? source.agent_session.value : null,
+      ...(source.agent === null || source.agent === undefined ? {} : { agent: source.agent }),
     }));
     const workspaces = result.snapshot.workspaces.map((source): Workspace => {
       const layout = result.snapshot.layouts.find(
@@ -220,13 +259,14 @@ class SocketHerdrClient implements HerdrClient {
           `snapshot omitted root pane cwd for workspace ${source.workspace_id}`,
         );
       }
-      const groupHeadWorkspaceId = source.worktree?.repo_key.match(/^herdr-group:(.+)$/)?.[1];
+      const rootTabId = layout?.tab_id ?? source.active_tab_id;
       return {
         workspaceId: source.workspace_id,
         rootPaneId: root.pane_id,
+        ...(rootTabId === undefined ? {} : { rootTabId }),
         cwd: rootPane.cwd,
         ...(source.label === undefined ? {} : { label: source.label }),
-        ...(groupHeadWorkspaceId === undefined ? {} : { groupHeadWorkspaceId }),
+        ...(source.worktree == null ? {} : { repoKey: source.worktree.repo_key }),
       };
     });
     return {

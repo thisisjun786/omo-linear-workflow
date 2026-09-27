@@ -70,17 +70,36 @@ const baseId = (id: string) => id.replace(/--fast$/, "");
 const exportedSchema = z.object({
   providers: z.record(z.string(), z.unknown()),
 });
-const exportedProviderSchema = z.object({
-  models: z.array(
-    z.object({
-      id: z.string().min(1),
-      contextWindow: z.number(),
-      maxTokens: z.number(),
-      input: z.array(z.enum(["text", "image", "video"])),
-      reasoning: z.boolean().default(false),
-    }),
-  ),
+const exportedModelSchema = z.object({
+  id: z.string().min(1),
+  contextWindow: z.number(),
+  maxTokens: z.number(),
+  input: z.array(z.enum(["text", "image", "video"])),
+  reasoning: z.boolean().default(false),
 });
+const exportedProviderSchema = z.object({ models: z.array(exportedModelSchema) });
+const exportedRowsSchema = z.object({ models: z.array(z.unknown()) });
+
+export interface ExportedModelRows {
+  readonly models: ModelMetadata[];
+  readonly unavailable: readonly string[];
+}
+
+export function exportedModelRows(modelsJson: unknown): ExportedModelRows {
+  const provider = exportedSchema.parse(modelsJson).providers[ROUTING_PROVIDER];
+  const rows = exportedRowsSchema.parse(provider).models;
+  const models: ModelMetadata[] = [];
+  const unavailable: string[] = [];
+  for (const row of rows) {
+    const parsed = exportedModelSchema.safeParse(row);
+    if (parsed.success) models.push(parsed.data);
+    else {
+      const id = z.object({ id: z.string().min(1) }).safeParse(row);
+      if (id.success) unavailable.push(id.data.id);
+    }
+  }
+  return { models, unavailable };
+}
 
 export function exportedModels(modelsJson: unknown): ModelMetadata[] {
   const provider = exportedSchema.parse(modelsJson).providers[ROUTING_PROVIDER];

@@ -7,8 +7,11 @@ dist/
 .omo/state/
 .omo/herdr/
 .omo/worktrees/
+.omo/checkouts/
+.omo/repos/
 .omo/thread-tools/
 omo-host.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.omo/update-worktrees/

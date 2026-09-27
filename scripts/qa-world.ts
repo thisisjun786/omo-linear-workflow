@@ -1,9 +1,12 @@
 import { cp, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { RpcClient } from "@code-yeongyu/senpi";
+import { scopeSnapshotSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
 import { loadHerdrBuild, resolveHerdrArtifact } from "../src/herdr/artifact";
+import { qaTempFiles, reapQaDaemons } from "./qa-cleanup";
 import { QaError } from "./qa-rpc";
 
 export async function runQaCommand(
@@ -55,9 +58,14 @@ export async function prepareQaWorld() {
   const controlRoot = join(scratch, "control");
   const repository = join(scratch, "fixture-repo");
   const sessionName = `olw-qa-${crypto.randomUUID().slice(0, 12)}`;
+  await mkdir(controlRoot);
+  await cp(join(installRoot, "herdr-release.json"), join(controlRoot, "herdr-release.json"));
+  const fixtureBuild = await loadHerdrBuild(controlRoot);
+  await cp(artifact.artifactDir, fixtureBuild.artifactDir, { recursive: true });
+  const fixtureArtifact = await resolveHerdrArtifact(controlRoot);
   const environment = {
     ...process.env,
-    QA_HERDR_BINARY: process.env["QA_HERDR_BINARY"] ?? artifact.binaryPath,
+    QA_HERDR_BINARY: fixtureArtifact.binaryPath,
     HERDR_SESSION: sessionName,
     HERDR_SOCKET_PATH: undefined,
     HERDR_CLIENT_SOCKET_PATH: undefined,
@@ -66,19 +74,18 @@ export async function prepareQaWorld() {
     // The host strips BUN_* but retains XDG_CACHE_HOME.
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(scratch, "bun-cache"),
     XDG_CACHE_HOME: join(scratch, "xdg-cache"),
+    TMPDIR: join(scratch, "tmp"),
   };
-  await mkdir(controlRoot);
+  await mkdir(environment.TMPDIR);
+  const cleanup = {
+    daemons: [] as Awaited<ReturnType<typeof reapQaDaemons>>,
+    tempFiles: [] as string[],
+    tempFilesRemoved: false,
+  };
   await mkdir(repository);
   await cp(join(installRoot, "dist"), join(controlRoot, "dist"), { recursive: true });
   await cp(join(installRoot, "skills"), join(controlRoot, "skills"), { recursive: true });
   await cp(join(installRoot, "package.json"), join(controlRoot, "package.json"));
-  await cp(join(installRoot, "vendor/herdr"), join(controlRoot, "vendor/herdr"), {
-    recursive: true,
-  });
-  await mkdir(join(controlRoot, "patches"), { recursive: true });
-  await cp(artifact.patchPath, join(controlRoot, artifact.manifest.patch));
-  const fixtureBuild = await loadHerdrBuild(controlRoot);
-  await cp(artifact.artifactDir, fixtureBuild.artifactDir, { recursive: true });
   await checkedQaCommand(
     [
       "/usr/bin/cp",
@@ -162,6 +169,19 @@ export async function prepareQaWorld() {
   const herdrSocket = server.herdrSocket;
   const worktrees: string[] = [];
   const workspaces: string[] = [];
+  let repositoryMapping: Promise<{ readonly remote: string; readonly defaultBranch: "main" }>;
+  const ownedRepositoryMapping = () => {
+    repositoryMapping ??= (async () => {
+      const remotePath = join(scratch, "fixture-remote.git");
+      await checkedQaCommand(
+        ["git", "clone", "--bare", repository, remotePath],
+        scratch,
+        environment,
+      );
+      return { remote: pathToFileURL(remotePath).href, defaultBranch: "main" as const };
+    })();
+    return repositoryMapping;
+  };
   return {
     installRoot,
     scratch,
@@ -169,8 +189,22 @@ export async function prepareQaWorld() {
     repository,
     herdrSocket,
     environment,
+    cleanup,
     worktrees,
     workspaces,
+    async writeOwnedScopeFixture(path: string, input?: unknown): Promise<void> {
+      const source =
+        input ?? JSON.parse(await Bun.file(join(installRoot, "tests/fixtures/scope.json")).text());
+      const fixture = scopeSnapshotSchema.parse(source);
+      const repository = await ownedRepositoryMapping();
+      await writeFile(
+        path,
+        JSON.stringify({
+          ...fixture,
+          projects: fixture.projects.map((project) => ({ ...project, repository })),
+        }),
+      );
+    },
     async cli(args: readonly string[]) {
       return runQaCommand(
         [
@@ -210,16 +244,19 @@ export async function prepareQaWorld() {
           for (const binding of bindings.value) {
             ownedSessions.add(binding.durableSessionId);
             if (binding.workspaceId === null) continue;
-            if (
-              binding.checkout !== null &&
-              (binding.checkout.originalRepoRoot !== repository ||
-                !binding.cwd.startsWith(`${controlRoot}/.omo/worktrees/`))
-            ) {
+            const ownedClone =
+              binding.checkout?.kind === "owned-clone" &&
+              binding.cwd.startsWith(`${controlRoot}/.omo/checkouts/`);
+            const linkedWorktree =
+              binding.cwd.startsWith(`${controlRoot}/.omo/worktrees/`) &&
+              (binding.checkout?.originalRepoRoot === repository ||
+                binding.checkout?.originalRepoRoot.startsWith(`${controlRoot}/.omo/checkouts/`));
+            if (binding.checkout !== null && !ownedClone && !linkedWorktree) {
               throw new QaError(
                 `Refusing to remove a worktree outside the QA fixture: ${binding.cwd}`,
               );
             }
-            const ledger = binding.checkout === null ? workspaces : worktrees;
+            const ledger = binding.checkout === null || ownedClone ? workspaces : worktrees;
             if (!ledger.includes(binding.workspaceId)) ledger.push(binding.workspaceId);
           }
         } finally {
@@ -252,7 +289,8 @@ export async function prepareQaWorld() {
               (session.durableSessionId !== undefined &&
                 ownedSessions.has(session.durableSessionId)) ||
               session.cwd === controlRoot ||
-              session.cwd.startsWith(`${controlRoot}/.omo/worktrees/`);
+              session.cwd.startsWith(`${controlRoot}/.omo/worktrees/`) ||
+              session.cwd.startsWith(`${controlRoot}/.omo/checkouts/`);
             if (session.status !== "open" || !owned || !session.sessionPath) continue;
             // Hold our attachment while Herdr closes the frontend; never reopen a deleted cwd.
             const opened = await client.openSession({
@@ -265,19 +303,14 @@ export async function prepareQaWorld() {
         }
         const observer = createHerdrClient(herdrSocket);
         const activeWorkspaces = new Set<string>();
-        const groupHeads = new Set<string>();
         try {
           for (const workspace of (await observer.snapshot()).workspaces) {
             activeWorkspaces.add(workspace.workspaceId);
-            if (workspace.groupHeadWorkspaceId === workspace.workspaceId)
-              groupHeads.add(workspace.workspaceId);
           }
         } finally {
           observer.close();
         }
-        const removalOrder = worktrees
-          .toReversed()
-          .sort((left, right) => Number(groupHeads.has(left)) - Number(groupHeads.has(right)));
+        const removalOrder = worktrees.toReversed();
         for (const workspace of removalOrder) {
           if (activeWorkspaces.has(workspace))
             await run([
@@ -311,12 +344,15 @@ export async function prepareQaWorld() {
         if (stopped.code !== 0) failures.push(`OMO host stop: ${stopped.stdout} ${stopped.stderr}`);
       }
       await run(["session", "delete", sessionName, "--json"]);
+      cleanup.daemons = await reapQaDaemons(scratch);
+      cleanup.tempFiles = await qaTempFiles(environment.TMPDIR);
       if (failures.length) {
         throw new QaError(
           `Cleanup failures; fixture retained at ${scratch}:\n${failures.join("\n")}`,
         );
       }
       await rm(scratch, { recursive: true, force: true });
+      cleanup.tempFilesRemoved = true;
       console.log("CLEANUP: QA worktrees, workspaces, Herdr server, OMO host and fixture removed");
     },
   };

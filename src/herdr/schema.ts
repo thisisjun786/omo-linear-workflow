@@ -13,9 +13,18 @@ export type HerdrEvent = z.output<typeof eventFrameSchema>;
 
 export const workspaceResultSchema = z.object({
   type: z.enum(["workspace_created", "worktree_created"]),
-  workspace: z.object({ workspace_id: identifierSchema }),
+  workspace: z.object({
+    workspace_id: identifierSchema,
+    active_tab_id: identifierSchema.optional(),
+  }),
+  tab: z.object({ tab_id: identifierSchema }).optional(),
   root_pane: z.object({ pane_id: identifierSchema, cwd: z.string().min(1).nullish() }),
   worktree: z.object({ path: z.string().min(1) }).optional(),
+});
+export const tabCreatedResultSchema = z.object({
+  type: z.literal("tab_created"),
+  tab: z.object({ tab_id: identifierSchema, workspace_id: identifierSchema, label: z.string() }),
+  root_pane: z.object({ pane_id: identifierSchema, tab_id: identifierSchema }),
 });
 
 const agentSessionSchema = z.object({
@@ -43,6 +52,7 @@ export const snapshotResultSchema = z.object({
         tab_id: identifierSchema,
         cwd: z.string().min(1).nullish(),
         revision: z.number().int().nonnegative(),
+        agent: z.string().nullish(),
         agent_session: agentSessionSchema.nullish(),
       }),
     ),
@@ -56,6 +66,8 @@ export const snapshotResultSchema = z.object({
   }),
 });
 export const okResultSchema = z.object({ type: z.literal("ok") });
+export const tabRenameResultSchema = z.object({ type: z.literal("tab_info") });
+export const workspaceInfoResultSchema = z.object({ type: z.literal("workspace_info") });
 export const worktreeRemovedSchema = z.object({
   type: z.literal("worktree_removed"),
   workspace_id: identifierSchema,

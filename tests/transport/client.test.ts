@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { RpcClientEvent } from "@code-yeongyu/senpi";
 import type { Binding, DeliveryRecord, Envelope } from "../../src/core/contracts";
-import { attachBindingWithClient, type RpcPort } from "../../src/transport/client";
+import {
+  attachBindingWithClient,
+  NativeSessionNotReadyError,
+  type RpcPort,
+} from "../../src/transport/client";
 
 const sessionPath = "/sessions/parent.jsonl";
 
@@ -72,7 +76,7 @@ class FakeRpc implements RpcPort {
     durableSessionId: string;
     sessionPath: string;
     cwd: string;
-    status: "open";
+    status: "opening" | "open" | "closing" | "closed";
   }> = [
     {
       sessionId: "host-row-parent",
@@ -167,6 +171,21 @@ describe("native session client", () => {
     );
     expect(duplicate.stopped).toBe(1);
   });
+
+  test.each(["opening", "closing"] as const)(
+    "reports an exact %s session as present but not ready",
+    async (status) => {
+      const rpc = new FakeRpc();
+      const exact = rpc.sessions[0];
+      if (exact === undefined) throw new Error("Missing exact session fixture");
+      rpc.sessions[0] = { ...exact, status };
+      await expect(attachBindingWithClient(binding, rpc)).rejects.toBeInstanceOf(
+        NativeSessionNotReadyError,
+      );
+      expect(rpc.stopped).toBe(1);
+      expect(rpc.opened).toEqual({ sessionId: "host-row-parent", attached: true });
+    },
+  );
 
   test("validates extension replies and close only disconnects the client", async () => {
     const rpc = new FakeRpc();

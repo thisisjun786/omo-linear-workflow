@@ -1,6 +1,6 @@
 import { dirname, join, resolve } from "node:path";
 import { modelScopeArguments } from "./model-scope";
-import { ensureRouting, globalOmo } from "./routing-launch";
+import { ensureRouting, globalOmo, routingAdvice } from "./routing-launch";
 import { retainedRoutingInstalled } from "./routing-sync";
 
 // Inspection and maintenance commands stay usable when the proxy is offline.
@@ -20,6 +20,7 @@ export interface LaunchDependencies {
   readonly ensureRouting: (root: string, upstream: string) => Promise<void>;
   readonly scopeArguments: (home: string, flags: readonly string[]) => Promise<string[]>;
   readonly routingAdopted: (home: string) => Promise<boolean>;
+  readonly routingAdvice: (home: string) => Promise<{ count: number; line: string }>;
   readonly warn: (line: string) => void;
 }
 
@@ -29,6 +30,7 @@ export const launchDependencies: LaunchDependencies = {
   scopeArguments: modelScopeArguments,
   routingAdopted: (home) =>
     retainedRoutingInstalled(join(home, ".omo/omo.jsonc"), join(home, ".omo/proxy-routing")),
+  routingAdvice,
   warn: (line) => process.stderr.write(line),
 };
 
@@ -51,6 +53,15 @@ export async function interactiveLaunch(
     if (!(await deps.routingAdopted(home))) throw error;
     deps.warn(
       `OMO routing preflight: ${error instanceof Error ? error.message : String(error)}; starting OMO with the previous routing\n`,
+    );
+  }
+  try {
+    const advice = await deps.routingAdvice(home);
+    if (advice.count)
+      deps.warn(`OMO routing advice:\n${advice.line}\nLaunch will continue with pinned routing.\n`);
+  } catch (error) {
+    deps.warn(
+      `OMO routing advice unavailable: ${error instanceof Error ? error.message : String(error)}; starting OMO with the previous routing\n`,
     );
   }
   const scopeArgs = await deps.scopeArguments(home, flags);

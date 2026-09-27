@@ -9,6 +9,43 @@ export const groupsSchema = z.object({
   categories: z.record(z.string(), z.record(z.string(), z.unknown())),
   agents: z.record(z.string(), z.record(z.string(), z.unknown())),
 });
+export const routingPolicySchema = z.enum(["pinned", "follow"]);
+const catalogModelSchema = z.object({
+  id: z.string(),
+  contextWindow: z.number(),
+  maxTokens: z.number(),
+  input: z.array(z.enum(["text", "image", "video"])),
+  reasoning: z.boolean(),
+});
+export const catalogFindingSchema = z.object({
+  model: z.string(),
+  issue: z.enum([
+    "removed",
+    "renamed_or_aliased",
+    "context_shrank",
+    "max_tokens_shrank",
+    "placeholder_32000",
+    "lost_image",
+    "reasoning_flipped",
+    "no_snapshot",
+    "metadata_unavailable",
+  ]),
+  before: z.unknown().optional(),
+  after: z.unknown().optional(),
+  routes: z.array(z.string()),
+  roles: z.array(z.string()),
+  actions: z.array(z.string()),
+});
+export type CatalogFinding = z.infer<typeof catalogFindingSchema>;
+export const adviceItemSchema = z.object({
+  path: z.string(),
+  before: z.record(z.string(), z.unknown()).optional(),
+  after: z.record(z.string(), z.unknown()).optional(),
+  current: z.record(z.string(), z.unknown()).optional(),
+  status: z.enum(["changed", "unavailable"]),
+  alternatives: z.array(z.string()).default([]),
+});
+export type RoutingAdviceItem = z.infer<typeof adviceItemSchema>;
 export const receiptSchema = z.object({
   generation: z.string(),
   // A receipt without a provider predates opencodex routing and is re-planned.
@@ -27,8 +64,36 @@ export const receiptSchema = z.object({
   unroutable: z.array(z.string()).default([]),
   changes: z.array(z.string()),
   backup: z.string().nullable(),
+  // Receipts written before pinned routing migrate to pinned without touching omo.jsonc.
+  routingPolicy: routingPolicySchema.default("pinned"),
+  advice: z.array(adviceItemSchema).default([]),
+  dismissed: z.record(z.string(), z.string()).default({}),
+  catalogFindings: z.array(catalogFindingSchema).default([]),
+  // Upstream routes this install has accepted, distinct from current user routing.
+  acceptedUpstream: groupsSchema.optional(),
+  // Last effective catalog observation, used when an older baseline has no snapshot.
+  catalog: z.array(catalogModelSchema).optional(),
+  adviceInputs: z
+    .object({
+      baseline: z.string().nullable(),
+      settings: z.string(),
+      roles: z.string(),
+      catalogHealth: z.string().optional(),
+    })
+    .optional(),
 });
 export type RoutingReceipt = z.infer<typeof receiptSchema>;
+export const baselineSchema = z.object({
+  createdAt: z.string(),
+  reason: z.string(),
+  upstream: z.object({ version: z.string(), digest: z.string(), upstream: z.string() }),
+  routing: groupsSchema,
+  // Per-route upstream values accepted when this baseline was established.
+  upstreamRouting: groupsSchema.optional(),
+  catalog: z.array(catalogModelSchema).optional(),
+});
+export type RoutingBaseline = z.infer<typeof baselineSchema>;
+
 const pendingSchema = z.object({
   configPath: z.string(),
   before: z.string(),
@@ -107,7 +172,8 @@ export async function recoverRouting(stateDir: string): Promise<void> {
       throw new RoutingError(
         `Concurrent config edit detected; inspect ${pendingPath} before recovery`,
       );
-    if (actual === pending.before) await atomicText(pending.configPath, pending.text);
+    if (actual === pending.before && pending.before !== pending.receipt.configDigest)
+      await atomicText(pending.configPath, pending.text);
     await atomicText(join(stateDir, "state.json"), `${JSON.stringify(pending.receipt, null, 2)}\n`);
   }
   await rm(pendingPath);

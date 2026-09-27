@@ -102,6 +102,7 @@ function activate(registry: ReturnType<typeof openRegistry>, binding: Binding): 
   value(registry.provision(binding.id, `workspace-${binding.id}`, `pane-${binding.id}`));
   value(registry.observeSession(binding.id, `/sessions/${binding.id}.jsonl`));
   const roles = {
+    manager: { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" },
     supervisor: modelForRole("supervisor"),
     parent: modelForRole("parent"),
     child: modelForRole("child"),
@@ -151,6 +152,48 @@ async function response(reader: Awaited<ReturnType<typeof ready>>) {
 }
 
 describe("SQLite registry", () => {
+  test("activates bindings with legacy and current extension protocols", async () => {
+    await temporaryDatabase((path) => {
+      const registry = openRegistry(path);
+      try {
+        const digest = value(registry.importScope(snapshot)).digest;
+        const bindings = [
+          {
+            bindingId: "protocol-1",
+            assignment: { role: "supervisor" as const, initiativeId: "initiative-1" },
+            protocol: 1 as const,
+          },
+          {
+            bindingId: "protocol-2",
+            assignment: {
+              role: "parent" as const,
+              initiativeId: "initiative-1",
+              projectId: "project-1",
+              ownerBindingId: null,
+            },
+            protocol: 2 as const,
+          },
+        ];
+        for (const { bindingId, assignment, protocol } of bindings) {
+          const binding = value(registry.reserve(reserveInput(bindingId, digest, assignment)));
+          value(registry.provision(binding.id, `workspace-${protocol}`, `pane-${protocol}`));
+          value(registry.observeSession(binding.id, `/sessions/protocol-${protocol}.jsonl`));
+          value(
+            registry.activate(binding.id, {
+              durableSessionId: binding.durableSessionId,
+              sessionPath: `/sessions/protocol-${protocol}.jsonl`,
+              cwd: binding.cwd,
+              ...modelForRole(binding.assignment.role),
+              extensionProtocol: protocol,
+            }),
+          );
+        }
+      } finally {
+        registry.close();
+      }
+    });
+  });
+
   test("keeps verified runtime initializing until its first instruction is accepted", async () => {
     await temporaryDatabase((path) => {
       const registry = openRegistry(path);

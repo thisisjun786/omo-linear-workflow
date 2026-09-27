@@ -11,6 +11,7 @@ function deps(overrides: Partial<LaunchDependencies> = {}) {
     },
     scopeArguments: async () => ["--models", "a"],
     routingAdopted: async () => true,
+    routingAdvice: async () => ({ count: 0, line: "none" }),
     warn: (line) => warnings.push(line),
     ...overrides,
   };
@@ -30,6 +31,33 @@ describe("interactive OMO launch", () => {
     ]);
     expect(d.calls).toEqual(["routing"]);
     expect(d.warnings).toEqual([]);
+  });
+
+  test("pending advice prints a fixed block without blocking launch", async () => {
+    const d = deps({
+      routingAdvice: async () => ({
+        count: 2,
+        line: "2 routing or catalog findings; run bun run proxy:routing status to review",
+      }),
+    });
+    const command = await interactiveLaunch("/olw", "/home", ["chat"], d.value);
+    expect(command[0]).toBe("/bin/omo");
+    expect(d.warnings).toEqual([
+      "OMO routing advice:\n2 routing or catalog findings; run bun run proxy:routing status to review\nLaunch will continue with pinned routing.\n",
+    ]);
+  });
+
+  test("unreadable advice warns once and still launches adopted routing", async () => {
+    const d = deps({
+      routingAdvice: async () => {
+        throw new SyntaxError("corrupt baseline");
+      },
+    });
+    const command = await interactiveLaunch("/olw", "/home", [], d.value);
+    expect(command[0]).toBe("/bin/omo");
+    expect(d.warnings).toEqual([
+      "OMO routing advice unavailable: corrupt baseline; starting OMO with the previous routing\n",
+    ]);
   });
 
   test("a failed routing preflight still starts OMO and says why", async () => {

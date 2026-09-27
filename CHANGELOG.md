@@ -15,6 +15,56 @@ published.
 
 ### Added
 
+- Official checksum-pinned Herdr 0.9.1 releases replace the vendored patch and Rust/Zig
+  build. Senpi's built-in integration owns reports; OLW recognizes `pi` and `omo` without
+  duplicate session reports. Owned clones use upstream groups and `worktree.create`.
+  `olw doctor` blocks the operational switch and lists remaining legacy parents. Existing
+  servers, installed binaries and caches are untouched; one-release rollback is documented.
+  New linked parents (`--repo`), children and successors of legacy parents are rejected with
+  `legacy_parent_unsupported` before external side effects; close/migrate with approval or
+  continue those parents with the retained pre-switch OLW and patched Herdr together.
+- Pinned-by-default OMO model routing with accepted baselines, route-level upstream advice,
+  selective `apply`/`dismiss`, optional `follow` mode, launcher and manager notices, and catalog
+  health review for removed or degraded models. Advice is read-only until explicit acceptance.
+- Issue deliverables (`pr`, `report`, `document`) on bindings, briefs, packets and status. Owned-clone
+  children publish one PR into their parent's integration branch; `pr open` reuses open PRs and
+  `pr merge` checks the reported head and merges with a merge commit. PR-less results require a
+  deliverable path. Project PRs stop for user review; legacy local merges remain deprecated but unchanged.
+- Fetch-before-close publication guards for owned parents and their PR children, with explicit
+  `--discard`, and isolated bare-remote/gh-shim PR lifecycle QA.
+- New mapped parents run in OLW-owned, hardlinked clones of repository mirrors, with readable
+  per-project Herdr groups and child worktrees owned by the parent clone. Explicit private local-file
+  copies, setup deadlines/logs/receipts, and close-time unpushed-commit reports are supported.
+  Legacy checkouts remain unchanged; `parent create --repo` conflicts with a mapping (later rejected; see the official Herdr entry).
+- Scope projects can declare a target Git remote and default branch. OLW maintains one locked,
+  fetch-only mirror per remote and exposes mirror status and explicit fetching through `olw doctor`
+  and `olw repo list|fetch`.
+- Child modes: `child create --mode direct|planned|research`. A `planned` child runs
+  a plan stage (`opencodex/anthropic/claude-fable-5-1` xhigh, ulw-plan) and then an
+  execute stage (`opencodex/anthropic/claude-opus-5-5` medium, ulw-execute driving
+  mass-ulw) in the same worktree, each in its own Herdr tab and binding. `stage
+  complete` records the plan hand-off (path, sha256, head) and `stage start
+  --stage execute` stops the plan session and opens the execute stage. `status`
+  shows `mode`, `stage`, `stageBindings` and `openQuestions` per lineage generation;
+  `close` on any stage closes that generation and its workspace once. The parent
+  sends the issue packet to the execute binding; nothing transfers automatically.
+- Questions and answers: `question` and `answer` message kinds, the `olw_ask` tool
+  in bound child and parent sessions (native `ask_user_question` is blocked there),
+  and the `ask`, `answer` and read-only `questions` commands. A parent's question
+  goes to its ready manager or, without one or with `--to-user`, to the user inbox;
+  `answer --as-user` answers an inbox question.
+- The manager: `olw manage` opens or reattaches the scope-free management session
+  inside the OLW host with the user's default model (fallback Opus 5.5 medium).
+  Parents created while it's ready link to it automatically; `parent create
+  --no-manager` opts out. `manage` runs an update check at start and puts the
+  result in the manager brief.
+- Update automation: `olw update check` reports the pinned OMO and Senpi versions
+  against the npm dist-tags (`omo-ai` `beta`, `@code-yeongyu/senpi` `latest`) and
+  never installs; `olw update prepare` builds an `olw/update-omo-<v>-senpi-<v>`
+  branch from the selected remote's `dev` (default `origin`) in a separate worktree, runs install, typecheck, test and
+  build there and opens a PR to `dev` (draft if anything failed). Neither touches
+  the live host.
+- `medium` is an accepted thinking level for role models.
 - User-managed opencodex model metadata catalog (`MODEL_CATALOG` in
   `src/proxy/model-catalog.ts`). It overrides the context window, output limit,
   input modalities and reasoning flag that ocx exports late or wrong, for example
@@ -42,6 +92,7 @@ published.
 - Repository policies follow `docs/policy/`: PRs target `dev` and merge with a merge
   commit, `main` only advances to released commits, and issue and PR text is in
   English. Issue forms are now `bug` and `proposal`.
+- Pinned the official `omo-ai` 5.0.0 and `@code-yeongyu/senpi` 2026.9.26 releases, retaining only runtime-repair hunks that remain necessary.
 - Models route through opencodex. The routing synchronizer reads the
   opencodex-owned catalog in `models.json`, and OLW role pins use `opencodex`.
 - Child fixture standby permits internal workers only after explicit instruction;

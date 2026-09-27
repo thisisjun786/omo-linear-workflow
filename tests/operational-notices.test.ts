@@ -181,12 +181,26 @@ class Harness implements RuntimePort {
     this.turnEnd = handler;
   }
   onResourcesDiscover() {}
+  onMessageStart() {}
+  onUserInterrupt() {}
+  onGoalCheck() {}
+  async ownsGoalPause() {
+    return false;
+  }
+  emitQuestionWait() {}
+  appendQuestionWait() {}
+  async pauseGoal() {
+    return null;
+  }
+  async resumeGoal() {}
+  async waitForIdle() {}
   onToolCall(handler: Parameters<RuntimePort["onToolCall"]>[0]) {
     this.toolCall = handler;
   }
   handleRpc(name: string, handler: (data: unknown) => Promise<unknown>) {
     this.handlers.set(name, handler);
   }
+  registerTool(_tool: Parameters<RuntimePort["registerTool"]>[0]) {}
   getActiveTools() {
     return ["read"];
   }

@@ -46,10 +46,10 @@ and semantic scope; if that fails, ask rather than pick.
 {
   "version": 1,
   "source": "linear-export",
-  "initiative": { "id": "...", "url": "https://linear.app/...", "revision": "2026-09-22T00:00:00.000Z" },
+  "initiative": { "id": "...", "url": "https://linear.app/...", "revision": "2026-09-22T00:00:00.000Z", "key": "I-3" },
   "projects": [
     {
-      "project": { "id": "...", "url": "https://linear.app/...", "revision": "..." },
+      "project": { "id": "...", "url": "https://linear.app/...", "revision": "...", "key": "P-ENG-12" },
       "issues": [
         { "id": "...", "url": "https://linear.app/...", "revision": "..." }
       ]
@@ -74,6 +74,9 @@ Prepare the snapshot accordingly:
   satisfy the schema. A supervisor designation, unlike a standalone parent, requires a real
   initiative ref.
 - Every `revision` is the value the connector actually returned. Don't backfill or guess.
+- Optional `key` is the project or initiative identifier the connector returned (for example
+  `P-ENG-12`). It only names Herdr workspaces and role sessions; identity stays on `id`.
+  Issue names already carry their key in the URL.
 - No issue appears under two projects, and no ID repeats.
 - Only projects and issues the approved definition covers are included. Leaving something out
   is a scope decision to state, not a formatting choice.

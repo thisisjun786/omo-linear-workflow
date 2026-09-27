@@ -182,7 +182,7 @@ async function main() {
       },
     );
     const scopePath = join(qa.scratch, "scope.json");
-    await cp(join(qa.installRoot, "tests/fixtures/scope.json"), scopePath);
+    await qa.writeOwnedScopeFixture(scopePath);
     const { digest } = z
       .object({ digest: z.string() })
       .parse(await invoke(["scope", "import", "--file", scopePath, "--fixture"]));
@@ -208,10 +208,6 @@ async function main() {
         supervisor.id,
         "--project",
         "project-omo-1",
-        "--repo",
-        qa.repository,
-        "--base",
-        "main",
       ]),
     ).binding;
     const supervisorRpc = await attach(supervisor);

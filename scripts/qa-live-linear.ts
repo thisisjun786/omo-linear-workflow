@@ -151,7 +151,7 @@ async function main() {
       decisionRefs: [targets.document],
     };
     const path = join(qa.scratch, "scope.json");
-    await writeFile(path, JSON.stringify(scope));
+    await qa.writeOwnedScopeFixture(path, scope);
     const { digest } = z
       .object({ digest: z.string() })
       .parse(await invoke(["scope", "import", "--file", path, "--fixture"]));
@@ -177,10 +177,6 @@ async function main() {
         supervisor.id,
         "--project",
         targets.project.id,
-        "--repo",
-        qa.repository,
-        "--base",
-        "main",
       ]),
     ).binding;
     for (const binding of [supervisor, parent]) {

@@ -38,7 +38,7 @@ body:
     id: environment
     attributes:
       label: Version and environment
-      description: OLW version (`package.json` or commit SHA), OS and architecture, and Bun/pnpm/Node/git versions. Add Rust and Zig versions for Herdr build problems, OMO and opencodex versions for routing problems.
+      description: OLW version (`package.json` or commit SHA), OS and architecture, and Bun/pnpm/Node/git versions. For Herdr download or verification problems, include the pinned version and asset from herdr-release.json and the expected/received SHA-256 from the error. Add OMO and opencodex versions for routing problems.
       placeholder: "0.1.0, Linux x64, bun 1.4.0, pnpm 10.33.3, node 24.20.0"
     validations:
       required: true

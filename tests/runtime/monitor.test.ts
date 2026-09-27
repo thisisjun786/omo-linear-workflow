@@ -166,7 +166,11 @@ test("restored persistent watch preserves identity and cancellation", async () =
   f.registry.dispose();
   const resumed = new MonitorRegistry(() => {}, { onEnded: (event) => f.ended.push(event) });
   registries.push(resumed);
-  expect(await createCheckpointedFileRestoreHandler({ registry: resumed })(manifest)).toEqual({
+  expect(
+    await createCheckpointedFileRestoreHandler({ registry: resumed })(manifest, {
+      downtimeMs: 0,
+    }),
+  ).toEqual({
     outcome: "restored",
   });
   jest.advanceTimersByTime(DEFAULT_MONITOR_TIMEOUT_MS + 1);

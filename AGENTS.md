@@ -26,9 +26,13 @@ and the user's existing workspaces are read-only unless explicitly assigned.
   `skills/run/SKILL.md`, verify artifacts, and keep parent acceptance separate.
 - Preserve user focus with explicit IDs and `--no-focus`.
 - Do not silently replace a requested model or reasoning level.
-- Herdr is a required managed runtime, pinned by `vendor/herdr/manifest.json`
-  and its patch. `bun run build` prepares it; never fall back to a global PATH
-  binary or restart existing servers as part of a build.
+- Herdr is a required managed runtime: official release assets and SHA-256 pins
+  live in `herdr-release.json`. `bun run build` downloads and verifies only the
+  managed `.omo/herdr` artifact; no Rust/Zig or global PATH fallback. Senpi's
+  built-in integration owns agent reports (`pi`; also recognize legacy `omo`).
+  Run `olw doctor` before switching: legacy linked-worktree parents block it.
+  Never restart servers or remove installed binaries/extensions during a build.
+  Preserve the prior patched cache for one release; rollback is in docs/operations.md.
 
 ## Model policy
 

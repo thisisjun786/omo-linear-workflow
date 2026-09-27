@@ -71,6 +71,8 @@ export interface StageHandoff {
   readonly planSha256: string;
   readonly head: string;
   readonly completedAt: string;
+  /** Present on native stage-complete handoffs; absent on legacy persisted handoffs. */
+  readonly completionReportId?: string | undefined;
 }
 export interface StageRecord {
   readonly bindingId: string;

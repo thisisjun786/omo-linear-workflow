@@ -7,6 +7,7 @@ const stageHandoffSchema = z.strictObject({
   planSha256: z.string().regex(/^[a-f0-9]{64}$/),
   head: z.string().min(1),
   completedAt: z.string().min(1),
+  completionReportId: z.string().min(1).optional(),
 });
 
 export class StageHandoffStorageError extends Error {

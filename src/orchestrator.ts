@@ -1231,6 +1231,7 @@ export class Orchestrator {
             handoff?.planPath === path && handoff.planSha256 === planSha256 && handoff.head === head
               ? handoff.completedAt
               : this.#deps.now(),
+          completionReportId: input.messageId,
         }),
       );
       if (!recorded.ok) return recorded;
@@ -1282,6 +1283,8 @@ export class Orchestrator {
     } finally {
       await session?.close();
     }
+    const handoff = stage.value.handoff;
+    if (handoff === null) return failure("handoff_missing", "Plan has no handoff");
     const chain = this.#withRegistry((registry) => registry.lineageFor(plan.value.id));
     if (!chain.ok) return chain;
     const next = chain.value.stages.find((entry) => entry.ordinal === 1);
@@ -1290,18 +1293,46 @@ export class Orchestrator {
       if (!successor.ok) return successor;
       const context = await this.#context(plan.value);
       if (!context.ok) return context;
-      if (stage.value.handoff === null) return failure("handoff_missing", "Plan has no handoff");
-      return this.#resumeSuccessor(successor.value, context.value.snapshot, stage.value.handoff);
+      return this.#resumeSuccessor(successor.value, context.value.snapshot, handoff);
     }
-    if (stage.value.handoff === null) return failure("handoff_missing", "Plan has no handoff");
+    if (handoff.completionReportId !== undefined) {
+      const report = this.#withRegistry((registry) =>
+        registry.delivery(handoff.completionReportId ?? ""),
+      );
+      if (
+        !report.ok ||
+        report.value.state !== "accepted" ||
+        report.value.envelope.fromBindingId !== plan.value.id ||
+        report.value.envelope.outcome !== "completed" ||
+        !report.value.envelope.evidence.includes(handoff.planPath)
+      )
+        return failure(
+          "plan_report_not_accepted",
+          "Plan completion report has not been natively accepted",
+        );
+    }
     const checkout = plan.value.checkout;
     let head: string;
     try {
+      if (handoff.completionReportId !== undefined) {
+        const [checkoutPath, planPath] = await Promise.all([
+          realpath(checkout.path),
+          realpath(handoff.planPath),
+        ]);
+        const inside = relative(checkoutPath, planPath);
+        if (inside === "" || inside === ".." || inside.startsWith("../") || isAbsolute(inside))
+          return failure("plan_changed", "Plan path no longer resolves inside the child worktree");
+        const digest = createHash("sha256")
+          .update(await readFile(planPath))
+          .digest("hex");
+        if (digest !== handoff.planSha256)
+          return failure("plan_changed", "Plan file changed since the accepted handoff");
+      }
       head = await this.#deps.gitTip(checkout.path, "HEAD");
     } catch (cause) {
-      return failure("runtime_unavailable", "Could not read plan HEAD", messageOf(cause));
+      return failure("plan_changed", "Could not verify the handed-off plan file", messageOf(cause));
     }
-    if (head !== stage.value.handoff.head)
+    if (head !== handoff.head)
       return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
     if (plan.value.paneId === null || plan.value.workspaceId === null)
       return failure("runtime_unavailable", "Plan has no Herdr pane or workspace");
@@ -1356,8 +1387,8 @@ export class Orchestrator {
         successor: {
           previousId: plan.value.id,
           workspaceId: plan.value.workspaceId,
-          head: stage.value.handoff.head,
-          planPath: stage.value.handoff.planPath,
+          head: handoff.head,
+          planPath: handoff.planPath,
         },
       },
     );

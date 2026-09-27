@@ -887,6 +887,26 @@ describe("orchestrator startup", () => {
         const session = new FakeNative(identity, events, messages);
         session.onConfigure = (current) =>
           herdr.nativeIdentities.set(binding.durableSessionId, current);
+        session.send = async (envelope) => {
+          const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+          try {
+            const claim = registry.claim(binding.durableSessionId, envelope);
+            if (!claim.ok) return claim;
+            return registry.finish(
+              envelope.id,
+              {
+                kind: "ok",
+                thread_id: claim.value.target?.durableSessionId ?? "",
+                message_seq: 1,
+                deduplicated: false,
+                delivery: { kind: "started", turn_id: "turn" },
+              },
+              claim.value.nativeKey,
+            );
+          } finally {
+            registry.close();
+          }
+        };
         return session;
       },
       terminateBinding: async (binding) => {
@@ -985,6 +1005,36 @@ describe("orchestrator startup", () => {
       registry.close();
     }
     expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const deliveries = new Database(join(root, ".omo/state/registry.sqlite"));
+    deliveries.run("UPDATE deliveries SET state = 'uncertain' WHERE message_id = 'report'");
+    deliveries.close();
+    const beforeUnacceptedStart = events.length;
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        stage: "execute",
+        parentId: parent.value.binding.id,
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "plan_report_not_accepted" } });
+    expect(events).toHaveLength(beforeUnacceptedStart);
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    const acceptedDeliveries = new Database(join(root, ".omo/state/registry.sqlite"));
+    acceptedDeliveries.run("UPDATE deliveries SET state = 'accepted' WHERE message_id = 'report'");
+    acceptedDeliveries.close();
+    await Bun.write(path, "Changed plan content");
+    const beforeChangedPlanStart = events.length;
+    expect(
+      await orchestrator.stageStart({
+        fromId: binding.id,
+        stage: "execute",
+        parentId: parent.value.binding.id,
+        messageId: "start",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "plan_changed" } });
+    expect(events).toHaveLength(beforeChangedPlanStart);
+    expect(live().map((item) => item.id)).toEqual([binding.id]);
+    await Bun.write(path, "Plan content");
     tip = "changed";
     expect(
       await orchestrator.stageStart({
@@ -1306,6 +1356,26 @@ describe("orchestrator startup", () => {
         const session = new FakeNative(identity, events, messages);
         session.onConfigure = (current) =>
           herdr.nativeIdentities.set(binding.durableSessionId, current);
+        session.send = async (envelope) => {
+          const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+          try {
+            const claim = registry.claim(binding.durableSessionId, envelope);
+            if (!claim.ok) return claim;
+            return registry.finish(
+              envelope.id,
+              {
+                kind: "ok",
+                thread_id: claim.value.target?.durableSessionId ?? "",
+                message_seq: 1,
+                deduplicated: false,
+                delivery: { kind: "started", turn_id: "turn" },
+              },
+              claim.value.nativeKey,
+            );
+          } finally {
+            registry.close();
+          }
+        };
         return session;
       },
       terminateBinding: async () => {},

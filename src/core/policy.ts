@@ -28,51 +28,100 @@ export function initializationMessageId(bindingId: string): string {
   return `initialization:${bindingId}`;
 }
 
+const thinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
 export interface RoleModel {
   readonly provider: string;
   readonly modelId: string;
-  readonly thinking: "medium" | "high" | "max" | "xhigh";
+  readonly thinking: z.infer<typeof thinkingLevelSchema>;
 }
 
 const managerSettingsSchema = z.object({
   defaultProvider: z.string().min(1),
   defaultModel: z.string().min(1),
-  defaultThinkingLevel: z.enum(["medium", "high", "max", "xhigh"]),
+  defaultThinkingLevel: thinkingLevelSchema,
 });
+
+export interface ManagerModelResolution {
+  readonly model: RoleModel;
+  readonly source: "settings" | "fallback_no_default";
+}
+
+export class ManagerSettingsError extends Error {
+  readonly code = "manager_settings_error";
+  constructor(
+    message: string,
+    readonly settingsPath: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ManagerSettingsError";
+  }
+}
+
+const managerFallback: RoleModel = {
+  provider: "opencodex",
+  modelId: "anthropic/claude-opus-5-5",
+  thinking: "medium",
+};
+
+export function resolveManagerModel(
+  settingsPath = join(homedir(), ".omo/agent/settings.json"),
+): ManagerModelResolution {
+  let settingsText: string;
+  try {
+    settingsText = readFileSync(settingsPath, "utf8");
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+      return { model: managerFallback, source: "fallback_no_default" };
+    throw new ManagerSettingsError(
+      `Could not read manager settings: ${String(cause)}`,
+      settingsPath,
+      {
+        cause,
+      },
+    );
+  }
+  let settingsValue: unknown;
+  try {
+    settingsValue = JSON.parse(settingsText);
+  } catch (cause) {
+    throw new ManagerSettingsError(
+      `Could not parse manager settings: ${String(cause)}`,
+      settingsPath,
+      {
+        cause,
+      },
+    );
+  }
+  const object = z.record(z.string(), z.unknown()).safeParse(settingsValue);
+  if (!object.success)
+    throw new ManagerSettingsError("Manager settings must be a JSON object", settingsPath, {
+      cause: object.error,
+    });
+  if (!("defaultModel" in object.data))
+    return { model: managerFallback, source: "fallback_no_default" };
+  const settings = managerSettingsSchema.safeParse(object.data);
+  if (!settings.success)
+    throw new ManagerSettingsError("Manager default model settings are invalid", settingsPath, {
+      cause: settings.error,
+    });
+  return {
+    model: {
+      provider: settings.data.defaultProvider,
+      modelId: settings.data.defaultModel,
+      thinking: settings.data.defaultThinkingLevel,
+    },
+    source: "settings",
+  };
+}
 
 export function modelForLaunch(
   role: Assignment["role"],
   stage: ChildStage | null,
   settingsPath = join(homedir(), ".omo/agent/settings.json"),
 ): RoleModel {
-  if (role === "manager") {
-    const fallback: RoleModel = {
-      provider: "opencodex",
-      modelId: "anthropic/claude-opus-5-5",
-      thinking: "medium",
-    };
-    let settingsText: string;
-    try {
-      settingsText = readFileSync(settingsPath, "utf8");
-    } catch {
-      return fallback;
-    }
-    let settingsValue: unknown;
-    try {
-      settingsValue = JSON.parse(settingsText);
-    } catch (cause) {
-      if (!(cause instanceof SyntaxError)) throw cause;
-      return fallback;
-    }
-    const settings = managerSettingsSchema.safeParse(settingsValue);
-    return settings.success
-      ? {
-          provider: settings.data.defaultProvider,
-          modelId: settings.data.defaultModel,
-          thinking: settings.data.defaultThinkingLevel,
-        }
-      : fallback;
-  }
+  if (role === "manager") return resolveManagerModel(settingsPath).model;
   if (role === "supervisor")
     return { provider: "opencodex", modelId: "gpt-6-astra", thinking: "high" };
   if (role === "parent")
@@ -105,7 +154,7 @@ const seedEntrySchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("thinking_level_change"),
-    thinkingLevel: z.enum(["medium", "high", "max", "xhigh"]),
+    thinkingLevel: thinkingLevelSchema,
   }),
 ]);
 

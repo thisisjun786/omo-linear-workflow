@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment, Binding } from "../../src/core/contracts";
 import type { RoleModel } from "../../src/core/policy";
-import { modelForBinding, modelForLaunch } from "../../src/core/policy";
+import {
+  ManagerSettingsError,
+  modelForBinding,
+  modelForLaunch,
+  resolveManagerModel,
+} from "../../src/core/policy";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -60,7 +65,27 @@ describe("launch models by role and child stage", () => {
     });
   }
 
-  test("manager reads valid settings and falls back for missing, malformed and incomplete settings", async () => {
+  test("manager preserves every native thinking level from settings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "olw-manager-settings-"));
+    roots.push(root);
+    const path = join(root, "settings.json");
+    for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+      await Bun.write(
+        path,
+        JSON.stringify({
+          defaultProvider: "opencodex",
+          defaultModel: "gpt-6-astra",
+          defaultThinkingLevel: thinking,
+        }),
+      );
+      expect(resolveManagerModel(path)).toEqual({
+        model: { provider: "opencodex", modelId: "gpt-6-astra", thinking },
+        source: "settings",
+      });
+    }
+  });
+
+  test("manager fallback is explicit and applies only when no default model exists", async () => {
     const root = await mkdtemp(join(tmpdir(), "olw-manager-settings-"));
     roots.push(root);
     const path = join(root, "settings.json");
@@ -69,26 +94,18 @@ describe("launch models by role and child stage", () => {
       modelId: "anthropic/claude-opus-5-5",
       thinking: "medium",
     };
-    expect(modelForLaunch("manager", null, path)).toEqual(fallback);
+    expect(resolveManagerModel(path)).toEqual({ model: fallback, source: "fallback_no_default" });
+    await Bun.write(path, JSON.stringify({ theme: "dark" }));
+    expect(resolveManagerModel(path)).toEqual({ model: fallback, source: "fallback_no_default" });
     await Bun.write(path, "{invalid");
-    expect(modelForLaunch("manager", null, path)).toEqual(fallback);
+    expect(() => resolveManagerModel(path)).toThrow(ManagerSettingsError);
     await Bun.write(path, JSON.stringify({ defaultModel: "incomplete" }));
-    expect(modelForLaunch("manager", null, path)).toEqual(fallback);
-    await Bun.write(
-      path,
-      JSON.stringify({
-        defaultProvider: "custom",
-        defaultModel: "model",
-        defaultThinkingLevel: "high",
-      }),
-    );
-    expect(modelForLaunch("manager", null, path)).toEqual({
-      provider: "custom",
-      modelId: "model",
-      thinking: "high",
-    });
-    // Non-manager models never consult the supplied path, even when it is absent.
-    expect(modelForLaunch("parent", null, join(root, "absent"))).toEqual({
+    expect(() => resolveManagerModel(path)).toThrow(ManagerSettingsError);
+    await rm(path);
+    await mkdir(path);
+    expect(() => resolveManagerModel(path)).toThrow(ManagerSettingsError);
+    // Non-manager models never consult the supplied path, even when it is unreadable.
+    expect(modelForLaunch("parent", null, path)).toEqual({
       provider: "opencodex",
       modelId: "anthropic/claude-opus-5-5",
       thinking: "xhigh",

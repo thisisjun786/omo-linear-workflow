@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { readFile, realpath, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
@@ -22,11 +23,14 @@ import type {
 import {
   canRetryDelivery,
   initializationMessageId,
+  type ManagerModelResolution,
+  ManagerSettingsError,
   matchesRuntime,
   modelForBinding,
   modelForLaunch,
   questionRecipient,
   type RoleModel,
+  resolveManagerModel,
 } from "./core/policy";
 import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
@@ -152,6 +156,7 @@ export interface ManageResult {
   readonly binding: Binding;
   readonly updateCheck: UpdateCheck;
   readonly routingAdvice: NonNullable<UpdateCheck["routingAdvice"]>;
+  readonly modelSource: ManagerModelResolution["source"] | "existing";
 }
 export type ChildCreateMode = "direct" | "planned" | "research";
 export interface CreateChildInput {
@@ -700,6 +705,16 @@ export class Orchestrator {
   }
 
   public async manage(): Promise<Result<ManageResult>> {
+    let managerModel: ManagerModelResolution;
+    try {
+      managerModel = resolveManagerModel(
+        this.#deps.managerSettingsPath ?? join(homedir(), ".omo/agent/settings.json"),
+      );
+    } catch (cause) {
+      if (cause instanceof ManagerSettingsError)
+        return failure(cause.code, cause.message, { settingsPath: cause.settingsPath });
+      throw cause;
+    }
     const updateCheck = await this.#runUpdateCheck();
     this.#currentUpdateCheck = updateCheck;
     const listed = this.#withRegistry((registry) => registry.list());
@@ -731,6 +746,7 @@ export class Orchestrator {
       managerSnapshot,
       this.#root,
       null,
+      { managerModel },
     );
     return created.ok
       ? ok({
@@ -743,6 +759,7 @@ export class Orchestrator {
             routes: [],
             catalog: [],
           },
+          modelSource: managerModel.source,
         })
       : created;
   }
@@ -896,6 +913,7 @@ export class Orchestrator {
             routes: [],
             catalog: [],
           },
+          modelSource: "existing",
         });
       }
       const now = this.#deps.now();
@@ -920,6 +938,7 @@ export class Orchestrator {
             routes: [],
             catalog: [],
           },
+          modelSource: "existing",
         });
       }
       const owner = claim.value.token;
@@ -955,6 +974,7 @@ export class Orchestrator {
             routes: [],
             catalog: [],
           },
+          modelSource: "existing",
         });
       }
       const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
@@ -1018,6 +1038,7 @@ export class Orchestrator {
           routes: [],
           catalog: [],
         },
+        modelSource: "existing",
       });
     } catch (cause) {
       return failure(
@@ -2432,11 +2453,12 @@ export class Orchestrator {
     cwd: string,
     checkout: Checkout | null,
     target?: {
-      readonly bindingId: string;
+      readonly bindingId?: string;
       readonly stage?: ChildStage;
       readonly mode?: ChildCreateMode;
       readonly planPath?: string;
       readonly deliverable?: Deliverable | undefined;
+      readonly managerModel?: ManagerModelResolution;
       readonly successor?: {
         readonly previousId: string;
         readonly workspaceId: string;
@@ -2589,8 +2611,8 @@ export class Orchestrator {
         }
       }
       const model =
-        assignment.role === "manager" && this.#deps.managerSettingsPath !== undefined
-          ? modelForLaunch("manager", null, this.#deps.managerSettingsPath)
+        assignment.role === "manager"
+          ? (target?.managerModel?.model ?? resolveManagerModel().model)
           : modelForLaunch(assignment.role, target?.stage ?? null);
       const manager = SessionManager.create(cwd, join(this.#root, ".omo/state/sessions"), {
         id: reserved.value.durableSessionId,

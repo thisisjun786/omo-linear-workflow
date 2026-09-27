@@ -1201,6 +1201,7 @@ export class Orchestrator {
     const host = await this.#checkHostProtocol(sender.value);
     if (host !== undefined) return host;
     let session: NativeSession | undefined;
+    let resolvedPlanPath = input.planPath;
     try {
       session = await this.#deps.attachBinding(sender.value);
       const identity = await session.describe();
@@ -1213,6 +1214,7 @@ export class Orchestrator {
         realpath(sender.value.checkout.path),
         realpath(input.planPath),
       ]);
+      resolvedPlanPath = path;
       const inside = relative(directory, path);
       if (inside === "" || inside === ".." || inside.startsWith("../") || isAbsolute(inside))
         return failure("invalid_arguments", "Plan file must be inside the child worktree");
@@ -1244,7 +1246,7 @@ export class Orchestrator {
       fromId: input.fromId,
       messageId: input.messageId,
       outcome: "completed",
-      evidence: [input.planPath],
+      evidence: [resolvedPlanPath],
       text: input.text,
     });
   }

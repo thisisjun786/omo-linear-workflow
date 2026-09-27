@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@code-yeongyu/senpi";
@@ -977,11 +977,13 @@ describe("orchestrator startup", () => {
     expect(missing).toMatchObject({ ok: false, error: { code: "handoff_missing" } });
     expect(live().map((item) => item.id)).toEqual([binding.id]);
     const path = join(checkout.path, "plan.md");
+    const linkedPath = join(checkout.path, "submitted-plan.md");
     await mkdir(checkout.path, { recursive: true });
     await Bun.write(path, "Plan content");
+    await symlink(path, linkedPath);
     const wrong = await orchestrator.stageComplete({
       fromId: binding.id,
-      planPath: path,
+      planPath: linkedPath,
       head: "wrong",
       messageId: "report",
       text: "done",
@@ -989,12 +991,15 @@ describe("orchestrator startup", () => {
     expect(wrong).toMatchObject({ ok: false, error: { code: "head_mismatch" } });
     const completed = await orchestrator.stageComplete({
       fromId: binding.id,
-      planPath: path,
+      planPath: linkedPath,
       head: tip,
       messageId: "report",
       text: "done",
     });
-    expect(completed).toMatchObject({ ok: true, value: { state: "accepted" } });
+    expect(completed).toMatchObject({
+      ok: true,
+      value: { state: "accepted", envelope: { evidence: [path] } },
+    });
     const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
     try {
       expect(registry.stageOf(binding.id)).toMatchObject({

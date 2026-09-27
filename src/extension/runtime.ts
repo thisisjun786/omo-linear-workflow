@@ -12,7 +12,7 @@ import type {
   Result,
   RuntimeIdentity,
 } from "../core/contracts";
-import { canRetryDelivery } from "../core/policy";
+import { canRetryDelivery, questionRecipient } from "../core/policy";
 import {
   bindingSchema,
   claimResultSchema,
@@ -477,11 +477,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         ? null
         : await worker("lookup-binding", { bindingId: ownerId }, resultSchema(bindingSchema));
     if (owner !== null && !owner.ok && owner.error.code !== "not_found") return owner;
-    const targetId = existing.ok
-      ? existing.value.envelope.toBindingId
-      : owner?.ok && owner.value.launchState === "ready"
-        ? owner.value.id
-        : null;
+    const targetId = questionRecipient(
+      sender.value.assignment.role,
+      existing.ok ? existing.value : null,
+      owner?.ok ? owner.value : null,
+    );
     if (targetId === null && sender.value.assignment.role === "child")
       return failure("not_ready", "Child's parent is not ready");
     const designation = await worker<Designation>(

@@ -6,7 +6,7 @@ import { modelForRole } from "../src/core/policy";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { registerInitiativeRuntime } from "../src/extension/runtime";
-import { context, envelope, fixture, Harness, value } from "./runtime-harness";
+import { context, envelope, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
 
 function resultCode(value: unknown): string {
   if (typeof value !== "object" || value === null || !("ok" in value)) return "invalid";
@@ -357,6 +357,7 @@ describe("native delivery extension", () => {
         ok: false,
         error: { code: "contact_paused" },
       });
+      expect(harness.executeCount).toBe(2);
     });
   });
 
@@ -389,6 +390,68 @@ describe("native delivery extension", () => {
       const unbound = context({ ...parent, durableSessionId: "unbound" });
       for (const name of ["request_user_input", "ask_user_question"])
         expect(await harness.guard()(name, {}, unbound)).toBeUndefined();
+    });
+  });
+
+  test("posts a new parent question when its linked manager is paused and preserves replay", async () => {
+    await fixture(async ({ root, parent }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager = linkReadyManager(registry, parent, root);
+        value(registry.setContactState(manager.id, "paused"));
+      } finally {
+        registry.close();
+      }
+      const harness = new Harness();
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const questions = {
+        questions: [
+          { id: "q", question: "Which way?", options: [{ label: "Yes" }], multiSelect: false },
+        ],
+      };
+      expect(await harness.callTool("olw_ask", "paused-manager", questions)).toMatchObject({
+        state: "posted",
+        disposition: "new",
+        id: `question:${parent.id}:paused-manager`,
+      });
+      expect(harness.executeCount).toBe(0);
+      expect(await harness.callTool("olw_ask", "paused-manager", questions)).toMatchObject({
+        state: "posted",
+        disposition: "replay",
+      });
+      expect(harness.executeCount).toBe(0);
+      const inbox = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        expect(value(inbox.postedQuestions({}))).toMatchObject([
+          {
+            record: {
+              state: "posted",
+              envelope: {
+                id: `question:${parent.id}:paused-manager`,
+                toBindingId: null,
+              },
+            },
+            answered: false,
+          },
+        ]);
+        value(inbox.setContactState("manager", "active"));
+      } finally {
+        inbox.close();
+      }
+      harness.receipt = {
+        kind: "ok",
+        thread_id: "session-manager",
+        message_seq: 1,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "turn" },
+      };
+      expect(await harness.callTool("olw_ask", "ready-manager", questions)).toMatchObject({
+        state: "accepted",
+        disposition: "new",
+        id: `question:${parent.id}:ready-manager`,
+      });
+      expect(harness.executeCount).toBe(1);
     });
   });
 

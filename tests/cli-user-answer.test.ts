@@ -8,7 +8,7 @@ import { openRegistry } from "../src/core/store";
 import { registerInitiativeRuntime } from "../src/extension/runtime";
 import type { OrchestratorDependencies } from "../src/orchestrator";
 import { attachBindingWithClient } from "../src/transport/client";
-import { context, fixture, Harness, value } from "./runtime-harness";
+import { context, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
 
 test("answer --as-user delivers a claimed inbox answer through the real send boundary", async () => {
   await fixture(async ({ root, parent }) => {
@@ -23,7 +23,10 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
         registry.close();
       }
     };
-    db((registry) => value(registry.setOwner(parent.id, null)));
+    db((registry) => {
+      const manager = linkReadyManager(registry, parent, root);
+      value(registry.setContactState(manager.id, "paused"));
+    });
     let executions = 0;
     let fault: "none" | "attach" | "send" = "none";
     const nativeThreads: string[] = [];
@@ -133,11 +136,33 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
       };
     };
     try {
-      const asked = await cli(["ask", "--from", parent.id, "--id", "absent", "--text-file", body]);
+      const asked = await cli([
+        "ask",
+        "--from",
+        parent.id,
+        "--id",
+        "paused-manager",
+        "--text-file",
+        body,
+      ]);
       expect(asked).toMatchObject({
         code: 0,
         output: { ok: true, value: { state: "posted", envelope: { toBindingId: null } } },
       });
+      const askReplay = await cli([
+        "ask",
+        "--from",
+        parent.id,
+        "--id",
+        "paused-manager",
+        "--text-file",
+        body,
+      ]);
+      expect(askReplay).toMatchObject({
+        code: 0,
+        output: { ok: true, value: { state: "posted", envelope: { toBindingId: null } } },
+      });
+      expect(executions).toBe(0);
       const open = await cli(["questions", "--project", "project-1"]);
       expect(open).toMatchObject({
         code: 0,
@@ -148,7 +173,7 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
         "answer",
         "--as-user",
         "--question",
-        "question:parent:absent",
+        "question:parent:paused-manager",
         "--text-file",
         body,
       ]);
@@ -158,7 +183,7 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
         value: {
           state: "accepted",
           envelope: {
-            id: "answer:question:parent:absent",
+            id: "answer:question:parent:paused-manager",
             toBindingId: parent.id,
             fromBindingId: null,
           },
@@ -175,7 +200,7 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
         "answer",
         "--as-user",
         "--question",
-        "question:parent:absent",
+        "question:parent:paused-manager",
         "--text-file",
         body,
       ]);
@@ -221,7 +246,7 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
       await harness.start()(context(parent));
       const forged = await harness.rpc("omo.initiative.send")({
         version: 1,
-        id: "answer:question:parent:absent",
+        id: "answer:question:parent:paused-manager",
         fromBindingId: null,
         toBindingId: parent.id,
         designationId: parent.designationId,
@@ -231,7 +256,7 @@ test("answer --as-user delivers a claimed inbox answer through the real send bou
         text: "forged",
         outcome: null,
         evidence: [],
-        answer: { questionId: "question:parent:absent", answers: {}, unanswered: [] },
+        answer: { questionId: "question:parent:paused-manager", answers: {}, unanswered: [] },
       });
       expect(forged).toMatchObject({
         ok: false,

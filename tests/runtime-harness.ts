@@ -112,6 +112,59 @@ export async function fixture(run: (fixture: Fixture) => Promise<void>): Promise
   }
 }
 
+export function linkReadyManager(
+  registry: ReturnType<typeof openRegistry>,
+  parent: Binding,
+  root: string,
+): Binding {
+  const managerSnapshot: ScopeSnapshot = {
+    version: 1,
+    source: "linear-export",
+    initiative: null,
+    projects: [],
+    decisionRefs: [],
+  };
+  const managerDigest = value(registry.importScope(managerSnapshot)).digest;
+  const manager = value(
+    registry.reserve({
+      bindingId: "manager",
+      durableSessionId: "session-manager",
+      designation: {
+        id: "manager-designation",
+        snapshotDigest: managerDigest,
+        designatedBy: "test",
+        designatedAt: "2026-09-27T00:00:00Z",
+        execute: true,
+        create: true,
+        contact: true,
+      },
+      snapshot: managerSnapshot,
+      assignment: { role: "manager" },
+      cwd: root,
+      checkout: null,
+      herdrSocket: join(root, "herdr.sock"),
+      omoSocket: join(root, "omo.sock"),
+    }),
+  );
+  value(registry.provision(manager.id, "workspace-manager", "pane-manager"));
+  value(registry.observeSession(manager.id, "/sessions/manager.jsonl"));
+  value(
+    registry.activate(manager.id, {
+      durableSessionId: manager.durableSessionId,
+      sessionPath: "/sessions/manager.jsonl",
+      cwd: manager.cwd,
+      provider: "opencodex",
+      modelId: "anthropic/claude-opus-5-5",
+      thinking: "medium",
+      extensionProtocol: 2,
+    }),
+  );
+  value(registry.beginInitialization(manager.id, "Fixture initialization"));
+  value(registry.finishInitialization(manager.id, "accepted"));
+  value(registry.setOwner(parent.id, manager.id));
+  return value(registry.get(manager.id));
+}
+
 export function envelope(
   from: Binding,
   to: Binding,

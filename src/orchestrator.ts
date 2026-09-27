@@ -25,6 +25,7 @@ import {
   matchesRuntime,
   modelForBinding,
   modelForLaunch,
+  questionRecipient,
   type RoleModel,
 } from "./core/policy";
 import { envelopeSchema } from "./core/schema";
@@ -1767,14 +1768,16 @@ export class Orchestrator {
       : `question:${sender.value.id}:${input.messageId}`;
     const existing = this.#withRegistry((registry) => registry.delivery(messageId));
     if (!existing.ok && existing.error.code !== "not_found") return existing;
-    let targetId = sender.value.assignment.ownerBindingId;
-    if (existing.ok) targetId = existing.value.envelope.toBindingId;
-    else if (sender.value.assignment.role === "parent" && targetId !== null && !input.toUser) {
-      const owner = this.#binding(targetId);
-      if (!owner.ok && owner.error.code !== "not_found") return owner;
-      if (!owner.ok || owner.value.launchState !== "ready") targetId = null;
-    }
-    if (input.toUser) targetId = null;
+    const ownerId = sender.value.assignment.ownerBindingId;
+    const owner = ownerId === null || existing.ok || input.toUser ? null : this.#binding(ownerId);
+    if (owner !== null && !owner.ok && owner.error.code !== "not_found") return owner;
+    const targetId = input.toUser
+      ? null
+      : questionRecipient(
+          sender.value.assignment.role,
+          existing.ok ? existing.value : null,
+          owner?.ok ? owner.value : null,
+        );
     const envelope: Envelope = {
       version: 1,
       id: messageId,

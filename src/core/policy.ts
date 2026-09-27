@@ -13,6 +13,17 @@ export function canRetryDelivery(record: DeliveryRecord): boolean {
   );
 }
 
+export function questionRecipient(
+  senderRole: Binding["assignment"]["role"],
+  existing: DeliveryRecord | null,
+  owner: Binding | null,
+): string | null {
+  if (existing !== null) return existing.envelope.toBindingId;
+  if (owner === null || owner.launchState !== "ready") return null;
+  if (senderRole === "parent" && owner.contactState !== "active") return null;
+  return owner.id;
+}
+
 export function initializationMessageId(bindingId: string): string {
   return `initialization:${bindingId}`;
 }

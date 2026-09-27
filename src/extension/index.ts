@@ -2,6 +2,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { debuglog } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@code-yeongyu/senpi";
+import {
+  isContinuationHoldStateEvent,
+  isTerminalMonitorStateEvent,
+  isWakeSourceStateEvent,
+} from "../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/monitor-state-event.js";
 import { openRegistry } from "../core/store";
 import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
@@ -37,6 +42,9 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
       onSessionStart: (handler) => {
         pi.on("session_start", (event, ctx) => handler(event.reason, ctx));
       },
+      onMessageStart: (handler) => {
+        pi.on("message_start", (_event, ctx) => handler(ctx));
+      },
       onAgentStart: (handler) => {
         pi.on("agent_start", (_event, ctx) => handler(ctx));
       },
@@ -48,8 +56,22 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
       },
       onBlocked: (handler) => {
         pi.events.on("herdr:blocked", (data) => {
-          if (!isBlockedEvent(data)) return;
-          return handler(data);
+          if (isBlockedEvent(data)) handler(data);
+        });
+      },
+      onWakeSource: (handler) => {
+        pi.events.on("wake_source_state", (data) => {
+          if (isWakeSourceStateEvent(data)) handler(data);
+        });
+      },
+      onContinuationHold: (handler) => {
+        pi.events.on("continuation_hold_state", (data) => {
+          if (isContinuationHoldStateEvent(data)) handler(data);
+        });
+      },
+      onMonitors: (handler) => {
+        pi.events.on("terminal_monitor_state", (data) => {
+          if (isTerminalMonitorStateEvent(data)) handler(data);
         });
       },
     },

@@ -6,11 +6,9 @@ export type RoleHerdrMethod =
   | "pane.report_agent"
   | "pane.report_agent_session"
   | "pane.release_agent";
-
 export interface RoleHerdrClient {
   send(method: RoleHerdrMethod, params: Record<string, unknown>): Promise<void>;
 }
-
 export interface RoleSessionContext {
   readonly mode: "tui" | "rpc" | "app-server" | "json" | "print";
   isIdle(): boolean;
@@ -19,40 +17,84 @@ export interface RoleSessionContext {
     getSessionFile(): string | undefined;
   };
 }
-
 export interface RoleHerdrReporterPort {
-  onSessionStart(handler: (reason: string, ctx: RoleSessionContext) => Promise<void> | void): void;
-  onAgentStart(handler: (ctx: RoleSessionContext) => Promise<void> | void): void;
-  onAgentSettled(handler: (ctx: RoleSessionContext) => Promise<void> | void): void;
-  onSessionShutdown(
-    handler: (reason: string, ctx: RoleSessionContext) => Promise<void> | void,
-  ): void;
-  onBlocked(
-    handler: (event: { active: boolean; id: string; label?: string }) => Promise<void> | void,
-  ): void;
+  onSessionStart(handler: (reason: string, ctx: RoleSessionContext) => void): void;
+  onMessageStart(handler: (ctx: RoleSessionContext) => void): void;
+  onAgentStart(handler: (ctx: RoleSessionContext) => void): void;
+  onAgentSettled(handler: (ctx: RoleSessionContext) => void): void;
+  onSessionShutdown(handler: (reason: string, ctx: RoleSessionContext) => void): void;
+  onBlocked(handler: (event: BlockedEvent) => void): void;
+  onWakeSource(handler: (event: WakeSourceEvent) => void): void;
+  onContinuationHold(handler: (event: ContinuationHoldEvent) => void): void;
+  onMonitors(handler: (event: MonitorEvent) => void): void;
 }
-
+interface BlockedEvent {
+  readonly active: boolean;
+  readonly id: string;
+  readonly label?: string;
+}
+export interface WakeSourceEvent {
+  readonly source: string;
+  readonly activeCount: number;
+}
+export interface ContinuationHoldEvent {
+  readonly source: string;
+  readonly active: boolean;
+}
+export interface MonitorEvent {
+  readonly activeCount: number;
+}
 export interface RoleHerdrReporterDependencies {
   readonly hostRuntime: boolean;
   lookupBinding(sessionId: string): Binding | undefined;
   createClient(socketPath: string, paneId: string): RoleHerdrClient;
   debug(message: string): void;
 }
-
-interface Reporter {
+interface Target {
+  readonly socket: string;
+  readonly pane: string;
   readonly client: RoleHerdrClient;
-  readonly sessionManager: RoleSessionContext["sessionManager"];
-  turnActive: boolean;
-  blocked: Map<string, string | undefined>;
-  lastReport: string | undefined;
 }
+interface Reporter {
+  readonly sessionManager: RoleSessionContext["sessionManager"];
+  target: Target | undefined;
+  turnActive: boolean;
+  readonly blocked: Map<string, string | undefined>;
+  readonly wakeSources: Map<string, number>;
+  monitorCount: number;
+  lastReport: string | undefined;
+  queue: Promise<void>;
+  stopped: boolean;
+  sessionSource: string;
+}
+const representedWakeSources = new Set(["terminal-monitors", "senpi-task", "ask-user"]);
+const wakeLabels: Readonly<Record<string, readonly [string, string]>> = {
+  "terminal-background-sessions": ["background session", "background sessions"],
+  "senpi-codemode": ["detached eval cell", "detached eval cells"],
+  "omo-dag": ["DAG run", "DAG runs"],
+  "loop-guard-hard-stop": ["loop-guard recovery pending", "loop-guard recoveries pending"],
+};
 
-function report(reporter: Reporter): { state: "working" | "idle" | "blocked"; message?: string } {
+function selectedReport(reporter: Reporter) {
   if (reporter.blocked.size > 0) {
     const message = reporter.blocked.values().next().value;
-    return { state: "blocked", ...(message === undefined ? {} : { message }) };
+    return { state: "blocked" as const, ...(message === undefined ? {} : { message }) };
   }
-  return { state: reporter.turnActive ? "working" : "idle" };
+  const parts: string[] = [];
+  const children = reporter.wakeSources.get("senpi-task") ?? 0;
+  if (children > 0) parts.push(`${children} subagent${children === 1 ? "" : "s"} running`);
+  if (reporter.monitorCount > 0)
+    parts.push(`${reporter.monitorCount} monitor${reporter.monitorCount === 1 ? "" : "s"} live`);
+  for (const [source, count] of [...reporter.wakeSources].sort(([a], [b]) => a.localeCompare(b))) {
+    if (representedWakeSources.has(source)) continue;
+    const label = wakeLabels[source];
+    parts.push(
+      label === undefined ? `${count} ${source}` : `${count} ${count === 1 ? label[0] : label[1]}`,
+    );
+  }
+  return reporter.turnActive || parts.length > 0
+    ? { state: "working" as const, ...(parts.length === 0 ? {} : { message: parts.join(" + ") }) }
+    : { state: "idle" as const };
 }
 
 export function registerRoleHerdrReporter(
@@ -60,122 +102,179 @@ export function registerRoleHerdrReporter(
   dependencies: RoleHerdrReporterDependencies,
 ): void {
   const reporters = new Map<string, Reporter>();
-  let active: Reporter | undefined;
-
+  let currentSessionId: string | undefined;
+  const live = (binding: Binding | undefined): binding is Binding & { paneId: string } =>
+    binding !== undefined &&
+    binding.paneId !== null &&
+    binding.launchState !== "closing" &&
+    binding.launchState !== "closed";
   const sessionRef = (reporter: Reporter) => {
     const path = reporter.sessionManager.getSessionFile();
     return path
       ? { agent_session_path: path }
       : { agent_session_id: reporter.sessionManager.getSessionId() };
   };
-  async function send(
-    reporter: Reporter,
-    method: RoleHerdrMethod,
-    params: Record<string, unknown>,
-  ): Promise<boolean> {
-    try {
-      await reporter.client.send(method, params);
-      return true;
-    } catch (cause) {
+  function enqueue(reporter: Reporter, work: () => Promise<void>): void {
+    reporter.queue = reporter.queue.then(work).catch((cause: unknown) => {
       dependencies.debug(cause instanceof Error ? cause.message : "Herdr transport failed");
-      return false;
-    }
+    });
   }
-  async function publish(reporter: Reporter): Promise<void> {
-    const next = report(reporter);
-    const key = JSON.stringify(next);
-    if (key === reporter.lastReport) return;
-    reporter.lastReport = key;
-    if (
-      !(await send(reporter, "pane.report_agent", {
+  async function target(reporter: Reporter): Promise<Target | undefined> {
+    if (reporter.stopped) return undefined;
+    let binding: Binding | undefined;
+    try {
+      binding = dependencies.lookupBinding(reporter.sessionManager.getSessionId());
+    } catch (cause) {
+      dependencies.debug(cause instanceof Error ? cause.message : "Herdr binding lookup failed");
+      return undefined;
+    }
+    if (!live(binding)) {
+      reporter.target = undefined;
+      reporter.lastReport = undefined;
+      return undefined;
+    }
+    if (reporter.target?.socket === binding.herdrSocket && reporter.target.pane === binding.paneId)
+      return reporter.target;
+    reporter.target = {
+      socket: binding.herdrSocket,
+      pane: binding.paneId,
+      client: dependencies.createClient(binding.herdrSocket, binding.paneId),
+    };
+    reporter.lastReport = undefined;
+    await reporter.target.client.send("pane.report_agent_session", {
+      agent: "pi",
+      ...sessionRef(reporter),
+      session_start_source: reporter.sessionSource,
+    });
+    reporter.sessionSource = "resume";
+    return reporter.target;
+  }
+  function publish(reporter: Reporter): void {
+    enqueue(reporter, async () => {
+      const next = selectedReport(reporter);
+      const key = JSON.stringify(next);
+      const destination = await target(reporter);
+      if (destination === undefined || reporter.lastReport === key) return;
+      await destination.client.send("pane.report_agent", {
         agent: "pi",
         ...sessionRef(reporter),
         ...next,
-      }))
-    )
-      reporter.lastReport = undefined;
+      });
+      reporter.lastReport = key;
+    });
   }
-
-  port.onSessionStart(async (reason, ctx) => {
-    if (
-      !dependencies.hostRuntime ||
-      ctx.mode === "tui" ||
-      reporters.has(ctx.sessionManager.getSessionId())
-    )
-      return;
-    let binding: Binding | undefined;
-    let client: RoleHerdrClient;
-    try {
-      binding = dependencies.lookupBinding(ctx.sessionManager.getSessionId());
-      if (binding?.paneId === null || binding?.paneId === undefined) return;
-      client = dependencies.createClient(binding.herdrSocket, binding.paneId);
-    } catch (cause) {
-      dependencies.debug(cause instanceof Error ? cause.message : "Herdr reporter setup failed");
-      return;
-    }
+  function ensureReporter(ctx: RoleSessionContext, reason: string): Reporter | undefined {
+    if (!dependencies.hostRuntime || ctx.mode === "tui") return undefined;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const existing = reporters.get(sessionId);
+    if (existing !== undefined) return existing;
     const reporter: Reporter = {
-      client,
       sessionManager: ctx.sessionManager,
+      target: undefined,
       turnActive: !ctx.isIdle(),
       blocked: new Map(),
+      wakeSources: new Map(),
+      monitorCount: 0,
       lastReport: undefined,
+      queue: Promise.resolve(),
+      stopped: false,
+      sessionSource: reason,
     };
-    reporters.set(ctx.sessionManager.getSessionId(), reporter);
-    await send(reporter, "pane.report_agent_session", {
-      agent: "pi",
-      ...sessionRef(reporter),
-      session_start_source: reason,
-    });
-    await publish(reporter);
+    reporters.set(sessionId, reporter);
+    currentSessionId = sessionId;
+    return reporter;
+  }
+  port.onSessionStart((reason, ctx) => {
+    const reporter = ensureReporter(ctx, reason);
+    if (reporter !== undefined) publish(reporter);
   });
-  port.onAgentStart(async (ctx) => {
-    const reporter = reporters.get(ctx.sessionManager.getSessionId());
+  port.onMessageStart((ctx) => {
+    const reporter = ensureReporter(ctx, "resume");
+    if (reporter !== undefined) currentSessionId = ctx.sessionManager.getSessionId();
+  });
+  port.onAgentStart((ctx) => {
+    const reporter = ensureReporter(ctx, "resume");
     if (reporter === undefined) return;
-    active = reporter;
+    currentSessionId = ctx.sessionManager.getSessionId();
     reporter.turnActive = true;
-    await publish(reporter);
+    publish(reporter);
   });
-  port.onAgentSettled(async (ctx) => {
+  port.onAgentSettled((ctx) => {
     const reporter = reporters.get(ctx.sessionManager.getSessionId());
     if (reporter === undefined) return;
     reporter.turnActive = false;
-    await publish(reporter);
-    if (active === reporter && !reporter.turnActive) active = undefined;
+    publish(reporter);
   });
-  port.onBlocked(async (event) => {
-    if (active === undefined) return;
-    if (event.active) active.blocked.set(event.id, event.label);
-    else active.blocked.delete(event.id);
-    await publish(active);
-  });
-  port.onSessionShutdown(async (reason, ctx) => {
-    const reporter = reporters.get(ctx.sessionManager.getSessionId());
+  port.onBlocked((event) => {
+    const reporter = currentSessionId === undefined ? undefined : reporters.get(currentSessionId);
     if (reporter === undefined) return;
-    if (reason === "quit") await send(reporter, "pane.release_agent", { agent: "pi" });
-    reporters.delete(ctx.sessionManager.getSessionId());
-    if (active === reporter) active = undefined;
+    if (event.active) reporter.blocked.set(event.id, event.label);
+    else reporter.blocked.delete(event.id);
+    publish(reporter);
+  });
+  port.onContinuationHold((event) => {
+    const reporter = currentSessionId === undefined ? undefined : reporters.get(currentSessionId);
+    if (reporter === undefined || event.source !== "olw-question") return;
+    if (event.active) reporter.blocked.set(event.source, "waiting for OLW answer");
+    else reporter.blocked.delete(event.source);
+    publish(reporter);
+  });
+  port.onWakeSource((event) => {
+    const reporter = currentSessionId === undefined ? undefined : reporters.get(currentSessionId);
+    if (reporter === undefined) return;
+    if (event.source === "olw-question") {
+      if (event.activeCount === 0) reporter.blocked.delete(event.source);
+      else reporter.blocked.set(event.source, "waiting for OLW answer");
+    } else if (event.activeCount > 0) reporter.wakeSources.set(event.source, event.activeCount);
+    else reporter.wakeSources.delete(event.source);
+    publish(reporter);
+  });
+  port.onMonitors((event) => {
+    const reporter = currentSessionId === undefined ? undefined : reporters.get(currentSessionId);
+    if (reporter === undefined) return;
+    reporter.monitorCount = event.activeCount;
+    publish(reporter);
+  });
+  port.onSessionShutdown((reason, ctx) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    const reporter = reporters.get(sessionId);
+    if (reporter === undefined) return;
+    if (reason === "quit")
+      enqueue(reporter, async () => {
+        const binding = dependencies.lookupBinding(sessionId);
+        if (live(binding)) {
+          const destination =
+            reporter.target?.socket === binding.herdrSocket &&
+            reporter.target.pane === binding.paneId
+              ? reporter.target
+              : {
+                  socket: binding.herdrSocket,
+                  pane: binding.paneId,
+                  client: dependencies.createClient(binding.herdrSocket, binding.paneId),
+                };
+          await destination.client.send("pane.release_agent", { agent: "pi" });
+        }
+        reporter.stopped = true;
+      });
+    else reporter.stopped = true;
+    reporters.delete(sessionId);
+    if (currentSessionId === sessionId) currentSessionId = undefined;
   });
 }
 
 let sequence = 0;
-
 export function roleHerdrRequest(
   method: RoleHerdrMethod,
   params: Record<string, unknown>,
   paneId: string,
   seq: number,
-): {
-  id: string;
-  method: RoleHerdrMethod;
-  params: Record<string, unknown>;
-} {
+) {
   return {
     id: `custom:senpi:${seq}`,
     method,
     params: { ...params, pane_id: paneId, source: "custom:senpi", seq },
   };
 }
-
 class SocketRoleHerdrClient implements RoleHerdrClient {
   readonly #queue: Array<{
     request: ReturnType<typeof roleHerdrRequest>;
@@ -186,7 +285,6 @@ class SocketRoleHerdrClient implements RoleHerdrClient {
   readonly #paneId: string;
   readonly #connect: (path: string) => Socket;
   #draining = false;
-
   public constructor(socketPath: string, paneId: string, connect: (path: string) => Socket) {
     this.#target =
       process.platform !== "win32" || /^\\\\[.?]\\pipe\\/i.test(socketPath)
@@ -195,7 +293,6 @@ class SocketRoleHerdrClient implements RoleHerdrClient {
     this.#paneId = paneId;
     this.#connect = connect;
   }
-
   public send(method: RoleHerdrMethod, params: Record<string, unknown>): Promise<void> {
     sequence = Math.max(sequence + 1, Date.now() * 1000);
     const request = roleHerdrRequest(method, params, this.#paneId, sequence);
@@ -204,7 +301,6 @@ class SocketRoleHerdrClient implements RoleHerdrClient {
       void this.#drain();
     });
   }
-
   async #drain(): Promise<void> {
     if (this.#draining) return;
     this.#draining = true;
@@ -221,7 +317,6 @@ class SocketRoleHerdrClient implements RoleHerdrClient {
       this.#draining = false;
     }
   }
-
   #attempt(request: ReturnType<typeof roleHerdrRequest>, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
       let socket: Socket;
@@ -268,7 +363,6 @@ class SocketRoleHerdrClient implements RoleHerdrClient {
     });
   }
 }
-
 export function createRoleHerdrClient(
   socketPath: string,
   paneId: string,

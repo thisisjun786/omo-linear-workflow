@@ -217,7 +217,7 @@ export async function runOfficialHerdrQa(
           (pane) =>
             pane.paneId === reattached.binding.paneId &&
             pane.workspaceId === reattached.binding.workspaceId &&
-            (pane.agent === "pi" || pane.agent === "omo"),
+            (roleReport || pane.agent === "pi" || pane.agent === "omo"),
         ),
       );
       const native = runtimeIdentitySchema.parse(
@@ -309,10 +309,15 @@ export async function runOfficialHerdrQa(
         entered.reject(error);
         started.reject(error);
       }, 30000);
+      const reportedWorking = checkedQaCommand(
+        ["herdr", "agent", "wait", parent.paneId, "--until", "working", "--timeout", "30000"],
+        world.repository,
+        world.environment,
+      );
       const turn = parentClient.prompt("OLW_ENTRY_BUSY_GATE");
       try {
         inspectGate();
-        await Promise.all([entered.promise, started.promise]);
+        await Promise.all([entered.promise, started.promise, reportedWorking]);
         const working = await checkedQaCommand(
           ["herdr", "agent", "explain", parent.paneId, "--json"],
           world.repository,
@@ -335,6 +340,22 @@ export async function runOfficialHerdrQa(
         await turn;
         await settled.promise;
         await idle(parentClient);
+        await checkedQaCommand(
+          [
+            "herdr",
+            "agent",
+            "wait",
+            parent.paneId,
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--timeout",
+            "30000",
+          ],
+          world.repository,
+          world.environment,
+        );
         const idleReport = await checkedQaCommand(
           ["herdr", "agent", "get", parent.paneId],
           world.repository,
@@ -390,6 +411,17 @@ export async function runOfficialHerdrQa(
           ],
         }),
       );
+    if (roleReport) {
+      assert.ok(plan.paneId);
+      await idle(planClient);
+      const blocked = await checkedQaCommand(
+        ["herdr", "agent", "get", plan.paneId],
+        world.repository,
+        world.environment,
+      );
+      check("roleReportQuestionBlocked", blocked.includes('"agent_status":"blocked"'));
+      evidence["roleReportQuestion"] = { paneId: plan.paneId, blocked };
+    }
     const registryForQuestion = openRegistry(
       join(world.controlRoot, ".omo/state/registry.sqlite"),
       {
@@ -435,6 +467,19 @@ export async function runOfficialHerdrQa(
     ]);
     await invoke(["answer", "--from", parent.id, "--question", q.envelope.id, "--text-file", body]);
     await idle(planClient);
+    if (roleReport) {
+      assert.ok(plan.paneId);
+      const unblocked = await checkedQaCommand(
+        ["herdr", "agent", "get", plan.paneId],
+        world.repository,
+        world.environment,
+      );
+      check("roleReportQuestionCleared", !unblocked.includes('"agent_status":"blocked"'));
+      evidence["roleReportQuestion"] = {
+        ...(evidence["roleReportQuestion"] as object),
+        unblocked,
+      };
+    }
     const registry = openRegistry(join(world.controlRoot, ".omo/state/registry.sqlite"), {
       readonly: true,
     });

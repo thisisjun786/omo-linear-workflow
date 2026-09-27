@@ -188,12 +188,17 @@ with its matching patched Herdr stack as described below. Using the new CLI with
 the old server does not restore explicit-group support.
 
 Senpi's built-in integration reports `pi`; OLW also recognizes older `omo` labels.
-It owns reports for ordinary TUI sessions. Bound OLW roles run in the shared RPC host,
-where that TUI-only reporter cannot bind, so the OLW extension reports each role's
-session and event-driven active/blocked/idle state to the `herdrSocket` and `paneId`
-stored in its binding. Plain TUI sessions remain exclusively owned by Senpi's built-in
-reporter, avoiding duplicate reports. Owned parent clones naturally form separate groups
-by Git common directory; children use the official `worktree.create` RPC.
+It owns reports for ordinary TUI sessions. A bound OLW role has a thin TUI in its pane,
+but its turns run in the shared RPC host. OLW therefore loads `herdr-olw-owner.js` only
+in managed role TUIs; its `herdr-*` filename uses Senpi's supported user-reporter deferral
+contract so the TUI builtin does not compete for that pane. The OLW extension in the RPC
+host is the single reporter and resolves the binding's current `herdrSocket` and `paneId`
+before every report, including after manager reattachment. It reports turn state, OLW and
+native blocked waits, terminal monitors, subagents, detached eval cells, background terminal
+sessions, and other wake-source activity from events without polling. Plain TUI sessions do
+not load the marker and remain exclusively owned by Senpi's builtin reporter. Owned parent
+clones naturally form separate groups by Git common directory; children use the official
+`worktree.create` RPC.
 The old `~/.omo/agent/extensions/herdr-senpi-agent-state.ts` should
 be removed only during a separately approved operational switch. A build does not
 remove that extension, change `~/.local/bin/herdr`, replace an existing live control

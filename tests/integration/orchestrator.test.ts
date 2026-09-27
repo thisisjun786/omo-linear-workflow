@@ -269,6 +269,7 @@ class FakeHerdr implements HerdrClient {
     });
     expect(argv).toContain(join(this.root, "node_modules/.bin/omo"));
     expect(argv).not.toContain("omo");
+    expect(argv).toContain(join(this.root, "dist/extension/herdr-olw-owner.js"));
     expect(argv).toContain(join(this.root, "dist/extension/index.js"));
     expect(argv).not.toContain(join(this.root, "dist/proxy/index.js"));
     if (this.verifyIdentity) {

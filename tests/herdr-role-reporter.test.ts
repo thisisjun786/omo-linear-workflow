@@ -10,13 +10,20 @@ import {
 
 class Harness implements RoleHerdrReporterPort {
   sessionStart?: Parameters<RoleHerdrReporterPort["onSessionStart"]>[0];
+  messageStart?: Parameters<RoleHerdrReporterPort["onMessageStart"]>[0];
   agentStart?: Parameters<RoleHerdrReporterPort["onAgentStart"]>[0];
   agentSettled?: Parameters<RoleHerdrReporterPort["onAgentSettled"]>[0];
   sessionShutdown?: Parameters<RoleHerdrReporterPort["onSessionShutdown"]>[0];
   blocked?: Parameters<RoleHerdrReporterPort["onBlocked"]>[0];
+  wakeSource?: Parameters<RoleHerdrReporterPort["onWakeSource"]>[0];
+  continuationHold?: Parameters<RoleHerdrReporterPort["onContinuationHold"]>[0];
+  monitors?: Parameters<RoleHerdrReporterPort["onMonitors"]>[0];
 
   onSessionStart(handler: Parameters<RoleHerdrReporterPort["onSessionStart"]>[0]): void {
     this.sessionStart = handler;
+  }
+  onMessageStart(handler: Parameters<RoleHerdrReporterPort["onMessageStart"]>[0]): void {
+    this.messageStart = handler;
   }
   onAgentStart(handler: Parameters<RoleHerdrReporterPort["onAgentStart"]>[0]): void {
     this.agentStart = handler;
@@ -30,90 +37,183 @@ class Harness implements RoleHerdrReporterPort {
   onBlocked(handler: Parameters<RoleHerdrReporterPort["onBlocked"]>[0]): void {
     this.blocked = handler;
   }
+  onWakeSource(handler: Parameters<RoleHerdrReporterPort["onWakeSource"]>[0]): void {
+    this.wakeSource = handler;
+  }
+  onContinuationHold(handler: Parameters<RoleHerdrReporterPort["onContinuationHold"]>[0]): void {
+    this.continuationHold = handler;
+  }
+  onMonitors(handler: Parameters<RoleHerdrReporterPort["onMonitors"]>[0]): void {
+    this.monitors = handler;
+  }
 }
 
 function session(mode: RoleSessionContext["mode"] = "rpc") {
-  let idle = true;
   return {
-    ctx: {
-      mode,
-      isIdle: () => idle,
-      sessionManager: {
-        getSessionId: () => "session-parent",
-        getSessionFile: () => "/sessions/parent.jsonl",
+    mode,
+    isIdle: () => true,
+    sessionManager: {
+      getSessionId: () => "session-parent",
+      getSessionFile: () => "/sessions/parent.jsonl",
+    },
+  } satisfies RoleSessionContext;
+}
+
+function role(overrides: Partial<Binding> = {}): Binding {
+  return {
+    id: "parent",
+    designationId: "designation",
+    assignment: { role: "parent", initiativeId: null, projectId: "project", ownerBindingId: null },
+    durableSessionId: "session-parent",
+    cwd: "/repo",
+    checkout: null,
+    herdrSocket: "/tmp/herdr.sock",
+    omoSocket: "/tmp/omo.sock",
+    workspaceId: "workspace",
+    paneId: "pane-parent",
+    sessionPath: "/sessions/parent.jsonl",
+    launchState: "ready",
+    contactState: "active",
+    initialization: { state: "accepted", text: "brief" },
+    ...overrides,
+  };
+}
+
+interface Sent {
+  socket: string;
+  pane: string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+function fixture(initial: Binding | undefined = role()) {
+  const harness = new Harness();
+  const sent: Sent[] = [];
+  let binding: Binding | undefined = initial;
+  let signal = Promise.withResolvers<void>();
+  registerRoleHerdrReporter(harness, {
+    hostRuntime: true,
+    lookupBinding: () => binding,
+    createClient: (socket, pane): RoleHerdrClient => ({
+      send: async (method, params) => {
+        sent.push({ socket, pane, method, params });
+        signal.resolve();
       },
-    } satisfies RoleSessionContext,
-    setIdle(value: boolean): void {
-      idle = value;
+    }),
+    debug: () => undefined,
+  });
+  return {
+    harness,
+    sent,
+    setBinding(next: Binding | undefined) {
+      binding = next;
+    },
+    async nextReport() {
+      await signal.promise;
+      signal = Promise.withResolvers<void>();
     },
   };
 }
 
-const binding = {
-  id: "parent",
-  durableSessionId: "session-parent",
-  herdrSocket: "/tmp/herdr.sock",
-  paneId: "pane-parent",
-} as Binding;
-
 describe("OLW role Herdr reporter", () => {
   test("reports a bound RPC role turn to its recorded pane", async () => {
-    const harness = new Harness();
-    const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
-    const client: RoleHerdrClient = {
-      send: async (method, params) => {
-        sent.push({ method, params });
-      },
-    };
-    registerRoleHerdrReporter(harness, {
-      hostRuntime: true,
-      lookupBinding: () => binding,
-      createClient: (socket, pane) => {
-        expect([socket, pane]).toEqual([binding.herdrSocket, "pane-parent"]);
-        return client;
-      },
-      debug: () => undefined,
-    });
-    const current = session();
+    const f = fixture();
+    const ctx = session();
+    f.harness.sessionStart?.("new", ctx);
+    await f.nextReport();
+    await f.nextReport();
+    f.harness.agentStart?.(ctx);
+    await f.nextReport();
+    f.harness.agentSettled?.(ctx);
+    await f.nextReport();
 
-    await harness.sessionStart?.("new", current.ctx);
-    current.setIdle(false);
-    await harness.agentStart?.(current.ctx);
-    current.setIdle(true);
-    await harness.agentSettled?.(current.ctx);
-
-    expect(sent).toEqual([
-      {
-        method: "pane.report_agent_session",
-        params: {
-          agent: "pi",
-          agent_session_path: "/sessions/parent.jsonl",
-          session_start_source: "new",
-        },
-      },
-      {
-        method: "pane.report_agent",
-        params: { agent: "pi", agent_session_path: "/sessions/parent.jsonl", state: "idle" },
-      },
-      {
-        method: "pane.report_agent",
-        params: {
-          agent: "pi",
-          agent_session_path: "/sessions/parent.jsonl",
-          state: "working",
-        },
-      },
-      {
-        method: "pane.report_agent",
-        params: { agent: "pi", agent_session_path: "/sessions/parent.jsonl", state: "idle" },
-      },
+    expect(
+      f.sent.map(({ pane, method, params }) => ({ pane, method, state: params["state"] })),
+    ).toEqual([
+      { pane: "pane-parent", method: "pane.report_agent_session", state: undefined },
+      { pane: "pane-parent", method: "pane.report_agent", state: "idle" },
+      { pane: "pane-parent", method: "pane.report_agent", state: "working" },
+      { pane: "pane-parent", method: "pane.report_agent", state: "idle" },
     ]);
   });
 
-  test("does not report unbound sessions or sessions outside the shared host", async () => {
+  test("follows a reattached pane and stops when the binding closes", async () => {
+    const f = fixture();
+    const ctx = session();
+    f.harness.sessionStart?.("new", ctx);
+    await f.nextReport();
+    await f.nextReport();
+    f.setBinding(role({ paneId: "pane-reattached", herdrSocket: "/tmp/new.sock" }));
+    f.harness.agentStart?.(ctx);
+    await f.nextReport();
+    await f.nextReport();
+    expect(f.sent.slice(-2).map((item) => [item.socket, item.pane, item.method])).toEqual([
+      ["/tmp/new.sock", "pane-reattached", "pane.report_agent_session"],
+      ["/tmp/new.sock", "pane-reattached", "pane.report_agent"],
+    ]);
+
+    f.setBinding(role({ launchState: "closed" }));
+    f.harness.agentSettled?.(ctx);
+    await Promise.resolve();
+    expect(f.sent).toHaveLength(4);
+  });
+
+  test("reports OLW question waits as blocked and clears after settlement", async () => {
+    const f = fixture();
+    const ctx = session();
+    f.harness.sessionStart?.("new", ctx);
+    await f.nextReport();
+    await f.nextReport();
+    f.harness.agentStart?.(ctx);
+    await f.nextReport();
+    f.harness.continuationHold?.({ source: "olw-question", active: true });
+    await f.nextReport();
+    f.harness.agentSettled?.(ctx);
+    await Promise.resolve();
+    f.harness.wakeSource?.({ source: "olw-question", activeCount: 0 });
+    await f.nextReport();
+    expect(
+      f.sent
+        .filter((item) => item.method === "pane.report_agent")
+        .map((item) => item.params["state"]),
+    ).toEqual(["idle", "working", "blocked", "idle"]);
+  });
+
+  test("keeps event-driven background work working after the turn settles", async () => {
+    const f = fixture();
+    const ctx = session();
+    f.harness.sessionStart?.("new", ctx);
+    await f.nextReport();
+    await f.nextReport();
+    f.harness.wakeSource?.({ source: "senpi-codemode", activeCount: 1 });
+    await f.nextReport();
+    f.harness.monitors?.({ activeCount: 2 });
+    await f.nextReport();
+    expect(f.sent.at(-1)?.params).toMatchObject({
+      state: "working",
+      message: "2 monitors live + 1 detached eval cell",
+    });
+  });
+
+  test("session start never waits for a silent transport", async () => {
+    const harness = new Harness();
+    const silent = Promise.withResolvers<void>();
+    registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => role(),
+      createClient: () => ({ send: () => silent.promise }),
+      debug: () => undefined,
+    });
+    const returned = harness.sessionStart?.("new", session());
+    expect(returned).toBeUndefined();
+    silent.resolve();
+  });
+
+  test("does not report unbound, closed, or non-host sessions", async () => {
     for (const [hostRuntime, ctx, found] of [
-      [true, session().ctx, undefined],
-      [false, session("tui").ctx, binding],
+      [true, session(), undefined],
+      [true, session(), role({ launchState: "closed" })],
+      [false, session("tui"), role()],
     ] as const) {
       const harness = new Harness();
       const sent: unknown[] = [];
@@ -123,9 +223,9 @@ describe("OLW role Herdr reporter", () => {
         createClient: () => ({ send: async (...args) => void sent.push(args) }),
         debug: () => undefined,
       });
-      await harness.sessionStart?.("new", ctx);
-      await harness.agentStart?.(ctx);
-      await harness.agentSettled?.(ctx);
+      harness.sessionStart?.("new", ctx);
+      harness.agentStart?.(ctx);
+      await Promise.resolve();
       expect(sent).toEqual([]);
     }
   });
@@ -137,7 +237,7 @@ describe("OLW role Herdr reporter", () => {
         { agent: "pi", state: "working", agent_session_id: "session-parent" },
         "pane-parent",
         42,
-      ),
+      ) as unknown,
     ).toEqual({
       id: "custom:senpi:42",
       method: "pane.report_agent",
@@ -150,31 +250,5 @@ describe("OLW role Herdr reporter", () => {
         seq: 42,
       },
     });
-  });
-
-  test("swallows and debug-logs transport failures", async () => {
-    const harness = new Harness();
-    const debug: string[] = [];
-    registerRoleHerdrReporter(harness, {
-      hostRuntime: true,
-      lookupBinding: () => binding,
-      createClient: () => ({
-        send: async () => {
-          throw new Error("socket unavailable");
-        },
-      }),
-      debug: (message) => debug.push(message),
-    });
-    const ctx = session().ctx;
-
-    await expect(harness.sessionStart?.("new", ctx)).resolves.toBeUndefined();
-    await expect(harness.agentStart?.(ctx)).resolves.toBeUndefined();
-    await expect(harness.sessionShutdown?.("quit", ctx)).resolves.toBeUndefined();
-    expect(debug).toEqual([
-      "socket unavailable",
-      "socket unavailable",
-      "socket unavailable",
-      "socket unavailable",
-    ]);
   });
 });

@@ -284,17 +284,25 @@ test("a pending custom deadline never disables the timeoutMs bound", async () =>
       exit.resolve(137);
     },
   };
+  const scheduled = Promise.withResolvers<{ readonly fire: () => void; readonly ms: number }>();
   const running = import("../src/host-profile").then(({ runBoundedHostCommand }) =>
     runBoundedHostCommand(
       ["fixture"],
       "/tmp",
       {},
-      1,
+      250,
       () => child,
       "status",
       pendingDeadline.promise,
+      (fire, ms) => {
+        scheduled.resolve({ fire, ms });
+        return () => {};
+      },
     ),
   );
+  const timeoutTimer = await scheduled.promise;
+  expect(timeoutTimer.ms).toBe(250);
+  timeoutTimer.fire();
   await expect(running).rejects.toBeInstanceOf(HostCommandTimeoutError);
   expect(events).toEqual(["kill", "reap"]);
 });

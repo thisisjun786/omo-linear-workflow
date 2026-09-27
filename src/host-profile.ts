@@ -167,6 +167,10 @@ export async function runBoundedHostCommand(
     Bun.spawn([...argv], { cwd, env, stdout: "pipe", stderr: "pipe", detached: true }),
   operation: "status" | "handoff" = "handoff",
   deadline?: Promise<never>,
+  schedule: (fire: () => void, ms: number) => () => void = (fire, ms) => {
+    const handle = setTimeout(fire, ms);
+    return () => clearTimeout(handle);
+  },
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   const child = spawn();
   const stdout = child.stdout?.getReader();
@@ -181,10 +185,10 @@ export async function runBoundedHostCommand(
     }
   };
   const completed = Promise.all([child.exited, read(stdout), read(stderr)]);
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelTimer: (() => void) | undefined;
   // The timeoutMs bound always applies; an injected deadline can only end the wait earlier.
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
+    cancelTimer = schedule(() => {
       reject(new HostCommandTimeoutError(operation, timeoutMs));
     }, timeoutMs);
   });
@@ -208,7 +212,7 @@ export async function runBoundedHostCommand(
     await Promise.allSettled([stdout?.cancel(), stderr?.cancel()]);
     throw cause;
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    cancelTimer?.();
     stdout?.releaseLock();
     stderr?.releaseLock();
   }

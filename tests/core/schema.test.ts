@@ -31,7 +31,7 @@ describe("frozen core schemas and role policy", () => {
     expect(modelForRole("child")).toEqual({
       provider: "opencodex",
       modelId: "anthropic/claude-opus-5-5",
-      thinking: "xhigh",
+      thinking: "medium",
     });
   });
 

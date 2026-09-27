@@ -209,7 +209,9 @@ export function modelForLaunch(
     return { provider: "opencodex", modelId: "anthropic/claude-fable-5-1", thinking: "xhigh" };
   if (stage === "execute")
     return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" };
-  return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
+  if (stage === "research")
+    return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "xhigh" };
+  return { provider: "opencodex", modelId: "anthropic/claude-opus-5-5", thinking: "medium" };
 }
 
 export function modelForRole(role: Assignment["role"]): RoleModel {

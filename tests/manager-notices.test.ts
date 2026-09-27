@@ -105,6 +105,101 @@ test.each(["report", "question"] as const)(
   },
 );
 
+test.each([
+  ["manager", "report"],
+  ["manager", "question"],
+  ["parent", "report"],
+  ["parent", "question"],
+] as const)(
+  "%s-bound %s retries the same ID after authorization fails before native delivery",
+  async (targetRole, kind) => {
+    await fixture(async ({ root, parent, child, digest }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager =
+          targetRole === "manager" ? linkReadyManager(registry, parent, root) : undefined;
+        const sender = targetRole === "manager" ? parent : child;
+        const target = manager ?? parent;
+        const harness = new Harness();
+        harness.receipt = {
+          kind: "ok",
+          thread_id: target.durableSessionId,
+          message_seq: 1,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: "notice" },
+        };
+        registerInitiativeRuntime(harness, { root, hostRuntime: true });
+        await harness.start()(context(sender));
+        const exec = harness.exec.bind(harness);
+        let failAuthorization = true;
+        harness.exec = async (command, args, options) => {
+          const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
+          if (request.action === "authorize" && failAuthorization) {
+            failAuthorization = false;
+            return {
+              stdout: "",
+              stderr: "injected authorization worker failure",
+              code: 1,
+              killed: false,
+            };
+          }
+          return exec(command, args, options);
+        };
+        const message = {
+          ...envelope(
+            sender,
+            target,
+            digest,
+            kind === "question"
+              ? `question:${sender.id}:authorization-retry:${targetRole}`
+              : `report-authorization-retry:${targetRole}`,
+            kind,
+          ),
+          ...(kind === "question" ? { question: { questions: [], escalates: null } } : {}),
+        };
+        const send = harness.rpc("omo.initiative.send");
+        const first = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(first).toMatchObject({
+          state: "rejected",
+          receipt: { kind: "error", error: { code: "turn_conflict_before_delivery" } },
+          attempts: [{ number: 1, nativeKey: message.id, state: "rejected" }],
+        });
+        expect(harness.executeCount).toBe(0);
+
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        harness.afterNative = async () => {
+          entered.resolve();
+          await release.promise;
+        };
+        const recovered = send(message);
+        await entered.promise;
+        const concurrent = await send(message);
+        expect(concurrent).toMatchObject({
+          ok: false,
+          error: { code: "delivery_in_progress" },
+        });
+        release.resolve();
+        const accepted = value(resultSchema(deliveryRecordSchema).parse(await recovered));
+        expect(accepted.state).toBe("accepted");
+        expect(accepted.attempts).toMatchObject([
+          { number: 1, nativeKey: message.id, state: "rejected" },
+          { number: 2, state: "accepted" },
+        ]);
+        expect(accepted.attempts?.[1]?.nativeKey).not.toBe(message.id);
+        expect(harness.executeCount).toBe(1);
+        expect(value(resultSchema(deliveryRecordSchema).parse(await send(message)))).toEqual(
+          accepted,
+        );
+        expect(harness.executeCount).toBe(1);
+        expect(value(registry.delivery(message.id))).toEqual(accepted);
+      } finally {
+        registry.close();
+      }
+    });
+  },
+);
+
 test.each(["report", "question"] as const)(
   "manager %s waits for idle, sends one-line notice and preserves its envelope",
   async (kind) => {
@@ -262,6 +357,36 @@ test("preflight idle rejection remains proven pre-delivery even when executeTool
         error: { code: "turn_conflict_before_delivery" },
       });
       expect(harness.executeCount).toBe(0);
+    } finally {
+      registry.close();
+    }
+  });
+});
+
+test("a failure after native execution remains uncertain and never resends", async () => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const harness = new Harness();
+      harness.afterNative = async () => {
+        throw new Error("receipt channel failed after native acceptance");
+      };
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const send = harness.rpc("omo.initiative.send");
+      const message = envelope(parent, manager, digest, "post-native-uncertain", "report");
+      const first = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+      expect(first).toMatchObject({
+        state: "uncertain",
+        attempts: [{ number: 1, nativeKey: message.id, state: "uncertain" }],
+      });
+      expect(harness.executeCount).toBe(1);
+      expect(await send(message)).toMatchObject({
+        ok: false,
+        error: { code: "delivery_in_progress" },
+      });
+      expect(harness.executeCount).toBe(1);
     } finally {
       registry.close();
     }

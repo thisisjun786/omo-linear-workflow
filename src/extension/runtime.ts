@@ -165,10 +165,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly messageId: string;
     readonly input: z.infer<typeof nativeSendInputSchema>;
     readonly userAnswer: boolean;
+    readonly retryPreDelivery: boolean;
     readonly managerTarget?: Binding;
     readonly noticeSender?: Binding;
     readonly admissionDeadline?: number;
-    admissionFailure?: string;
+    preDeliveryFailure?: string;
     used: boolean;
   }>();
 
@@ -688,6 +689,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           messageId: envelope.id,
           input,
           userAnswer,
+          retryPreDelivery: envelope.kind === "report" || envelope.kind === "question",
           ...(sender === undefined
             ? {}
             : { managerTarget: claim.target, admissionDeadline, noticeSender: sender }),
@@ -698,10 +700,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           try {
             result = await port.executeTool("thread_send", input);
           } catch (cause) {
-            if (dispatch.getStore()?.admissionFailure === undefined) throw cause;
+            if (dispatch.getStore()?.preDeliveryFailure === undefined) throw cause;
             // The tool-call guard recorded proof that the native implementation never ran.
           }
-          const failed = dispatch.getStore()?.admissionFailure;
+          const failed = dispatch.getStore()?.preDeliveryFailure;
           if (failed === undefined) {
             if (result === undefined) throw new Error("Native tool returned no result");
             return result;
@@ -788,6 +790,17 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     )
       return undefined;
     const permit = dispatch.getStore();
+    const rejectBeforeDelivery = (reason: string) => {
+      if (
+        toolName === "thread_send" &&
+        permit !== undefined &&
+        permit.retryPreDelivery &&
+        !permit.used &&
+        permit.senderSessionId === ctx.sessionManager.getSessionId()
+      )
+        permit.preDeliveryFailure = reason;
+      return { block: true as const, reason };
+    };
     const claimedSender =
       toolName === "thread_send" && permit?.senderSessionId === ctx.sessionManager.getSessionId()
         ? permit.noticeSender
@@ -797,7 +810,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         ? await lookup(ctx.sessionManager.getSessionId())
         : { ok: true as const, value: claimedSender };
     if (!sender.ok && sender.error.code === "not_found") return undefined;
-    if (!sender.ok) return { block: true, reason: sender.error.message };
+    if (!sender.ok) return rejectBeforeDelivery(sender.error.message);
     if (toolName === "ask_user_question" || toolName === "request_user_input") {
       return sender.value.assignment.role === "child" || sender.value.assignment.role === "parent"
         ? {
@@ -815,13 +828,13 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       permit.used ||
       permit.senderSessionId !== ctx.sessionManager.getSessionId()
     ) {
-      return { block: true, reason: "Bound sends must use the claimed initiative RPC" };
+      return rejectBeforeDelivery("Bound sends must use the claimed initiative RPC");
     }
     const nativeInput = nativeSendInputSchema.safeParse(input);
     if (!nativeInput.success)
-      return { block: true, reason: "Direct thread_send arguments are invalid" };
+      return rejectBeforeDelivery("Direct thread_send arguments are invalid");
     if (JSON.stringify(nativeInput.data) !== JSON.stringify(permit.input)) {
-      return { block: true, reason: "Native send does not match the claimed attempt" };
+      return rejectBeforeDelivery("Native send does not match the claimed attempt");
     }
     let decoded: unknown;
     try {
@@ -830,11 +843,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         message.startsWith("[OLW] ") ? message.slice(message.indexOf("\n") + 1) : message,
       );
     } catch {
-      return { block: true, reason: "Direct thread_send message is not an envelope" };
+      return rejectBeforeDelivery("Direct thread_send message is not an envelope");
     }
     const envelope = envelopeSchema.safeParse(decoded);
     if (!envelope.success || envelope.data.id !== permit.messageId) {
-      return { block: true, reason: "Direct thread_send identity is invalid" };
+      return rejectBeforeDelivery("Direct thread_send identity is invalid");
     }
     if (permit.userAnswer) {
       const released = await worker(
@@ -845,7 +858,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         },
         resultSchema(claimResultSchema),
       );
-      if (!released.ok) return { block: true, reason: released.error.message };
+      if (!released.ok) return rejectBeforeDelivery(released.error.message);
       if (
         envelope.data.fromBindingId !== null ||
         envelope.data.kind !== "answer" ||
@@ -853,25 +866,22 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         JSON.stringify(envelope.data) !== JSON.stringify(released.value.record.envelope) ||
         nativeInput.data.thread !== released.value.target.durableSessionId
       ) {
-        return { block: true, reason: "Direct thread_send identity is invalid" };
+        return rejectBeforeDelivery("Direct thread_send identity is invalid");
       }
       permit.used = true;
       return undefined;
     }
     if (envelope.data.fromBindingId !== sender.value.id) {
-      return { block: true, reason: "Direct thread_send identity is invalid" };
+      return rejectBeforeDelivery("Direct thread_send identity is invalid");
     }
     const authorized = await worker(
       "authorize",
       { senderSessionId: ctx.sessionManager.getSessionId(), envelope: envelope.data },
       resultSchema(bindingSchema),
     );
-    if (!authorized.ok) return { block: true, reason: authorized.error.message };
+    if (!authorized.ok) return rejectBeforeDelivery(authorized.error.message);
     if (nativeInput.data.thread !== authorized.value.durableSessionId) {
-      return {
-        block: true,
-        reason: "Direct thread_send target does not match the authorized route",
-      };
+      return rejectBeforeDelivery("Direct thread_send target does not match the authorized route");
     }
     if (permit.managerTarget !== undefined && permit.admissionDeadline !== undefined) {
       try {
@@ -880,8 +890,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         while (!port.isIdle(permit.managerTarget))
           await admitManager(permit.managerTarget, permit.admissionDeadline);
       } catch (cause) {
-        permit.admissionFailure = messageOf(cause);
-        return { block: true, reason: permit.admissionFailure };
+        return rejectBeforeDelivery(messageOf(cause));
       }
     }
     permit.used = true;

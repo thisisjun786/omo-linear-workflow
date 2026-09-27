@@ -826,6 +826,17 @@ export class Orchestrator {
       (binding) => binding.assignment.role === "manager" && binding.launchState !== "closed",
     );
     if (existing !== undefined) {
+      // Pane/workspace IDs are local to a Herdr server; here-mode never migrates bindings.
+      if (here !== undefined && resolve(existing.herdrSocket) !== resolve(this.#herdrSocket))
+        return failure(
+          "herdr_server_mismatch",
+          `The manager belongs to Herdr socket ${existing.herdrSocket}, but this pane uses ${this.#herdrSocket}. Run olw in a pane of the manager's server, or run olw close --binding ${existing.id} first.`,
+          {
+            bindingId: existing.id,
+            managerSocket: existing.herdrSocket,
+            callerSocket: this.#herdrSocket,
+          },
+        );
       if (here !== undefined && ["reserved", "provisioning"].includes(existing.launchState)) {
         const recovered = await this.#recoverUnstartedManager(existing, here);
         if (!recovered.ok) return recovered;

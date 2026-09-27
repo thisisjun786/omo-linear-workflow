@@ -704,6 +704,94 @@ test("here entry rejects a different server even when its pane ID matches", asyn
   }
 });
 
+test.each(["live", "exited"] as const)(
+  "here entry on server B leaves a %s manager on server A unchanged, then focus and close stay on A",
+  async (tui) => {
+    const a = await world();
+    const b = await world();
+    const manager = value(await a.orchestrator.manage()).binding;
+    if (!manager.paneId || !manager.workspaceId) throw new Error("Missing manager location");
+    if (tui === "exited") a.panes.set(manager.paneId, { workspaceId: manager.workspaceId });
+    // Public pane/workspace IDs can collide on independent servers.
+    b.workspaces.set(manager.workspaceId, {
+      workspaceId: manager.workspaceId,
+      rootPaneId: manager.paneId,
+      cwd: a.root,
+    });
+    b.panes.set(manager.paneId, { workspaceId: manager.workspaceId });
+    const serverA = a.deps.createHerdrClient("/fixture/herdr.sock");
+    const serverB = b.deps.createHerdrClient("/server-b/herdr.sock");
+    const deps: OrchestratorDependencies = {
+      ...a.deps,
+      createHerdrClient: (socket) => {
+        if (socket === "/fixture/herdr.sock") return serverA;
+        if (socket === "/server-b/herdr.sock") return serverB;
+        throw new Error(`Unexpected server ${socket}`);
+      },
+      launchHere: () => {
+        throw new Error("Cross-server foreground launch attempted");
+      },
+    };
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+      HERDR_SOCKET_PATH: process.env["HERDR_SOCKET_PATH"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = manager.paneId;
+    process.env["HERDR_SOCKET_PATH"] = "/server-b/herdr.sock";
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    const closeA = spyOn(serverA, "closeWorkspace");
+    const closeB = spyOn(serverB, "closeWorkspace");
+    const db = new Database(join(a.root, ".omo/state/registry.sqlite"));
+    db.run("CREATE TABLE binding_writes (id TEXT)");
+    db.run(
+      "CREATE TRIGGER record_binding_write AFTER UPDATE ON bindings BEGIN INSERT INTO binding_writes VALUES (NEW.id); END",
+    );
+    try {
+      expect(await runCli(["--root", a.root], deps)).toBe(2);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: {
+          code: "herdr_server_mismatch",
+          details: { managerSocket: "/fixture/herdr.sock", callerSocket: "/server-b/herdr.sock" },
+        },
+      });
+      expect(
+        db.query<{ count: number }, []>("SELECT count(*) AS count FROM binding_writes").get()
+          ?.count,
+      ).toBe(0);
+      expect(a.readRegistry((r) => value(r.get(manager.id)))).toEqual(manager);
+      expect(a.readRegistry((r) => value(r.reattachPending(manager.id)))).toBe(false);
+      expect(a.focused).toEqual([]);
+      expect(b.focused).toEqual([]);
+      expect(a.runs).toHaveLength(1);
+      expect(b.runs).toHaveLength(0);
+      // The supported original-server entry and explicit close still resolve A, never B.
+      process.env["HERDR_SOCKET_PATH"] = "/fixture/herdr.sock";
+      expect(value(await a.orchestrator.manage({ here: true })).action).toBe(
+        tui === "live" ? "focused" : "reattached",
+      );
+      expect(value(await a.orchestrator.manage({ here: true })).action).toBe("focused");
+      const fromB = new Orchestrator(a.root, "/server-b/herdr.sock", deps);
+      value(await fromB.close(manager.id));
+      expect(closeA.mock.calls).toEqual([[manager.workspaceId]]);
+      expect(closeB).not.toHaveBeenCalled();
+      expect(b.workspaces.has(manager.workspaceId)).toBe(true);
+      expect(b.panes.has(manager.paneId)).toBe(true);
+    } finally {
+      db.close();
+      stdout.mockRestore();
+      closeA.mockRestore();
+      closeB.mockRestore();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
 test("here entry rejects a pane whose terminal does not contain the caller process", async () => {
   const w = await world();
   const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };

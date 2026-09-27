@@ -48,7 +48,7 @@ The parent picks the mode per issue at creation with `child create --mode direct
 
 | Mode | When | Stages |
 |---|---|---|
-| `direct` | Small, well-specified development work. JUN-273, 274 and 275 were all this size. | one tab: Opus 5.5 xhigh (today's model), mass-ulw |
+| `direct` | Small, well-specified development work. JUN-273, 274 and 275 were all this size. | one tab: Opus 5.5 medium, mass-ulw |
 | `planned` | Large or ambiguous development work: several components, open design decisions, cross-module changes. | plan tab (Fable 5.1 xhigh, ulw-plan), then execute tab (Opus 5.5 medium, ulw-execute + mass-ulw) |
 | `research` | The deliverable is findings, not code. | one tab: Opus 5.5 xhigh, ulw-research. Its collection can run as mass-ulw DAG waves (ulw-research Phase 1 "mass research" path) inside the same tab. |
 

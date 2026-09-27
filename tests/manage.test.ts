@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -368,6 +369,222 @@ test("bare olw launches in the caller pane, focuses it, then reattaches there wi
     stdout.mockRestore();
   }
 });
+
+test("foreground exit before readiness returns its code and releases the singleton immediately", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => deadline.reject(new Error("Foreground exit was not observed")),
+    3000,
+  );
+  try {
+    const code = await Promise.race([
+      runCli(["--root", w.root], {
+        ...w.deps,
+        launchHere: () => {
+          child = Bun.spawn([process.execPath, "--eval", "process.exit(37)"], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          });
+          return child;
+        },
+      }),
+      deadline.promise,
+    ]);
+    expect(code).toBe(37);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      ok: false,
+      error: { code: "manager_tui_exited", details: { exitCode: 37 } },
+    });
+    expect(managers(value(w.orchestrator.status()))[0]?.launchState).toBe("closed");
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(
+      managers(value(w.orchestrator.status())).filter((b) => b.launchState === "ready"),
+    ).toHaveLength(1);
+  } finally {
+    clearTimeout(timer);
+    child?.kill();
+    if (child) await child.exited;
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    output.mockRestore();
+  }
+});
+
+test("foreground exit after readiness preserves the child status", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  const exit = Promise.withResolvers<number>();
+  const initialized = Promise.withResolvers<void>();
+  const running = runCli(["--root", w.root], {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      void w.deps.launchHere?.(argv, cwd, env);
+      return { exited: exit.promise, kill() {} };
+    },
+    prompt: async (binding, text) => {
+      await w.deps.prompt(binding, text);
+      initialized.resolve();
+    },
+  });
+  const timer = setTimeout(() => initialized.reject(new Error("Initialization deadline")), 3000);
+  try {
+    await initialized.promise;
+    exit.resolve(37);
+    expect(await running).toBe(37);
+  } finally {
+    clearTimeout(timer);
+    exit.resolve(37);
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("bare entry takes over a dead reattach owner and reports a live owner as manager_busy", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+  const dead = Bun.spawn([process.execPath, "--eval", "process.exit(0)"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await dead.exited;
+  w.readRegistry((r) => value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")));
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    // Old registries have no PID column; the regression also covers the migration.
+    const columns = db.query<{ name: string }, []>("PRAGMA table_info(manager_reattach)").all();
+    if (!columns.some((c) => c.name === "owner_pid"))
+      db.run("ALTER TABLE manager_reattach ADD COLUMN owner_pid INTEGER");
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(process.pid);
+    expect(await runCli(["--root", w.root], w.deps)).toBe(3);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      ok: false,
+      error: { code: "manager_busy" },
+    });
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(dead.pid);
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(w.runs).toHaveLength(2);
+    expect(w.readRegistry((r) => value(r.reattachPending(first.id)))).toBe(false);
+  } finally {
+    db.close();
+    output.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+  "foreground %s releases unfinished reattachment and forwards to the child",
+  async (signal) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+    const attached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    w.hooks.beforeAttach = async () => {
+      attached.resolve();
+      await release.promise;
+    };
+    let child: ReturnType<typeof Bun.spawn<"pipe", "pipe", "pipe">> | undefined;
+    const forwarded: NodeJS.Signals[] = [];
+    // Keep the RED probe from terminating Bun when no production handler exists yet.
+    const observeOnly = () => {};
+    process.on(signal, observeOnly);
+    let signalDeadline: ReturnType<typeof setTimeout> | undefined;
+    const orchestrator = new Orchestrator(w.root, "/fixture/herdr.sock", {
+      ...w.deps,
+      launchHere: (argv, cwd, env) => {
+        void w.deps.launchHere?.(argv, cwd, env);
+        child = Bun.spawn(
+          [
+            process.execPath,
+            "--eval",
+            `process.on(${JSON.stringify(signal)}, () => process.exit(143)); process.stdout.write('ready'); process.stdin.resume();`,
+          ],
+          { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+        );
+        const launched = child;
+        return {
+          exited: launched.exited,
+          kill: (sig) => {
+            if (sig) forwarded.push(sig);
+            launched.kill(sig);
+          },
+        };
+      },
+    });
+    const pending = orchestrator.manage({ here: true });
+    const timer = setTimeout(
+      () => attached.reject(new Error("Reattachment verification deadline")),
+      3000,
+    );
+    try {
+      await attached.promise;
+      if (!child) throw new Error("Foreground child missing");
+      const reader = child.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready");
+      reader.releaseLock();
+      expect(w.readRegistry((r) => value(r.reattachPending(first.id)))).toBe(true);
+      process.emit(signal, signal);
+      // Do not await held native verification: interruption must settle independently.
+      const result = await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          signalDeadline = setTimeout(
+            () => reject(new Error("Signal did not settle the entry")),
+            1000,
+          );
+        }),
+      ]);
+      expect(result).toMatchObject({ ok: false, error: { code: "manager_interrupted" } });
+      expect(forwarded).toEqual([signal]);
+      w.hooks.beforeAttach = undefined;
+      release.resolve();
+      w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+      expect(value(await w.orchestrator.manage()).action).toBe("reattached");
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(signalDeadline);
+      process.off(signal, observeOnly);
+      child?.kill();
+      if (child) await child.exited;
+      release.resolve();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
 
 test("a hanging injected update check cannot delay manager creation or focus", async () => {
   const w = await world();

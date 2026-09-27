@@ -13,6 +13,11 @@ published.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve foreground manager exit codes before readiness and release failed startup reservations immediately.
+- Forward foreground entry signals and recover dead-owner reattachment claims without a lease wait; live owners return `manager_busy` instead of an empty-pane success.
+
 ### Changed
 
 - Type `olw` in Herdr to open or reattach the single durable manager in the current pane, or focus its live pane. `manage --here` shares this entry; plain `manage` retains separate-workspace behavior.

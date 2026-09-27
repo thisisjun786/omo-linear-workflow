@@ -112,16 +112,65 @@ export async function managerEntryQa(world: World, herdr: HerdrClient) {
     stop();
     clearTimeout(timer);
   }
-  await wait(live(second.rootPaneId), () => herdr.run(second.rootPaneId, ["olw"], environment));
+  const wrapperPid = join(world.scratch, "entry-wrapper.pid");
+  const wrapperExit = join(world.scratch, "entry-wrapper.exit");
+  await wait(live(second.rootPaneId), () =>
+    herdr.run(
+      second.rootPaneId,
+      [
+        "sh",
+        "-c",
+        `sh -c 'echo $$ > "${wrapperPid}"; exec olw'; printf '%s' "$?" > '${wrapperExit}'`,
+      ],
+      environment,
+    ),
+  );
   const reattached = current();
   assert.equal(reattached.id, initial.id);
   assert.equal(reattached.durableSessionId, initial.durableSessionId);
   assert.equal(reattached.sessionPath, initial.sessionPath);
   assert.equal(reattached.paneId, second.rootPaneId);
   assert.equal(reattached.workspaceId, second.workspaceId);
+  const pid = z.coerce
+    .number()
+    .int()
+    .positive()
+    .parse((await Bun.file(wrapperPid).text()).trim());
+  const cmdline = await Bun.file(`/proc/${pid}/cmdline`).text();
+  assert.ok(cmdline.includes(world.controlRoot));
+  const signalDone = Promise.withResolvers<void>();
+  const signalWatcher = watch(world.scratch, () => {
+    if (existsSync(wrapperExit)) signalDone.resolve();
+  });
+  const signalTimer = setTimeout(
+    () => signalDone.reject(new Error("Signalled wrapper did not exit")),
+    30000,
+  );
+  try {
+    process.kill(pid, "SIGTERM");
+    await signalDone.promise;
+  } finally {
+    signalWatcher.close();
+    clearTimeout(signalTimer);
+  }
+  await wait(
+    (snapshot) => !live(second.rootPaneId)(snapshot),
+    async () => {},
+  );
+  await wait(live(first.rootPaneId), () => herdr.run(first.rootPaneId, ["olw"], environment));
+  const recovered = current();
+  assert.equal(recovered.id, initial.id);
+  assert.equal(recovered.durableSessionId, initial.durableSessionId);
+  assert.equal(recovered.paneId, first.rootPaneId);
   return {
-    manager: reattached,
+    manager: recovered,
     evidence: {
+      signalRecovery: {
+        signal: "SIGTERM",
+        wrapperPid: pid,
+        wrapperExit: await Bun.file(wrapperExit).text(),
+        recovered,
+      },
       initial,
       reattached,
       before,

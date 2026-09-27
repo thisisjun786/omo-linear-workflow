@@ -152,9 +152,12 @@ async function text(path: string | undefined): Promise<Result<string>> {
 }
 function exitCode(result: Result<unknown>): number {
   if (result.ok) return 0;
+  if (result.error.code === "manager_tui_exited" || result.error.code === "manager_interrupted")
+    return z.object({ exitCode: z.number().int().min(0).max(255) }).parse(result.error.details)
+      .exitCode;
   if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
     return 4;
-  if (result.error.code === "runtime_unavailable") return 3;
+  if (result.error.code === "runtime_unavailable" || result.error.code === "manager_busy") return 3;
   if (result.error.code === "interrupted") return 130;
   return 2;
 }

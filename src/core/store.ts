@@ -60,6 +60,15 @@ function error<T>(code: string, message: string, details?: unknown): Result<T> {
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ESRCH") return false;
+    throw cause;
+  }
+}
 function encoded(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -167,6 +176,11 @@ export function openRegistry(
     claimed_at TEXT NOT NULL,
     owner TEXT NOT NULL
   )`);
+    const reattachColumns = db
+      .query<{ readonly name: string }, []>("PRAGMA table_info(manager_reattach)")
+      .all();
+    if (!reattachColumns.some((column) => column.name === "owner_pid"))
+      db.run("ALTER TABLE manager_reattach ADD COLUMN owner_pid INTEGER");
     db.run(`CREATE TABLE IF NOT EXISTS successor_launch (
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
     state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
@@ -646,13 +660,16 @@ export function openRegistry(
       : error("invalid_transition", "Only a ready manager can move to a new TUI pane");
   }
 
-  function reattachClaim(
-    id: string,
-  ): { readonly claimed_at: string; readonly owner: string } | null {
+  function reattachClaim(id: string): {
+    readonly claimed_at: string;
+    readonly owner: string;
+    readonly owner_pid: number | null;
+  } | null {
     return db
-      .query<{ readonly claimed_at: string; readonly owner: string }, [string]>(
-        "SELECT claimed_at, owner FROM manager_reattach WHERE binding_id = ?",
-      )
+      .query<
+        { readonly claimed_at: string; readonly owner: string; readonly owner_pid: number | null },
+        [string]
+      >("SELECT claimed_at, owner, owner_pid FROM manager_reattach WHERE binding_id = ?")
       .get(id);
   }
 
@@ -669,6 +686,7 @@ export function openRegistry(
     expectedPaneId: string | null,
     claimedAt: string,
     staleBefore: string,
+    reclaimDeadOwner = false,
   ): Result<ReattachClaim> {
     return transaction<ReattachClaim>(() => {
       const binding = readyManager(id);
@@ -677,13 +695,15 @@ export function openRegistry(
       // Compare-and-set: a changed pane or a live claim means another caller owns reattachment.
       if (
         binding.value.paneId !== expectedPaneId ||
-        (held !== null && held.claimed_at >= staleBefore)
+        (held !== null &&
+          held.claimed_at >= staleBefore &&
+          !(reclaimDeadOwner && held.owner_pid !== null && !processAlive(held.owner_pid)))
       )
         return ok({ claimed: false, binding: binding.value });
       const token = randomUUID();
       db.query(
-        "INSERT INTO manager_reattach (binding_id, claimed_at, owner) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner",
-      ).run(id, claimedAt, token);
+        "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid) VALUES (?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid",
+      ).run(id, claimedAt, token, process.pid);
       return ok({ claimed: true, binding: binding.value, token });
     });
   }

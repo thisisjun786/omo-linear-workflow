@@ -323,6 +323,7 @@ export interface Registry {
     expectedPaneId: string | null,
     claimedAt: string,
     staleBefore: string,
+    reclaimDeadOwner?: boolean,
   ): Result<ReattachClaim>;
   /** True only while `token` still owns the binding's reattachment claim. */
   ownsReattach(id: string, token: string): Result<boolean>;

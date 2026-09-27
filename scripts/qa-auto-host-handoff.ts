@@ -118,9 +118,20 @@ export async function autoHostHandoffQa(world: World, herdr: HerdrClient) {
       world.controlRoot,
       hostEnv,
     ),
-  ) as { generation: number; sessions: { total: number } };
+  ) as {
+    reachable: boolean;
+    pid: number;
+    generation: number;
+    sessions: { total: number };
+  };
+  assert.equal(after.reachable, true);
   assert.ok(after.generation > before.generation);
   assert.ok(after.sessions.total > 0);
+  const rawHostStat = await Bun.file(`/proc/${after.pid}/stat`).text();
+  const hostStat = rawHostStat.slice(rawHostStat.lastIndexOf(")") + 2).split(/\s+/);
+  assert.equal(Number(hostStat[1]), 1);
+  assert.equal(Number(hostStat[2]), after.pid);
+  assert.equal(Number(hostStat[3]), after.pid);
   assert.ok(existsSync(join(world.controlRoot, "omo-host.json")));
   return { before, refused: { code: refused.code, stdout: refused.stdout }, after };
 }

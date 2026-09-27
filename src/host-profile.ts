@@ -38,6 +38,8 @@ export type HostStatus = z.infer<typeof hostStatusSchema>;
 const observedSessionsSchema = z.object({ sessions: z.array(z.unknown()) });
 const HOST_STATUS_TIMEOUT_MS = 15_000;
 const HOST_HANDOFF_TIMEOUT_MS = 45_000;
+const HOST_GROUP_TERM_GRACE_MS = 250;
+const HOST_GROUP_KILL_GRACE_MS = 1_000;
 
 interface HostCommandProcess {
   readonly pid?: number;
@@ -128,6 +130,34 @@ export async function assertHostProtocol(
   await createHostProfile(root, await readHostStatus(root, socket, env));
 }
 
+function signalProcessGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ESRCH") return false;
+    throw cause;
+  }
+}
+
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs;
+  while (signalProcessGroup(pid, 0)) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return false;
+    await Bun.sleep(Math.min(10, remaining));
+  }
+  return true;
+}
+
+async function cleanSuccessfulProcessGroup(pid: number | undefined): Promise<void> {
+  if (pid === undefined || !signalProcessGroup(pid, "SIGTERM")) return;
+  if (await waitForProcessGroupExit(pid, HOST_GROUP_TERM_GRACE_MS)) return;
+  signalProcessGroup(pid, "SIGKILL");
+  if (!(await waitForProcessGroupExit(pid, HOST_GROUP_KILL_GRACE_MS)))
+    throw new Error(`Native host command process group ${pid} did not exit after SIGKILL`);
+}
+
 export async function runBoundedHostCommand(
   argv: readonly string[],
   cwd: string,
@@ -160,6 +190,7 @@ export async function runBoundedHostCommand(
   });
   try {
     const [code, stdoutText, stderrText] = await Promise.race([completed, timeout]);
+    await cleanSuccessfulProcessGroup(child.pid);
     return { code, stdout: stdoutText, stderr: stderrText };
   } catch (cause) {
     if (!timedOut) throw cause;

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
@@ -228,6 +228,26 @@ test("bounded host commands time out after the parent exits while a grandchild h
     ),
   ).rejects.toBeInstanceOf(HostCommandTimeoutError);
   expect(performance.now() - started).toBeLessThan(3000);
+});
+
+test("successful host commands empty their detached process group before returning", async () => {
+  const marker = join(tmpdir(), `olw-host-group-${crypto.randomUUID()}.pid`);
+  roots.push(marker);
+  const result = await import("../src/host-profile").then(({ runBoundedHostCommand }) =>
+    runBoundedHostCommand(
+      [
+        "python3",
+        "-c",
+        `import os,signal; r,w=os.pipe(); pid=os.fork();\nif pid:\n os.close(w); os.read(r,1); os._exit(0)\nos.close(r); open(${JSON.stringify(marker)},'w').write(str(os.getpid())); os.close(1); os.close(2); os.write(w,b'1'); os.close(w); signal.pause()`,
+      ],
+      "/tmp",
+      process.env,
+      3000,
+    ),
+  );
+  expect(result.code).toBe(0);
+  const descendant = Number((await readFile(marker, "utf8")).trim());
+  expect(() => process.kill(descendant, 0)).toThrow();
 });
 
 test("prepares a new profile when no host is reachable", async () => {

@@ -344,8 +344,15 @@ export interface Registry {
   reattachPending(id: string): Result<boolean>;
   /** Give up the claim after a failure; the reattachment stays pending for the next caller. */
   releaseReattach(id: string, token: string): Result<boolean>;
-  /** Clear the claim once its TUI is verified; false if `token` no longer owns it. */
-  finishReattach(id: string, token: string): Result<boolean>;
+  /** Clear the claim once its TUI is verified and retain its proof; false if `token` no longer owns it. */
+  finishReattach(id: string, token: string, completedAt?: string): Result<boolean>;
+  /** Verify a recently completed reattach proof against the binding and durable session. */
+  authorizeHerdrRepublish(
+    bindingId: string,
+    sessionId: string,
+    claimToken: string,
+    completedAfter: string,
+  ): Result<Binding>;
   /** Claim exclusive ownership of execute-stage recovery before any launch side effect. */
   beginSuccessorLaunch(
     id: string,

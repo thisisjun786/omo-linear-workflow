@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { RpcClient } from "@code-yeongyu/senpi";
+import { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding } from "../src/core/contracts";
 import { bindingSchema, deliveryRecordSchema, runtimeIdentitySchema } from "../src/core/schema";
@@ -21,6 +21,7 @@ export async function runOfficialHerdrQa(
   evidenceName = "lina-275-official-qa.json",
   entry = false,
   autoHandoff = false,
+  roleReport = false,
 ): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const scratch = await mkdtemp(join(tmpdir(), "olw-official-"));
@@ -151,7 +152,7 @@ export async function runOfficialHerdrQa(
       z.object({ binding: bindingSchema }).parse(await invoke(["manage"])).binding;
     const managerClient = await connected(manager);
     let reattached = { binding: manager };
-    if (!entry) {
+    if (!entry && !roleReport) {
       const initialManagerIdentity = {
         durableSessionId: manager.durableSessionId,
         sessionPath: manager.sessionPath,
@@ -216,7 +217,7 @@ export async function runOfficialHerdrQa(
           (pane) =>
             pane.paneId === reattached.binding.paneId &&
             pane.workspaceId === reattached.binding.workspaceId &&
-            (pane.agent === "pi" || pane.agent === "omo"),
+            (roleReport || pane.agent === "pi" || pane.agent === "omo"),
         ),
       );
       const native = runtimeIdentitySchema.parse(
@@ -234,6 +235,192 @@ export async function runOfficialHerdrQa(
         reattachedSnapshot,
         nativeIdentity: native,
       };
+    }
+    if (roleReport) {
+      const gate = join(scratch, "gate");
+      await rm(join(gate, "entered"), { force: true });
+      await rm(join(gate, "release"), { force: true });
+      const turnEntered = Promise.withResolvers<void>();
+      const inspectGate = () => {
+        if (existsSync(join(gate, "entered"))) turnEntered.resolve();
+      };
+      const gateWatcher = watch(gate, inspectGate);
+      const turnStarted = Promise.withResolvers<void>();
+      const turnSettled = Promise.withResolvers<void>();
+      const stopEvents = managerClient.onEvent((event) => {
+        if (event.type === "agent_start") turnStarted.resolve();
+        if (event.type === "agent_settled") turnSettled.resolve();
+      });
+      const deadline = setTimeout(() => {
+        const error = new Error("Manager reattach state deadline");
+        turnEntered.reject(error);
+        turnStarted.reject(error);
+        turnSettled.reject(error);
+      }, 60000);
+      const activeHerdr = herdr;
+      const activeWorld = world;
+      assert.ok(activeHerdr);
+      assert.ok(activeWorld);
+      assert.ok(manager.workspaceId);
+      await activeHerdr.createTab(manager.workspaceId, manager.cwd, "reattach-anchor");
+      const reattach = async (current: Binding, expectedState: "working" | "blocked") => {
+        assert.ok(current.paneId);
+        const start = activeWorld.herdrTraffic.length;
+        let moved: Binding | undefined;
+        const reported = Promise.withResolvers<void>();
+        const inspect = () => {
+          if (moved?.paneId === null || moved?.paneId === undefined) return;
+          const requests = activeWorld.herdrTraffic.slice(start);
+          if (
+            reportsFor(requests, moved.paneId, "pane.report_agent_session").length === 1 &&
+            reportsFor(requests, moved.paneId, "pane.report_agent").some(
+              (request) => request.params["state"] === expectedState,
+            )
+          )
+            reported.resolve();
+        };
+        const stopTraffic = activeWorld.onHerdrRequest(inspect);
+        const reportDeadline = setTimeout(
+          () => reported.reject(new Error(`Manager ${expectedState} report deadline`)),
+          30000,
+        );
+        try {
+          await checkedQaCommand(
+            ["herdr", "pane", "close", current.paneId],
+            activeWorld.repository,
+            activeWorld.environment,
+          );
+          moved = z
+            .object({ action: z.literal("reattached"), binding: bindingSchema })
+            .parse(await invoke(["manage"])).binding;
+          inspect();
+          await reported.promise;
+          return { binding: moved, raw: activeWorld.herdrTraffic.slice(start) };
+        } finally {
+          stopTraffic();
+          clearTimeout(reportDeadline);
+        }
+      };
+      const reportsFor = (requests: readonly unknown[], paneId: string, method: string) =>
+        requests.filter(
+          (request): request is { method: string; params: Record<string, unknown> } =>
+            typeof request === "object" &&
+            request !== null &&
+            "method" in request &&
+            request.method === method &&
+            "params" in request &&
+            typeof request.params === "object" &&
+            request.params !== null &&
+            "pane_id" in request.params &&
+            request.params.pane_id === paneId,
+        );
+      const turn = managerClient.prompt("OLW_ENTRY_BUSY_GATE");
+      try {
+        inspectGate();
+        await Promise.all([turnEntered.promise, turnStarted.promise]);
+        assert.ok(manager.paneId);
+        await checkedQaCommand(
+          ["herdr", "agent", "wait", manager.paneId, "--until", "working", "--timeout", "30000"],
+          world.repository,
+          world.environment,
+        );
+        const workingMove = await reattach(manager, "working");
+        const workingBinding = workingMove.binding;
+        assert.ok(workingBinding.paneId);
+        const workingRaw = workingMove.raw;
+        check(
+          "managerReattachDuringTurnSingleRpcOwner",
+          reportsFor(workingRaw, workingBinding.paneId, "pane.report_agent_session").length === 1,
+        );
+        check(
+          "managerReattachDuringTurnWorking",
+          reportsFor(workingRaw, workingBinding.paneId, "pane.report_agent").some(
+            (request) => request.params["state"] === "working",
+          ),
+        );
+
+        const blockedBeforeMove = Promise.withResolvers<void>();
+        const stopBlocked = activeWorld.onHerdrRequest((request) => {
+          if (
+            reportsFor([request], workingBinding.paneId ?? "", "pane.report_agent").some(
+              (report) => report.params["state"] === "blocked",
+            )
+          )
+            blockedBeforeMove.resolve();
+        });
+        const blockedDeadline = setTimeout(
+          () => blockedBeforeMove.reject(new Error("Manager blocked report deadline")),
+          30000,
+        );
+        try {
+          z.object({ active: z.literal(true) }).parse(
+            await managerClient.requestExtension("oi.qa.olw-question-wait", true),
+          );
+          await blockedBeforeMove.promise;
+        } finally {
+          stopBlocked();
+          clearTimeout(blockedDeadline);
+        }
+        const blockedMove = await reattach(workingBinding, "blocked");
+        const blockedBinding = blockedMove.binding;
+        reattached = { binding: blockedBinding };
+        assert.ok(blockedBinding.paneId);
+        const blockedRaw = blockedMove.raw;
+        check(
+          "managerReattachDuringQuestionSingleRpcOwner",
+          reportsFor(blockedRaw, blockedBinding.paneId, "pane.report_agent_session").length === 1,
+        );
+        check(
+          "managerReattachDuringQuestionBlocked",
+          reportsFor(blockedRaw, blockedBinding.paneId, "pane.report_agent").some(
+            (request) => request.params["state"] === "blocked",
+          ),
+        );
+
+        z.object({ active: z.literal(false) }).parse(
+          await managerClient.requestExtension("oi.qa.olw-question-wait", false),
+        );
+        await writeFile(join(gate, "release"), "release");
+        await turn;
+        await turnSettled.promise;
+        await idle(managerClient);
+        await checkedQaCommand(
+          [
+            "herdr",
+            "agent",
+            "wait",
+            blockedBinding.paneId,
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--timeout",
+            "30000",
+          ],
+          world.repository,
+          world.environment,
+        );
+        const idleRaw = activeWorld.herdrTraffic.slice(
+          activeWorld.herdrTraffic.indexOf(blockedRaw[0]),
+        );
+        check(
+          "managerReattachAfterTurnIdle",
+          reportsFor(idleRaw, blockedBinding.paneId, "pane.report_agent").some(
+            (request) => request.params["state"] === "idle",
+          ),
+        );
+        evidence["managerReattachRoleReportRaw"] = {
+          duringTurn: workingRaw,
+          duringQuestion: blockedRaw,
+          afterTurn: idleRaw,
+        };
+      } finally {
+        gateWatcher.close();
+        stopEvents();
+        clearTimeout(deadline);
+        if (!existsSync(join(gate, "release"))) await writeFile(join(gate, "release"), "release");
+        await turn;
+      }
     }
     await idle(managerClient);
     const remote = join(world.scratch, "remote.git");
@@ -285,9 +472,140 @@ export async function runOfficialHerdrQa(
       parents.push(parent);
       await connected(parent);
     }
+    let plainPane: string | undefined;
+    if (roleReport) {
+      const plain = await herdr.createWorkspace(world.repository, "plain-omo");
+      world.workspaces.push(plain.workspaceId);
+      plainPane = plain.rootPaneId;
+      const plainReported = Promise.withResolvers<void>();
+      const stopTraffic = world.onHerdrRequest((value) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          "method" in value &&
+          value.method === "pane.report_agent_session" &&
+          "params" in value &&
+          typeof value.params === "object" &&
+          value.params !== null &&
+          "pane_id" in value.params &&
+          value.params.pane_id === plain.rootPaneId
+        )
+          plainReported.resolve();
+      });
+      const deadline = setTimeout(
+        () => plainReported.reject(new Error("Plain OMO reporter deadline")),
+        30000,
+      );
+      try {
+        await herdr.run(
+          plain.rootPaneId,
+          [join(world.controlRoot, "node_modules/.bin/omo"), "--name", "plain-omo"],
+          {
+            PATH: process.env["PATH"] ?? "",
+            HERDR_ENV: "1",
+            HERDR_PANE_ID: plain.rootPaneId,
+            HERDR_SOCKET_PATH: world.herdrSocket,
+          },
+        );
+        await plainReported.promise;
+      } finally {
+        stopTraffic();
+        clearTimeout(deadline);
+      }
+    }
     const parent = parents[0];
     assert.ok(parent);
-    if (entry)
+    if (roleReport) {
+      assert.ok(parent.paneId);
+      const gate = join(scratch, "gate");
+      await rm(join(gate, "entered"), { force: true });
+      await rm(join(gate, "release"), { force: true });
+      const entered = Promise.withResolvers<void>();
+      const inspectGate = () => {
+        if (existsSync(join(gate, "entered"))) entered.resolve();
+      };
+      const watcher = watch(gate, inspectGate);
+      const started = Promise.withResolvers<void>();
+      const settled = Promise.withResolvers<void>();
+      const parentClient = clients[1];
+      assert.ok(parentClient);
+      const stopEvents = parentClient.onEvent((event) => {
+        if (event.type === "agent_start") started.resolve();
+        if (event.type === "agent_settled") settled.resolve();
+      });
+      const deadline = setTimeout(() => {
+        const error = new Error("Role-report provider hold deadline");
+        entered.reject(error);
+        started.reject(error);
+      }, 30000);
+      const reportedWorking = checkedQaCommand(
+        ["herdr", "agent", "wait", parent.paneId, "--until", "working", "--timeout", "30000"],
+        world.repository,
+        world.environment,
+      );
+      const turn = parentClient.prompt("OLW_ENTRY_BUSY_GATE");
+      try {
+        inspectGate();
+        await Promise.all([entered.promise, started.promise, reportedWorking]);
+        const working = await checkedQaCommand(
+          ["herdr", "agent", "explain", parent.paneId, "--json"],
+          world.repository,
+          world.environment,
+        );
+        const workingAgent = await checkedQaCommand(
+          ["herdr", "agent", "get", parent.paneId],
+          world.repository,
+          world.environment,
+        );
+        evidence["roleReportWorkingRaw"] = { explain: working, agent: workingAgent };
+        const workingExplain = JSON.parse(working) as unknown;
+        check(
+          "roleReportWorking",
+          workingAgent.includes('"agent_status":"working"') &&
+            JSON.stringify(workingExplain).includes("default_known_agent_idle_fallback") &&
+            JSON.stringify(workingExplain).includes('"state":"idle"'),
+        );
+        await writeFile(join(gate, "release"), "release");
+        await turn;
+        await settled.promise;
+        await idle(parentClient);
+        await checkedQaCommand(
+          [
+            "herdr",
+            "agent",
+            "wait",
+            parent.paneId,
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--timeout",
+            "30000",
+          ],
+          world.repository,
+          world.environment,
+        );
+        const idleReport = await checkedQaCommand(
+          ["herdr", "agent", "get", parent.paneId],
+          world.repository,
+          world.environment,
+        );
+        evidence["roleReportIdleRaw"] = idleReport;
+        check(
+          "roleReportIdle",
+          idleReport.includes('"agent_status":"done"') ||
+            idleReport.includes('"agent_status":"idle"'),
+        );
+        evidence["roleReport"] = { paneId: parent.paneId, working, idle: idleReport };
+      } finally {
+        watcher.close();
+        stopEvents();
+        clearTimeout(deadline);
+        if (!existsSync(join(gate, "release"))) await writeFile(join(gate, "release"), "release");
+        await turn;
+      }
+    }
+    if (entry && !roleReport)
       evidence["busyNotice"] = await managerBusyNoticeQa(world, manager, parent, managerClient);
     const plan = z
       .object({ binding: bindingSchema })
@@ -322,6 +640,17 @@ export async function runOfficialHerdrQa(
           ],
         }),
       );
+    if (roleReport) {
+      assert.ok(plan.paneId);
+      await idle(planClient);
+      const blocked = await checkedQaCommand(
+        ["herdr", "agent", "get", plan.paneId],
+        world.repository,
+        world.environment,
+      );
+      check("roleReportQuestionBlocked", blocked.includes('"agent_status":"blocked"'));
+      evidence["roleReportQuestion"] = { paneId: plan.paneId, blocked };
+    }
     const registryForQuestion = openRegistry(
       join(world.controlRoot, ".omo/state/registry.sqlite"),
       {
@@ -367,6 +696,37 @@ export async function runOfficialHerdrQa(
     ]);
     await invoke(["answer", "--from", parent.id, "--question", q.envelope.id, "--text-file", body]);
     await idle(planClient);
+    if (roleReport) {
+      assert.ok(plan.paneId);
+      await checkedQaCommand(
+        [
+          "herdr",
+          "agent",
+          "wait",
+          plan.paneId,
+          "--until",
+          "idle",
+          "--until",
+          "done",
+          "--until",
+          "working",
+          "--timeout",
+          "30000",
+        ],
+        world.repository,
+        world.environment,
+      );
+      const unblocked = await checkedQaCommand(
+        ["herdr", "agent", "get", plan.paneId],
+        world.repository,
+        world.environment,
+      );
+      check("roleReportQuestionCleared", !unblocked.includes('"agent_status":"blocked"'));
+      evidence["roleReportQuestion"] = {
+        ...(evidence["roleReportQuestion"] as object),
+        unblocked,
+      };
+    }
     const registry = openRegistry(join(world.controlRoot, ".omo/state/registry.sqlite"), {
       readonly: true,
     });
@@ -411,6 +771,74 @@ export async function runOfficialHerdrQa(
     await planClient.closeSession();
     await planClient.stop();
     clients.splice(clients.indexOf(planClient), 1);
+    if (roleReport) {
+      const sessionReports = world.herdrTraffic.filter(
+        (value): value is { method: string; params: { pane_id?: string } } =>
+          typeof value === "object" &&
+          value !== null &&
+          "method" in value &&
+          value.method === "pane.report_agent_session" &&
+          "params" in value &&
+          typeof value.params === "object" &&
+          value.params !== null,
+      );
+      evidence["roleOwnershipRaw"] = {
+        sessionReports: world.herdrTraffic,
+        manager,
+        parents,
+        plainPane,
+      };
+      const rolePanes = parents
+        .map((binding) => binding.paneId)
+        .filter((pane): pane is string => pane !== null);
+      for (const pane of new Set(rolePanes)) {
+        const count = sessionReports.filter((request) => request.params.pane_id === pane).length;
+        evidence[`singleOwnerCount:${pane}`] = count;
+        check(`singleOwner:${pane}`, count === 1);
+      }
+      assert.ok(plainPane);
+      check(
+        "plainBuiltinOwner",
+        sessionReports.filter((request) => request.params.pane_id === plainPane).length === 1,
+      );
+      const loaded = (await Bun.file(join(scratch, "gate/loaded-extensions.jsonl")).text())
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) =>
+          z
+            .object({ sessionId: z.string(), mode: z.string(), paths: z.array(z.string()) })
+            .parse(JSON.parse(line)),
+        );
+      const marker = join(world.controlRoot, "dist/extension/herdr-olw-owner.js");
+      for (const binding of [manager, ...parents])
+        check(
+          `markerLoaded:${binding.id}`,
+          loaded.some(
+            (receipt) =>
+              receipt.sessionId === binding.durableSessionId && receipt.paths.includes(marker),
+          ),
+        );
+      const plainReceipt = loaded.find(
+        (receipt) => receipt.mode === "tui" && !receipt.paths.includes(marker),
+      );
+      check("plainMarkerAbsent", plainReceipt !== undefined);
+      evidence["roleOwnership"] = { sessionReports, loaded, marker, plainPane };
+    }
+    if (roleReport) {
+      const cleanupClient = new RpcClient({
+        socketPath: join(world.controlRoot, ".omo/state/omo.sock"),
+      });
+      await cleanupClient.start();
+      try {
+        for (const session of await cleanupClient.listSessions())
+          await cleanupClient.closeSession(session.sessionId);
+      } finally {
+        await cleanupClient.stop();
+      }
+      evidence["result"] = "PASS";
+      return;
+    }
     const execute = z
       .object({ binding: bindingSchema })
       .parse(
@@ -537,5 +965,6 @@ if (import.meta.main) {
         : "lina-275-official-qa.json",
     process.argv.includes("--entry"),
     autoHandoff,
+    process.argv.includes("--role-report"),
   );
 }

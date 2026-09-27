@@ -1,8 +1,59 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { debuglog } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@code-yeongyu/senpi";
+import { z } from "zod";
+import {
+  isContinuationHoldStateEvent,
+  isTerminalMonitorStateEvent,
+  isWakeSourceStateEvent,
+} from "../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/monitor-state-event.js";
+import { openRegistry } from "../core/store";
 import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
+import { createRoleHerdrClient, registerRoleHerdrReporter } from "./herdr-reporter";
 import { isManagerIdle, registerManagerIdle } from "./manager-idle";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
+
+const herdrRepublishProofSchema = z.object({
+  sessionId: z.string().min(1),
+  bindingId: z.string().min(1),
+  claimToken: z.string().min(1),
+});
+
+export function authorizeHerdrRepublish(
+  root: string,
+  data: unknown,
+  republish: (sessionId: string) => void,
+  now = Date.now(),
+) {
+  const parsed = herdrRepublishProofSchema.safeParse(data);
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      error: { code: "invalid_input", message: "Herdr republish proof is invalid" },
+    };
+  const dbPath = join(root, ".omo/state/registry.sqlite");
+  if (!existsSync(dbPath))
+    return {
+      ok: false as const,
+      error: { code: "herdr_republish_unauthorized", message: "Herdr republish proof is invalid" },
+    };
+  const registry = openRegistry(dbPath, { readonly: true });
+  try {
+    const authorized = registry.authorizeHerdrRepublish(
+      parsed.data.bindingId,
+      parsed.data.sessionId,
+      parsed.data.claimToken,
+      new Date(now - 120_000).toISOString(),
+    );
+    if (!authorized.ok) return authorized;
+    republish(authorized.value.durableSessionId);
+    return { ok: true as const };
+  } finally {
+    registry.close();
+  }
+}
 
 export function questionWaitWire(
   pi: Pick<ExtensionAPI, "events" | "appendEntry">,
@@ -24,6 +75,69 @@ export function questionWaitWire(
 
 export default function initiativeExtension(pi: ExtensionAPI): void {
   registerManagerIdle(pi);
+  const { OMO_INITIATIVE_HOST: hostMarker, OMO_INITIATIVE_ROOT: initiativeRoot } = process.env;
+  const root = initiativeRoot ?? pi.cwd;
+  const debug = debuglog("olw:herdr");
+  registerRoleHerdrReporter(
+    {
+      onSessionStart: (handler) => {
+        pi.on("session_start", (event, ctx) => handler(event.reason, ctx));
+      },
+      onMessageStart: (handler) => {
+        pi.on("message_start", (_event, ctx) => handler(ctx));
+      },
+      onAgentStart: (handler) => {
+        pi.on("agent_start", (_event, ctx) => handler(ctx));
+      },
+      onAgentSettled: (handler) => {
+        pi.on("agent_settled", (_event, ctx) => handler(ctx));
+      },
+      onSessionShutdown: (handler) => {
+        pi.on("session_shutdown", (event, ctx) => handler(event.reason, ctx));
+      },
+      onBlocked: (handler) => {
+        pi.events.on("herdr:blocked", (data) => {
+          if (isBlockedEvent(data)) handler(data);
+        });
+      },
+      onWakeSource: (handler) => {
+        pi.events.on("wake_source_state", (data) => {
+          if (isWakeSourceStateEvent(data)) handler(data);
+        });
+      },
+      onContinuationHold: (handler) => {
+        pi.events.on("continuation_hold_state", (data) => {
+          if (isContinuationHoldStateEvent(data)) handler(data);
+        });
+      },
+      onMonitors: (handler) => {
+        pi.events.on("terminal_monitor_state", (data) => {
+          if (isTerminalMonitorStateEvent(data)) handler(data);
+        });
+      },
+      onRepublish: (handler) => {
+        pi.rpc.handle("omo.initiative.herdr-republish", (data) =>
+          authorizeHerdrRepublish(root, data, handler),
+        );
+      },
+    },
+    {
+      hostRuntime: hostMarker === "1",
+      lookupBinding(sessionId) {
+        const dbPath = join(root, ".omo/state/registry.sqlite");
+        if (!existsSync(dbPath)) return undefined;
+        const registry = openRegistry(dbPath, { readonly: true });
+        try {
+          const binding = registry.bySession(sessionId);
+          return binding.ok ? binding.value : undefined;
+        } finally {
+          registry.close();
+        }
+      },
+      createClient: createRoleHerdrClient,
+      debug,
+    },
+  );
   const port: RuntimePort = {
     onSessionStart(handler): void {
       pi.on("session_start", async (_event, ctx) => handler(contextPort(ctx)));
@@ -90,11 +204,23 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
       return { details: result.details };
     },
   };
-  const { OMO_INITIATIVE_HOST: hostMarker, OMO_INITIATIVE_ROOT: initiativeRoot } = process.env;
   registerInitiativeRuntime(port, {
-    root: initiativeRoot ?? pi.cwd,
+    root,
     hostRuntime: hostMarker === "1",
   });
+}
+
+function isBlockedEvent(data: unknown): data is { active: boolean; id: string; label?: string } {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "active" in data &&
+    typeof data.active === "boolean" &&
+    "id" in data &&
+    typeof data.id === "string" &&
+    data.id.length > 0 &&
+    (!("label" in data) || data.label === undefined || typeof data.label === "string")
+  );
 }
 
 function contextPort(ctx: ExtensionContext): SessionContextPort {

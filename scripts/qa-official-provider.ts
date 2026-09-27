@@ -1,5 +1,5 @@
 import { existsSync, watch } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ProviderConfig } from "@code-yeongyu/senpi";
 import { createAssistantMessageEventStream } from "../node_modules/@code-yeongyu/senpi/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js";
@@ -7,6 +7,23 @@ import { createAssistantMessageEventStream } from "../node_modules/@code-yeongyu
 // Offline QA replaces only inference. Native TUI, shared host, extension delivery,
 // question persistence and Herdr integration are unchanged and can fail normally.
 export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
+  pi.on("session_start", async (_event, ctx) => {
+    if (gate === undefined) return;
+    await appendFile(
+      join(gate, "loaded-extensions.jsonl"),
+      `${JSON.stringify({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, mode: ctx.mode, paths: ctx.loadedExtensionPaths ?? [] })}\n`,
+    );
+  });
+  pi.rpc.handle("oi.qa.olw-question-wait", (input: unknown) => {
+    const active = input === true;
+    pi.events.emit("continuation_hold_state", { source: "olw-question", active });
+    pi.events.emit("wake_source_state", {
+      source: "olw-question",
+      activeCount: active ? 1 : 0,
+      items: active ? [{ id: "qa-manager-question" }] : [],
+    });
+    return { active };
+  });
   pi.rpc.handle("oi.qa.olw-ask", async (input: unknown) => {
     const result = await pi.executeTool("olw_ask", input);
     if (result.isError)
@@ -21,22 +38,6 @@ export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
   const stream: NonNullable<ProviderConfig["streamSimple"]> = (model, context) => {
     const events = createAssistantMessageEventStream();
     queueMicrotask(async () => {
-      if (gate !== undefined && JSON.stringify(context.messages).includes("OLW_ENTRY_BUSY_GATE")) {
-        const released = Promise.withResolvers<void>();
-        const inspect = () => {
-          if (existsSync(join(gate, "release"))) released.resolve();
-        };
-        const watcher = watch(gate, inspect);
-        const deadline = setTimeout(() => released.reject(new Error("QA release deadline")), 60000);
-        try {
-          await writeFile(join(gate, "entered"), "entered");
-          inspect();
-          await released.promise;
-        } finally {
-          watcher.close();
-          clearTimeout(deadline);
-        }
-      }
       const message = {
         role: "assistant" as const,
         api: model.api,
@@ -55,6 +56,22 @@ export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
         timestamp: Date.now(),
       };
       events.push({ type: "start", partial: message });
+      if (gate !== undefined && JSON.stringify(context.messages).includes("OLW_ENTRY_BUSY_GATE")) {
+        const released = Promise.withResolvers<void>();
+        const inspect = () => {
+          if (existsSync(join(gate, "release"))) released.resolve();
+        };
+        const watcher = watch(gate, inspect);
+        const deadline = setTimeout(() => released.reject(new Error("QA release deadline")), 60000);
+        try {
+          await writeFile(join(gate, "entered"), "entered");
+          inspect();
+          await released.promise;
+        } finally {
+          watcher.close();
+          clearTimeout(deadline);
+        }
+      }
       events.push({ type: "done", reason: "stop", message });
       events.end(message);
     });

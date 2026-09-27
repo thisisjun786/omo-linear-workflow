@@ -16,6 +16,7 @@ published.
 ### Fixed
 
 - Retry report and question deliveries under the same logical ID after a tool-call guard proves native execution never started, while preserving attempt history and keeping accepted or uncertain outcomes non-retryable.
+- Report bound manager, supervisor, parent, and child state from the shared RPC host to each role's current Herdr pane, with one reporter owner across reattachment, event-driven turn/question/background states, closed-binding exclusion, and non-blocking transport.
 - Make bare `olw` and `olw manage` automatically hand off a mismatched shared OMO host only when every session counter is zero and a separate validated native session-list read proves it empty, with cross-process serialization, bounded native commands, post-handoff reachability/profile verification, and phase-accurate TTY failures. Hosts with attached sessions or unreadable status remain untouched and report the exact manual command. The occupied-host JSON response intentionally changes its `message` and expands `details.sessions` to all six counters; recovery failures add a machine-readable `recoveryPhase` and error field.
 - Carry authorized sender data with manager notice claims so a failed secondary lookup cannot strand reports or questions in `sending`; same-ID replay keeps the original delivery attempt.
 - Exit promptly on interruption during abandoned manager startup recovery, releasing the recovery claim without closing the binding or starting another manager.

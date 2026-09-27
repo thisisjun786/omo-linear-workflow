@@ -182,15 +182,18 @@ export async function runBoundedHostCommand(
   };
   const completed = Promise.all([child.exited, read(stdout), read(stderr)]);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout =
-    deadline ??
-    new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(new HostCommandTimeoutError(operation, timeoutMs));
-      }, timeoutMs);
-    });
+  // The timeoutMs bound always applies; an injected deadline can only end the wait earlier.
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new HostCommandTimeoutError(operation, timeoutMs));
+    }, timeoutMs);
+  });
   try {
-    const [code, stdoutText, stderrText] = await Promise.race([completed, timeout]);
+    const [code, stdoutText, stderrText] = await Promise.race([
+      completed,
+      timeout,
+      ...(deadline === undefined ? [] : [deadline]),
+    ]);
     await cleanSuccessfulProcessGroup(child.pid);
     return { code, stdout: stdoutText, stderr: stderrText };
   } catch (cause) {

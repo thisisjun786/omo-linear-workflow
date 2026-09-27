@@ -268,6 +268,37 @@ test("bounded host commands kill the group, reap, then reject when the deadline 
   expect(events).toEqual(["kill", "reap", "reject"]);
 });
 
+test("a pending custom deadline never disables the timeoutMs bound", async () => {
+  const exit = Promise.withResolvers<number>();
+  const pendingDeadline = Promise.withResolvers<never>();
+  const events: string[] = [];
+  const child = {
+    exited: exit.promise.then((code) => {
+      events.push("reap");
+      return code;
+    }),
+    stdout: new ReadableStream<Uint8Array>(),
+    stderr: new ReadableStream<Uint8Array>(),
+    kill() {
+      events.push("kill");
+      exit.resolve(137);
+    },
+  };
+  const running = import("../src/host-profile").then(({ runBoundedHostCommand }) =>
+    runBoundedHostCommand(
+      ["fixture"],
+      "/tmp",
+      {},
+      1,
+      () => child,
+      "status",
+      pendingDeadline.promise,
+    ),
+  );
+  await expect(running).rejects.toBeInstanceOf(HostCommandTimeoutError);
+  expect(events).toEqual(["kill", "reap"]);
+});
+
 test("successful host commands empty their detached process group before returning", async () => {
   const marker = join(tmpdir(), `olw-host-group-${crypto.randomUUID()}.pid`);
   roots.push(marker);

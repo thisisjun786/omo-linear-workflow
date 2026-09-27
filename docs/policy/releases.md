@@ -86,7 +86,7 @@ bun run install:local
 Before you switch:
 
 - Read the `## [0.2.0]` changelog section. If it has a `### Migration` subsection, do those steps in the order written.
-- Finish or `pause` active role bindings if the notes say the runtime changes. An upgrade doesn't restart existing Herdr servers or OMO sessions on its own; running sessions keep the old code until they're closed and recreated.
+- Finish or `pause` active role bindings if the notes say the runtime changes. An upgrade doesn't restart existing Herdr servers or active OMO sessions on its own; running sessions keep the old code until they're closed and recreated. After `bun run install:local`, bare `olw` or `olw manage` hands off a mismatched shared OMO host automatically only when a fresh status read reports every session count as zero and a separate native session-list request successfully proves the list empty. Otherwise it leaves the host running and prints the exact handoff command to use after the sessions finish. A session attaching after that proof is preserved while native handoff drains the predecessor.
 - If the Herdr pin changed, the next `bun run build` downloads the pinned official asset and verifies its SHA-256. Cached executables are also verified before use. Existing servers aren't replaced; follow the [switch gate and rollback procedure](../operations.md#official-herdr-runtime-and-switch-gate). Resolve any parents listed by `olw doctor --json` before a separately approved server switch.
 
 Skipping versions is fine as long as you apply each intermediate migration subsection in order.

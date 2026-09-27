@@ -161,8 +161,19 @@ rejected; inspect and move only the named artifact directory aside before downlo
 
 `bun run build` prepares the whole runtime including Herdr, while `bun run herdr:build`
 runs only the Herdr step. New role TUIs and the shared host receive this binary directory
-at the front of PATH. Existing servers, bindings and workspaces aren't restarted or migrated
-automatically.
+at the front of PATH. Existing Herdr servers, bindings and workspaces aren't restarted or
+migrated automatically. The shared OMO host has one narrow exception: after `bun run
+install:local`, bare `olw` or `olw manage` automatically performs the computed generation
+handoff only when a fresh status read reports that total, interactive, worker, retained,
+foreign-attached and foreign-retained session counts are all zero and a separate validated
+native session-list request successfully observes an empty list. A process-shared lock
+serializes those checks and the bounded handoff command. If any session exists or either status
+read cannot prove emptiness, OLW leaves the host untouched and prints the manual handoff command;
+`--json` reports the recovery phase and all six counters. A session may attach after the final
+empty-list proof. This accepted window does not lose its work: native generation handoff
+atomically replaces the socket and drains the predecessor while preserving existing connections
+and sessions. After handoff, OLW still requires a reachable successor with the matching launch
+profile before manager entry continues.
 
 Before any operational switch, run `olw doctor --json` against the control root.
 `legacy_parents_remaining` lists every non-closed parent without an owned clone,

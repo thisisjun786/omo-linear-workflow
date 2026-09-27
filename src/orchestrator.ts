@@ -36,11 +36,19 @@ import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
 import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
+import { HostHandoffBusyError, withHostHandoffLock } from "./host-handoff-lock";
 import {
   assertHostProtocol,
   createHostProfile,
+  HostPostHandoffVerificationError,
   HostProfileMismatchError,
+  HostSessionsPresentError,
+  type HostStatus,
+  handoffHost,
+  observeEmptyHostSessions,
+  readHostStatus,
   runtimeCacheEnvironment,
+  verifyHostAfterHandoff,
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting, globalOmo } from "./proxy/routing-launch";
@@ -292,6 +300,18 @@ export interface OrchestratorDependencies {
     socket: string,
     env: Readonly<Record<string, string | undefined>>,
   ) => Promise<void>;
+  readonly readHostStatus?: (
+    root: string,
+    socket: string,
+    env: Readonly<Record<string, string | undefined>>,
+  ) => Promise<HostStatus>;
+  readonly observeEmptyHostSessions?: (socket: string) => Promise<void>;
+  readonly handoffHost?: (
+    root: string,
+    recovery: HostProfileMismatchError["details"]["recovery"],
+  ) => Promise<void>;
+  readonly verifyHostAfterHandoff?: (root: string, status: HostStatus) => Promise<void>;
+  readonly withHostHandoffLock?: <T>(path: string, operation: () => Promise<T>) => Promise<T>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
   readonly launchHere?: (
     argv: readonly string[],
@@ -337,6 +357,55 @@ export function planPathForIssueKey(key: string | undefined): Result<string> {
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+type HostRecoveryPhase = "refused" | "status_unreadable" | "handoff_failed" | "verification_failed";
+
+class HostProtocolResultError extends Error {
+  public override readonly name = "HostProtocolResultError";
+  public constructor(public readonly result: Result<never>) {
+    super(result.ok ? "Unexpected successful host protocol result" : result.error.message);
+  }
+}
+
+class HostRecoveryError extends Error {
+  public override readonly name = "HostRecoveryError";
+  public constructor(
+    public readonly phase: Exclude<HostRecoveryPhase, "refused">,
+    public readonly mismatch: HostProfileMismatchError,
+    public override readonly cause: unknown,
+  ) {
+    super(messageOf(cause), { cause });
+  }
+}
+
+function hostSessionsPresentMismatch(
+  mismatch: HostProfileMismatchError,
+  count: number,
+): HostProfileMismatchError {
+  return new HostProfileMismatchError({
+    ...mismatch.details,
+    sessions: {
+      total: count,
+      interactive: count,
+      worker: 0,
+      retained: 0,
+      foreign_attached: count,
+      foreign_retained: 0,
+    },
+    recovery: { ...mismatch.details.recovery, automatic: false },
+  });
+}
+
+function hostIsIdle(status: HostStatus): boolean {
+  return (
+    status.sessions.total === 0 &&
+    status.sessions.interactive === 0 &&
+    status.sessions.worker === 0 &&
+    status.sessions.retained === 0 &&
+    status.sessions.foreign_attached === 0 &&
+    status.sessions.foreign_retained === 0
+  );
+}
+
 function managedHerdrPath(artifactDir: string): string {
   const inheritedPath = process.env["PATH"];
   if (!inheritedPath) return artifactDir;
@@ -484,6 +553,11 @@ const defaults: OrchestratorDependencies = {
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
   checkHostProfile: assertHostProtocol,
+  readHostStatus,
+  observeEmptyHostSessions,
+  handoffHost,
+  verifyHostAfterHandoff,
+  withHostHandoffLock,
   prompt: defaultPrompt,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
@@ -1004,7 +1078,7 @@ export class Orchestrator {
         `The recorded manager is ${binding.launchState}; ${closeInstruction}`,
         { bindingId: binding.id },
       );
-    const host = await this.#whileForeground(this.#checkHostProtocol(binding), here);
+    const host = await this.#whileForeground(this.#checkHostProtocol(binding, true), here);
     if (here?.failure !== undefined) throw here.failure;
     if (host !== undefined) return host;
     const workspaceId = binding.workspaceId;
@@ -2298,22 +2372,112 @@ export class Orchestrator {
     }
   }
 
-  async #checkHostProtocol(binding: Binding): Promise<Result<never> | undefined> {
+  async #checkHostProtocol(
+    binding: Binding,
+    allowIdleHandoff = false,
+  ): Promise<Result<never> | undefined> {
+    let environment: Readonly<Record<string, string | undefined>>;
+    let check: () => Promise<void>;
     try {
       const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
-      await this.#deps.checkHostProfile?.(
-        this.#root,
-        binding.omoSocket,
-        launchEnvironment(this.#root, managedHerdrPath(artifact.artifactDir)),
-      );
+      environment = launchEnvironment(this.#root, managedHerdrPath(artifact.artifactDir));
+      check = async () => {
+        await this.#deps.checkHostProfile?.(this.#root, binding.omoSocket, environment);
+      };
+      await check();
       return undefined;
     } catch (cause) {
-      if (cause instanceof HostProfileMismatchError)
+      if (!(cause instanceof HostProfileMismatchError))
+        return failure(
+          "runtime_unavailable",
+          "Native host protocol check failed",
+          messageOf(cause),
+        );
+      if (!allowIdleHandoff)
         return failure("runtime_unavailable", cause.message, {
           reason: "host_profile_mismatch",
           ...cause.details,
         });
-      return failure("runtime_unavailable", "Native host protocol check failed", messageOf(cause));
+      try {
+        await (this.#deps.withHostHandoffLock ?? withHostHandoffLock)(
+          join(this.#root, ".omo/state/host-handoff.lock"),
+          async () => {
+            try {
+              await check();
+              return;
+            } catch (current) {
+              if (!(current instanceof HostProfileMismatchError)) throw current;
+              let status: HostStatus | undefined;
+              try {
+                status = await this.#deps.readHostStatus?.(
+                  this.#root,
+                  binding.omoSocket,
+                  environment,
+                );
+              } catch (statusCause) {
+                throw new HostRecoveryError("status_unreadable", current, statusCause);
+              }
+              if (status === undefined)
+                throw new HostRecoveryError(
+                  "status_unreadable",
+                  current,
+                  new Error("Native host summary status is unavailable"),
+                );
+              if (!hostIsIdle(status)) throw current;
+              try {
+                await this.#deps.observeEmptyHostSessions?.(binding.omoSocket);
+              } catch (statusCause) {
+                if (statusCause instanceof HostSessionsPresentError)
+                  throw hostSessionsPresentMismatch(current, statusCause.count);
+                throw new HostRecoveryError("status_unreadable", current, statusCause);
+              }
+              // Native generation handoff atomically replaces the socket and drains the predecessor.
+              // A session attaching after this proof remains preserved by that native drain window.
+              try {
+                await this.#deps.handoffHost?.(this.#root, current.details.recovery);
+              } catch (handoffCause) {
+                throw new HostRecoveryError("handoff_failed", current, handoffCause);
+              }
+              try {
+                const successor = await this.#deps.readHostStatus?.(
+                  this.#root,
+                  binding.omoSocket,
+                  environment,
+                );
+                if (successor === undefined)
+                  throw new HostPostHandoffVerificationError(
+                    "Successor host status is unavailable after handoff",
+                  );
+                await this.#deps.verifyHostAfterHandoff?.(this.#root, successor);
+                await check();
+              } catch (verificationCause) {
+                throw new HostRecoveryError("verification_failed", current, verificationCause);
+              }
+            }
+          },
+        );
+        return undefined;
+      } catch (recoveryCause) {
+        if (recoveryCause instanceof HostHandoffBusyError)
+          return failure("host_handoff_busy", recoveryCause.message, {
+            timeoutMs: recoveryCause.timeoutMs,
+          });
+        if (recoveryCause instanceof HostRecoveryError)
+          return failure("runtime_unavailable", recoveryCause.mismatch.message, {
+            reason: "host_profile_mismatch",
+            ...recoveryCause.mismatch.details,
+            recoveryPhase: recoveryCause.phase,
+            ...(recoveryCause.phase === "status_unreadable"
+              ? { statusError: messageOf(recoveryCause.cause) }
+              : { recoveryError: messageOf(recoveryCause.cause) }),
+          });
+        const mismatch = recoveryCause instanceof HostProfileMismatchError ? recoveryCause : cause;
+        return failure("runtime_unavailable", mismatch.message, {
+          reason: "host_profile_mismatch",
+          ...mismatch.details,
+          recoveryPhase: "refused",
+        });
+      }
     }
   }
 
@@ -3219,10 +3383,11 @@ export class Orchestrator {
       }
     }
     try {
-      await this.#whileForeground(
-        Promise.resolve(this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment)),
+      const host = await this.#whileForeground(
+        this.#checkHostProtocol(reserved.value, assignment.role === "manager"),
         here,
       );
+      if (host !== undefined) throw new HostProtocolResultError(host);
       if (here?.failure !== undefined) throw here.failure;
       await this.#whileForeground(
         this.#deps.ensureHost(this.#root, this.#omoSocket, environment),
@@ -3244,11 +3409,7 @@ export class Orchestrator {
           const closing = registry.beginClose(bindingId);
           return closing.ok ? registry.finishClose(bindingId) : closing;
         });
-      if (cause instanceof HostProfileMismatchError)
-        return failure("runtime_unavailable", cause.message, {
-          reason: "host_profile_mismatch",
-          ...cause.details,
-        });
+      if (cause instanceof HostProtocolResultError) return cause.result;
       return failure("runtime_unavailable", "Native host launch failed", messageOf(cause));
     }
 
@@ -3502,7 +3663,14 @@ export class Orchestrator {
           reason: "host_profile_mismatch",
           missingCapabilities: ["olw_extension_protocol_2"],
           generation: null,
-          sessions: { total: 0, worker: 0 },
+          sessions: {
+            total: 0,
+            interactive: 0,
+            worker: 0,
+            retained: 0,
+            foreign_attached: 0,
+            foreign_retained: 0,
+          },
           actualProfile: null,
           recovery: {
             automatic: false,

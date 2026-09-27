@@ -158,7 +158,12 @@ function exitCode(result: Result<unknown>): number {
       .exitCode;
   if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
     return 4;
-  if (result.error.code === "runtime_unavailable" || result.error.code === "manager_busy") return 3;
+  if (
+    result.error.code === "runtime_unavailable" ||
+    result.error.code === "manager_busy" ||
+    result.error.code === "host_handoff_busy"
+  )
+    return 3;
   if (result.error.code === "interrupted") return 130;
   return 2;
 }
@@ -192,8 +197,46 @@ function deliveryOutcome(result: Result<unknown>): Result<unknown> {
   };
 }
 
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function humanError(result: Result<unknown>): string | undefined {
+  if (result.ok) return undefined;
+  const { code, message } = result.error;
+  if (code === "herdr_required") return `OLW needs a Herdr pane. ${message}`;
+  if (code === "manager_busy") return `The OLW manager is busy. ${message}`;
+  if (code === "manager_unavailable") return `The OLW manager is unavailable. ${message}`;
+  if (code === "host_handoff_busy")
+    return "Another OLW entry is updating the shared host. Try bare olw again after it finishes.";
+  const details = z
+    .object({
+      reason: z.literal("host_profile_mismatch"),
+      sessions: z.object({ total: z.number() }),
+      recoveryPhase: z
+        .enum(["refused", "status_unreadable", "handoff_failed", "verification_failed"])
+        .default("refused"),
+      statusError: z.string().optional(),
+      recoveryError: z.string().optional(),
+      recovery: z.object({ argv: z.array(z.string()) }),
+    })
+    .safeParse(result.error.details);
+  if (!details.success) return undefined;
+  const command = details.data.recovery.argv.map(shellArg).join(" ");
+  if (details.data.recoveryPhase === "status_unreadable")
+    return `The running OMO host is from an older OLW generation, but its session status could not be read. No handoff was attempted. Inspect the host, then run when every session is finished:\n${command}`;
+  if (details.data.recoveryPhase === "handoff_failed")
+    return `The idle OMO host handoff was attempted but failed: ${details.data.recoveryError ?? "unknown error"}\nRetry with:\n${command}`;
+  if (details.data.recoveryPhase === "verification_failed")
+    return `The OMO host handoff completed, but the successor profile could not be verified: ${details.data.recoveryError ?? "unknown error"}\nInspect host status before retrying:\n${command}`;
+  const count = details.data.sessions.total;
+  return `The running OMO host is from an older OLW generation with ${count} session${count === 1 ? "" : "s"} attached. No handoff was attempted. When they are finished, run:\n${command}`;
+}
+
 function print(result: Result<unknown>, json: boolean): void {
-  if (json || !result.ok) process.stdout.write(`${JSON.stringify(result)}\n`);
+  const human = !json && process.stdout.isTTY ? humanError(result) : undefined;
+  if (human !== undefined) process.stdout.write(`${human}\n`);
+  else if (json || !result.ok) process.stdout.write(`${JSON.stringify(result)}\n`);
   else process.stdout.write(`${JSON.stringify(result.value, null, 2)}\n`);
 }
 

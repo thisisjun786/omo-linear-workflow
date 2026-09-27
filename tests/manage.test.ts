@@ -57,7 +57,7 @@ async function world(agent = "omo") {
     }),
   );
   const workspaces = new Map<string, Workspace>();
-  const panes = new Map<string, { workspaceId: string; agent?: string }>();
+  const panes = new Map<string, { workspaceId: string; agent?: string; sessionPath?: string }>();
   const hooks: {
     failRun: boolean;
     hostCheck: (() => void) | undefined;
@@ -811,6 +811,46 @@ test.each([false, true])(
     }
   },
 );
+
+test("here entry rejects an owned manager workspace whose cwd changed", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const owned = w.workspaces.get(first.workspaceId ?? "");
+  if (owned === undefined) throw new Error("missing owned workspace");
+  w.workspaces.set(owned.workspaceId, { ...owned, cwd: "/elsewhere" });
+  w.panes.set(first.paneId ?? "", { workspaceId: owned.workspaceId, agent: "pi" });
+  w.workspaces.set("user", { workspaceId: "user", rootPaneId: "user:p1", cwd: "/user" });
+  w.panes.set("user:p1", { workspaceId: "user" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "user:p1";
+  try {
+    const focusedBefore = w.focused.length;
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "manager_unavailable" },
+    });
+    expect(w.focused.length).toBe(focusedBefore);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("a live pane reporting another session is not focused as the manager", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", {
+    workspaceId: first.workspaceId ?? "",
+    agent: "pi",
+    sessionPath: "/other/session.jsonl",
+  });
+  const result = await w.orchestrator.manage();
+  if (result.ok) expect(result.value.action).not.toBe("focused");
+  expect(w.focused).not.toContain(first.paneId);
+});
 
 test("here entry rejects a different server even when its pane ID matches", async () => {
   const w = await world();

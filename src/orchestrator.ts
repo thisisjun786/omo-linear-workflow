@@ -1016,11 +1016,11 @@ export class Orchestrator {
       const workspace = snapshot.workspaces.find(
         (candidate) => candidate.workspaceId === workspaceId,
       );
-      if (
-        here === undefined &&
-        (workspace === undefined ||
-          (binding.workspaceOwned !== false && workspace.cwd !== binding.cwd))
-      )
+      const ownedWorkspaceChanged =
+        binding.workspaceOwned !== false &&
+        workspace !== undefined &&
+        workspace.cwd !== binding.cwd;
+      if ((here === undefined && workspace === undefined) || ownedWorkspaceChanged)
         return failure(
           "manager_unavailable",
           `The manager workspace is gone or changed; ${closeInstruction}`,
@@ -1030,7 +1030,13 @@ export class Orchestrator {
       const recordedPane = snapshot.panes.find(
         (pane) => pane.paneId === binding.paneId && pane.workspaceId === workspaceId,
       );
-      const tuiRunning = recordedPane !== undefined && hasLiveTui(recordedPane);
+      // A pane reporting a session file must report this manager's session; `pi`/`omo` alone
+      // (reporters without a session path) stays accepted for official Herdr compatibility.
+      const tuiRunning =
+        recordedPane !== undefined &&
+        hasLiveTui(recordedPane) &&
+        (typeof recordedPane.sessionPath !== "string" ||
+          recordedPane.sessionPath === binding.sessionPath);
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {

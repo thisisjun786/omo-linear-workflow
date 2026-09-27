@@ -2566,6 +2566,22 @@ export class Orchestrator {
         }
         await herdr.closeWorkspace(workspace.workspaceId);
       }
+      if (
+        binding.ownedWorkspaceId !== undefined &&
+        binding.ownedWorkspaceId !== binding.workspaceId
+      ) {
+        const retained = snapshot.workspaces.find(
+          (workspace) => workspace.workspaceId === binding.ownedWorkspaceId,
+        );
+        if (retained !== undefined) {
+          if (retained.cwd !== binding.cwd)
+            return failure(
+              "identity_mismatch",
+              "Retained manager workspace identity changed; inspect it before closing",
+            );
+          await herdr.closeWorkspace(retained.workspaceId);
+        }
+      }
       if (binding.sessionPath !== null) {
         const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
         const managedPath = managedHerdrPath(artifact.artifactDir);

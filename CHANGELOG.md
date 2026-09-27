@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Retain the manager's original OLW-owned workspace after moving to a user pane, and remove only that owned workspace at close.
 - Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.
 - Identify manager reattachment owners by PID and process start time, so recycled PIDs do not block recovery. Legacy claims with unknown start time keep PID-only liveness.
 - Preserve foreground manager exit codes before readiness and release failed startup reservations immediately.

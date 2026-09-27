@@ -767,7 +767,15 @@ export function openRegistry(
       return saveBinding({
         ...binding.value,
         paneId,
-        ...(workspaceId === undefined ? {} : { workspaceId, workspaceOwned: false }),
+        ...(workspaceId === undefined
+          ? {}
+          : {
+              ...(binding.value.workspaceOwned !== false && binding.value.workspaceId !== null
+                ? { ownedWorkspaceId: binding.value.ownedWorkspaceId ?? binding.value.workspaceId }
+                : {}),
+              workspaceId,
+              workspaceOwned: false,
+            }),
       });
     });
   }

@@ -298,6 +298,33 @@ function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
 
+test("moving an owned manager to a user pane retains its owned workspace for close", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  w.workspaces.set("user", { workspaceId: "user", rootPaneId: "user:p1", cwd: "/user" });
+  w.panes.set("user:p1", { workspaceId: "user" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "user:p1";
+  try {
+    const moved = value(await w.orchestrator.manage({ here: true })).binding;
+    expect(moved).toMatchObject({
+      workspaceId: "user",
+      workspaceOwned: false,
+      ownedWorkspaceId: first.workspaceId,
+    });
+    value(await w.orchestrator.close(first.id));
+    expect(w.workspaces.has(first.workspaceId ?? "")).toBe(false);
+    expect(w.workspaces.has("user")).toBe(true);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("bare olw outside Herdr fails before creating state; help remains available", async () => {
   const root = await mkdtemp(join(tmpdir(), "olw-entry-cli-"));
   roots.push(root);

@@ -117,6 +117,8 @@ export interface Binding {
   readonly workspaceId: string | null;
   /** False for a manager attached in the user's existing workspace. Legacy bindings own theirs. */
   readonly workspaceOwned?: boolean | undefined;
+  /** Original OLW-owned manager workspace retained when its TUI moves to a user pane. */
+  readonly ownedWorkspaceId?: string | undefined;
   readonly paneId: string | null;
   readonly sessionPath: string | null;
   readonly launchState:

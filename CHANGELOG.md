@@ -13,6 +13,10 @@ published.
 
 ## [Unreleased]
 
+### Changed
+
+- Pinned `omo-ai` 5.0.1 and its exact `@code-yeongyu/senpi` 2026.9.27 dependency, porting the maintained runtime repairs to the new executable bundles.
+
 ## [0.2.0]
 
 Released: 2026-09-27

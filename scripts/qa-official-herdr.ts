@@ -89,7 +89,7 @@ export async function runOfficialHerdrQa(
     await symlink(join(root, "node_modules/omo-ai/bin/omo.js"), upstream);
     await writeFile(
       join(scratch, "bin/npm"),
-      '#!/bin/sh\ncase "$*" in *senpi*) echo \'{"latest":"2026.9.26"}\';; *omo-ai*) echo \'{"latest":"5.0.0"}\';; *) exit 2;; esac\n',
+      '#!/bin/sh\ncase "$*" in *senpi*) echo \'{"latest":"2026.9.27"}\';; *omo-ai*) echo \'{"latest":"5.0.1"}\';; *) exit 2;; esac\n',
       { mode: 0o700 },
     );
     Object.assign(process.env, {

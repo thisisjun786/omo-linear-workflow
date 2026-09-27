@@ -211,6 +211,33 @@ test("bounded host commands kill and reap a timed-out child", async () => {
   expect(reaped).toBe(true);
 });
 
+test("an output read failure kills and reaps the child before preserving the read error", async () => {
+  const exit = Promise.withResolvers<number>();
+  const readError = new Error("injected stdout failure");
+  const stdout = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.error(readError);
+    },
+  });
+  const signals: NodeJS.Signals[] = [];
+  const child = {
+    exited: exit.promise,
+    stdout,
+    stderr: new Response("").body,
+    kill(signal?: NodeJS.Signals) {
+      signals.push(signal ?? "SIGTERM");
+      exit.resolve(137);
+    },
+  };
+  await expect(
+    import("../src/host-profile").then(({ runBoundedHostCommand }) =>
+      runBoundedHostCommand(["fixture"], "/tmp", {}, 1000, () => child),
+    ),
+  ).rejects.toBe(readError);
+  expect(signals).toEqual(["SIGKILL"]);
+  expect(await child.exited).toBe(137);
+});
+
 test("bounded host commands time out after the parent exits while a grandchild holds output pipes", async () => {
   const started = performance.now();
   await expect(

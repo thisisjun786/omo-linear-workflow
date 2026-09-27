@@ -158,7 +158,12 @@ function exitCode(result: Result<unknown>): number {
       .exitCode;
   if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
     return 4;
-  if (result.error.code === "runtime_unavailable" || result.error.code === "manager_busy") return 3;
+  if (
+    result.error.code === "runtime_unavailable" ||
+    result.error.code === "manager_busy" ||
+    result.error.code === "host_handoff_busy"
+  )
+    return 3;
   if (result.error.code === "interrupted") return 130;
   return 2;
 }
@@ -202,6 +207,8 @@ function humanError(result: Result<unknown>): string | undefined {
   if (code === "herdr_required") return `OLW needs a Herdr pane. ${message}`;
   if (code === "manager_busy") return `The OLW manager is busy. ${message}`;
   if (code === "manager_unavailable") return `The OLW manager is unavailable. ${message}`;
+  if (code === "host_handoff_busy")
+    return "Another OLW entry is updating the shared host. Try bare olw again after it finishes.";
   const details = z
     .object({
       reason: z.literal("host_profile_mismatch"),

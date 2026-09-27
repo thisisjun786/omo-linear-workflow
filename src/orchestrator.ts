@@ -36,7 +36,7 @@ import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
 import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
-import { withHostHandoffLock } from "./host-handoff-lock";
+import { HostHandoffBusyError, withHostHandoffLock } from "./host-handoff-lock";
 import {
   assertHostProtocol,
   createHostProfile,
@@ -311,6 +311,7 @@ export interface OrchestratorDependencies {
     recovery: HostProfileMismatchError["details"]["recovery"],
   ) => Promise<void>;
   readonly verifyHostAfterHandoff?: (root: string, status: HostStatus) => Promise<void>;
+  readonly withHostHandoffLock?: <T>(path: string, operation: () => Promise<T>) => Promise<T>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
   readonly launchHere?: (
     argv: readonly string[],
@@ -374,6 +375,24 @@ class HostRecoveryError extends Error {
   ) {
     super(messageOf(cause), { cause });
   }
+}
+
+function hostSessionsPresentMismatch(
+  mismatch: HostProfileMismatchError,
+  count: number,
+): HostProfileMismatchError {
+  return new HostProfileMismatchError({
+    ...mismatch.details,
+    sessions: {
+      total: count,
+      interactive: count,
+      worker: 0,
+      retained: 0,
+      foreign_attached: count,
+      foreign_retained: 0,
+    },
+    recovery: { ...mismatch.details.recovery, automatic: false },
+  });
 }
 
 function hostIsIdle(status: HostStatus): boolean {
@@ -538,6 +557,7 @@ const defaults: OrchestratorDependencies = {
   observeEmptyHostSessions,
   handoffHost,
   verifyHostAfterHandoff,
+  withHostHandoffLock,
   prompt: defaultPrompt,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
@@ -2377,61 +2397,69 @@ export class Orchestrator {
           ...cause.details,
         });
       try {
-        await withHostHandoffLock(join(this.#root, ".omo/state/host-handoff.lock"), async () => {
-          try {
-            await check();
-            return;
-          } catch (current) {
-            if (!(current instanceof HostProfileMismatchError)) throw current;
-            let status: HostStatus | undefined;
+        await (this.#deps.withHostHandoffLock ?? withHostHandoffLock)(
+          join(this.#root, ".omo/state/host-handoff.lock"),
+          async () => {
             try {
-              status = await this.#deps.readHostStatus?.(
-                this.#root,
-                binding.omoSocket,
-                environment,
-              );
-            } catch (statusCause) {
-              throw new HostRecoveryError("status_unreadable", current, statusCause);
-            }
-            if (status === undefined)
-              throw new HostRecoveryError(
-                "status_unreadable",
-                current,
-                new Error("Native host summary status is unavailable"),
-              );
-            if (!hostIsIdle(status)) throw current;
-            try {
-              await this.#deps.observeEmptyHostSessions?.(binding.omoSocket);
-            } catch (statusCause) {
-              if (statusCause instanceof HostSessionsPresentError) throw current;
-              throw new HostRecoveryError("status_unreadable", current, statusCause);
-            }
-            // Native generation handoff atomically replaces the socket and drains the predecessor.
-            // A session attaching after this proof remains preserved by that native drain window.
-            try {
-              await this.#deps.handoffHost?.(this.#root, current.details.recovery);
-            } catch (handoffCause) {
-              throw new HostRecoveryError("handoff_failed", current, handoffCause);
-            }
-            try {
-              const successor = await this.#deps.readHostStatus?.(
-                this.#root,
-                binding.omoSocket,
-                environment,
-              );
-              if (successor === undefined)
-                throw new HostPostHandoffVerificationError(
-                  "Successor host status is unavailable after handoff",
-                );
-              await this.#deps.verifyHostAfterHandoff?.(this.#root, successor);
               await check();
-            } catch (verificationCause) {
-              throw new HostRecoveryError("verification_failed", current, verificationCause);
+              return;
+            } catch (current) {
+              if (!(current instanceof HostProfileMismatchError)) throw current;
+              let status: HostStatus | undefined;
+              try {
+                status = await this.#deps.readHostStatus?.(
+                  this.#root,
+                  binding.omoSocket,
+                  environment,
+                );
+              } catch (statusCause) {
+                throw new HostRecoveryError("status_unreadable", current, statusCause);
+              }
+              if (status === undefined)
+                throw new HostRecoveryError(
+                  "status_unreadable",
+                  current,
+                  new Error("Native host summary status is unavailable"),
+                );
+              if (!hostIsIdle(status)) throw current;
+              try {
+                await this.#deps.observeEmptyHostSessions?.(binding.omoSocket);
+              } catch (statusCause) {
+                if (statusCause instanceof HostSessionsPresentError)
+                  throw hostSessionsPresentMismatch(current, statusCause.count);
+                throw new HostRecoveryError("status_unreadable", current, statusCause);
+              }
+              // Native generation handoff atomically replaces the socket and drains the predecessor.
+              // A session attaching after this proof remains preserved by that native drain window.
+              try {
+                await this.#deps.handoffHost?.(this.#root, current.details.recovery);
+              } catch (handoffCause) {
+                throw new HostRecoveryError("handoff_failed", current, handoffCause);
+              }
+              try {
+                const successor = await this.#deps.readHostStatus?.(
+                  this.#root,
+                  binding.omoSocket,
+                  environment,
+                );
+                if (successor === undefined)
+                  throw new HostPostHandoffVerificationError(
+                    "Successor host status is unavailable after handoff",
+                  );
+                await this.#deps.verifyHostAfterHandoff?.(this.#root, successor);
+                await check();
+              } catch (verificationCause) {
+                throw new HostRecoveryError("verification_failed", current, verificationCause);
+              }
             }
-          }
-        });
+          },
+        );
         return undefined;
       } catch (recoveryCause) {
+        if (recoveryCause instanceof HostHandoffBusyError)
+          return failure("host_handoff_busy", recoveryCause.message, {
+            timeoutMs: recoveryCause.timeoutMs,
+          });
         if (recoveryCause instanceof HostRecoveryError)
           return failure("runtime_unavailable", recoveryCause.mismatch.message, {
             reason: "host_profile_mismatch",

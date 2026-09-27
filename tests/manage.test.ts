@@ -15,7 +15,12 @@ import type {
 import { modelForRole } from "../src/core/policy";
 import { openRegistry } from "../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../src/herdr";
-import { HostProfileMismatchError, runtimeCacheEnvironment } from "../src/host-profile";
+import { HostHandoffBusyError } from "../src/host-handoff-lock";
+import {
+  HostProfileMismatchError,
+  HostSessionsPresentError,
+  runtimeCacheEnvironment,
+} from "../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
 import type { NativeSession } from "../src/transport";
@@ -1966,6 +1971,58 @@ test("first manager entry preserves an unreadable session-list failure in TTY an
   }
 });
 
+test("a nonempty raw session list replaces a stale zero summary in the refusal", async () => {
+  const w = await world();
+  value(await w.orchestrator.manage());
+  w.hooks.hostCheck = () => {
+    throw new HostProfileMismatchError({
+      missingExtensions: ["old-extension"],
+      missingCapabilities: [],
+      generation: 1,
+      sessions: {
+        total: 0,
+        interactive: 0,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
+      actualProfile: null,
+      recovery: { automatic: true, argv: ["omo", "host", "handoff"], env: {} },
+    });
+  };
+  w.hooks.hostStatus = async () => ({
+    reachable: true,
+    socket: "/fixture/socket",
+    generation: 1,
+    launchProfile: null,
+    sessions: {
+      total: 0,
+      interactive: 0,
+      worker: 0,
+      retained: 0,
+      foreign_attached: 0,
+      foreign_retained: 0,
+    },
+    env_keys: [],
+  });
+  w.hooks.hostSessions = async () => {
+    throw new HostSessionsPresentError(1);
+  };
+  const result = await w.orchestrator.manage();
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      details: {
+        recoveryPhase: "refused",
+        sessions: { total: 1, interactive: 1, foreign_attached: 1 },
+        recovery: { automatic: false },
+      },
+    },
+  });
+  expect(w.hooks.hostHandoffs).toBe(0);
+});
+
 test("bare entry hands off an idle mismatched host once and continues", async () => {
   const w = await world();
   const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
@@ -2085,6 +2142,45 @@ test.each(["handoff_failed", "verification_failed"] as const)(
     expect(value(w.orchestrator.status()).find((binding) => binding.id === first.id)).toBeDefined();
   },
 );
+
+test("host handoff lock timeout returns exit 3 and a readable TTY message", async () => {
+  const w = await world();
+  value(await w.orchestrator.manage());
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+  w.hooks.hostCheck = () => {
+    throw new HostProfileMismatchError({
+      missingExtensions: ["old-extension"],
+      missingCapabilities: [],
+      generation: 1,
+      sessions: {
+        total: 0,
+        interactive: 0,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
+      actualProfile: null,
+      recovery: { automatic: true, argv: ["omo", "host", "handoff"], env: {} },
+    });
+  };
+  try {
+    const code = await runCli(["--root", w.root, "manage"], {
+      ...w.deps,
+      withHostHandoffLock: async () => {
+        throw new HostHandoffBusyError(50_000);
+      },
+    });
+    expect(code).toBe(3);
+    expect(String(output.mock.calls.at(-1)?.[0])).toContain("Another OLW entry");
+  } finally {
+    if (tty === undefined) delete (process.stdout as { isTTY?: boolean }).isTTY;
+    else Object.defineProperty(process.stdout, "isTTY", tty);
+    output.mockRestore();
+  }
+});
 
 test("concurrent manage calls perform exactly one idle-host handoff", async () => {
   const w = await world();

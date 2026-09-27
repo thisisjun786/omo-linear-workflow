@@ -181,10 +181,8 @@ export async function runBoundedHostCommand(
   };
   const completed = Promise.all([child.exited, read(stdout), read(stderr)]);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      timedOut = true;
       reject(new HostCommandTimeoutError(operation, timeoutMs));
     }, timeoutMs);
   });
@@ -193,13 +191,12 @@ export async function runBoundedHostCommand(
     await cleanSuccessfulProcessGroup(child.pid);
     return { code, stdout: stdoutText, stderr: stderrText };
   } catch (cause) {
-    if (!timedOut) throw cause;
     try {
       if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
       else child.kill("SIGKILL");
     } catch (killCause) {
       if (!(killCause instanceof Error && "code" in killCause && killCause.code === "ESRCH"))
-        throw killCause;
+        throw new AggregateError([cause, killCause], "Host command and cleanup failed");
     }
     await child.exited;
     await Promise.allSettled([stdout?.cancel(), stderr?.cancel()]);

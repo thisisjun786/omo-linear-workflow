@@ -27,6 +27,8 @@ const blockUntilAbort = async (signal: AbortSignal | undefined) => {
 const run: PrepareRunner = async (argv, options) => {
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
   if (argv[1] === "pr" && argv[2] === "list") return ok("[]");
+  if (argv[0] === "git" && argv[1] === "remote" && argv[2] === "get-url")
+    return ok("https://github.com/thisisjun786/omo-linear-workflow.git\n");
   if (mode === "add" && argv[0] === "git") {
     if (argv[1] === "rev-parse") return realGit(["git", "rev-parse", "HEAD"], options.cwd);
     if (argv[1] === "worktree" && argv[2] === "add") {

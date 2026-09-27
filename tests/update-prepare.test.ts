@@ -81,6 +81,8 @@ function fakeRunner(
     if (override) return { stdout: "", stderr: "", ...override };
     const [bin, sub] = argv;
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+    if (bin === "git" && sub === "remote" && argv[2] === "get-url")
+      return ok("git@github.com:thisisjun786/omo-linear-workflow.git\n");
     if (bin === "git" && sub === "rev-parse" && argv.includes("FETCH_HEAD")) return ok("abc123\n");
     if (bin === "git" && sub === "rev-parse" && argv.includes("HEAD")) return ok("def456\n");
     if (bin === "git" && sub === "ls-remote") {
@@ -106,14 +108,35 @@ function fakeRunner(
     if (bin === "git" && sub === "commit")
       committedPackage = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
     if (sub === "pr" && argv[2] === "list") {
-      const head = argv[argv.indexOf("--head") + 1] ?? "";
+      const head = (argv[argv.indexOf("--head") + 1] ?? "").replace(/^[^:]+:/, "");
+      const repository = argv[argv.indexOf("-R") + 1] ?? "thisisjun786/omo-linear-workflow";
+      const [owner, name] = repository.split("/");
       return ok(
-        openPrs.has(head) ? JSON.stringify([{ url: "https://example.test/pull/3" }]) : "[]",
+        openPrs.has(head)
+          ? JSON.stringify([
+              {
+                url: "https://example.test/pull/3",
+                headRepository: { name },
+                headRepositoryOwner: { login: owner },
+              },
+            ])
+          : "[]",
       );
     }
     if (sub === "pr" && argv[2] === "create") {
-      openPrs.add(argv[argv.indexOf("--head") + 1] ?? "");
+      openPrs.add((argv[argv.indexOf("--head") + 1] ?? "").replace(/^[^:]+:/, ""));
       return ok("https://example.test/pull/7\n");
+    }
+    if (sub === "pr" && argv[2] === "view") {
+      const repository = argv[argv.indexOf("-R") + 1] ?? "thisisjun786/omo-linear-workflow";
+      const [owner, name] = repository.split("/");
+      return ok(
+        JSON.stringify({
+          url: "https://example.test/pull/7",
+          headRepository: { name },
+          headRepositoryOwner: { login: owner },
+        }),
+      );
     }
     return ok();
   };
@@ -153,7 +176,13 @@ test("all green opens a ready PR to dev from a removed worktree", async () => {
   expect(argv).toContain(`git push origin HEAD:refs/heads/${branch}`);
   expect(argv).toContain(`git worktree remove --force ${worktree}`);
   const create = prCreate(fake.calls) ?? [];
-  expect(create.slice(0, 5)).toEqual(["gh", "pr", "create", "--base", "dev"]);
+  expect(create.slice(0, 5)).toEqual([
+    "gh",
+    "pr",
+    "create",
+    "-R",
+    "thisisjun786/omo-linear-workflow",
+  ]);
   expect(create).not.toContain("--draft");
   for (const step of ["pnpm install", "bun run typecheck", "bun test", "bun run build"]) {
     const call = fake.calls.find((item) => item.argv.join(" ").startsWith(step));
@@ -175,14 +204,18 @@ test("all green opens a ready PR to dev from a removed worktree", async () => {
   expect(await exists(worktree)).toBe(false);
   expect(await exists(join(root, ".omo/state/update.lock"))).toBe(false);
   const logPath = join(root, ".omo/state/update-prepare", `${branch}.log`);
-  expect(await readFile(logPath, "utf8")).toContain("gh pr create --base dev");
+  expect(await readFile(logPath, "utf8")).toContain(
+    "gh pr create -R thisisjun786/omo-linear-workflow --base dev",
+  );
 
   const again = await prepareUpdate(root, { run: fake.run, ghBin: "gh" });
   expect(again.ok && again.value).toMatchObject({
     action: "exists",
     pr: "https://example.test/pull/3",
   });
-  expect(await readFile(logPath, "utf8")).toContain("gh pr create --base dev");
+  expect(await readFile(logPath, "utf8")).toContain(
+    "gh pr create -R thisisjun786/omo-linear-workflow --base dev",
+  );
 });
 
 test("failed patch application opens a draft PR with the failure in the body", async () => {
@@ -251,7 +284,13 @@ test("a pushed branch whose PR creation failed gets its PR on the next run from 
   expect(ran(fake.calls, "git worktree")).toBe(false);
   expect(ran(fake.calls, "git push")).toBe(false);
   const create = prCreate(fake.calls) ?? [];
-  expect(create.slice(0, 5)).toEqual(["gh", "pr", "create", "--base", "dev"]);
+  expect(create.slice(0, 5)).toEqual([
+    "gh",
+    "pr",
+    "create",
+    "-R",
+    "thisisjun786/omo-linear-workflow",
+  ]);
   expect(create).toContain("--draft");
 });
 
@@ -327,6 +366,8 @@ function pausingGitRunner(hooks: {
     };
     if (argv[1] === "pr" && argv[2] === "list") return ok("[]");
     if (argv[0] !== "git") return ok();
+    if (argv[1] === "remote" && argv[2] === "get-url")
+      return ok("https://github.com/thisisjun786/omo-linear-workflow.git\n");
     if (argv[1] === "rev-parse") {
       const head = await spawn(["git", "rev-parse", "HEAD"]);
       await hooks.afterBase?.(worktreeOf(options.cwd));
@@ -439,7 +480,16 @@ test("an unreadable lock during release is reported and left in place", async ()
     if (argv[1] !== "pr" || argv[2] !== "list") return undefined;
     await rm(lock);
     await mkdir(lock);
-    return { code: 0, stdout: JSON.stringify([{ url: "https://example.test/pull/3" }]) };
+    return {
+      code: 0,
+      stdout: JSON.stringify([
+        {
+          url: "https://example.test/pull/3",
+          headRepository: { name: "omo-linear-workflow" },
+          headRepositoryOwner: { login: "thisisjun786" },
+        },
+      ]),
+    };
   });
   fake.pushed.set(branch, "def456");
 
@@ -503,18 +553,65 @@ test("an owned worktree that cannot be removed or pruned yields cleanup_incomple
   expect(await exists(join(root, ".omo/state/update.lock"))).toBe(false);
 });
 
+test("a named GitHub remote scopes lookup, creation and head verification to its repository", async () => {
+  const root = await prepareFixture();
+  const fake = fakeRunner((argv) => {
+    if (argv.join(" ") === "git remote get-url fork")
+      return { code: 0, stdout: "git@github.com:contributor/project.git\n" };
+    if (argv[1] === "pr" && argv[2] === "view")
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          url: "https://example.test/pull/7",
+          headRepository: { name: "project" },
+          headRepositoryOwner: { login: "contributor" },
+        }),
+      };
+    return undefined;
+  });
+
+  const result = await prepareUpdate(root, { run: fake.run, remote: "fork", ghBin: "gh-shim" });
+
+  expect(result.ok && result.value.action).toBe("opened");
+  const list = fake.calls.find((call) => call.argv[2] === "list")?.argv ?? [];
+  expect(list).toContain("-R");
+  expect(list[list.indexOf("-R") + 1]).toBe("contributor/project");
+  const create = prCreate(fake.calls) ?? [];
+  expect(create[create.indexOf("-R") + 1]).toBe("contributor/project");
+  expect(create[create.indexOf("--head") + 1]).toBe(`contributor:${branch}`);
+  const view = fake.calls.find((call) => call.argv[2] === "view")?.argv ?? [];
+  expect(view[view.indexOf("-R") + 1]).toBe("contributor/project");
+});
+
+test("a non-GitHub remote fails before push", async () => {
+  const root = await prepareFixture();
+  const fake = fakeRunner((argv) =>
+    argv.join(" ") === "git remote get-url mirror"
+      ? { code: 0, stdout: "ssh://git@gitlab.example.com/owner/project.git\n" }
+      : undefined,
+  );
+
+  const result = await prepareUpdate(root, { run: fake.run, remote: "mirror" });
+
+  expect(result).toMatchObject({ ok: false, error: { code: "unsupported_remote" } });
+  expect(ran(fake.calls, "git push")).toBe(false);
+  expect(fake.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+});
+
 test("custom remote and gh binary are used", async () => {
   const root = await prepareFixture();
   const fake = fakeRunner();
   const result = await prepareUpdate(root, {
     run: fake.run,
-    remote: "/tmp/bare.git",
+    remote: "https://github.com/contributor/project.git",
     ghBin: "/tmp/gh-shim",
   });
   expect(result.ok && result.value.pr).toBe("https://example.test/pull/7");
   const argv = fake.calls.map((call) => call.argv.join(" "));
-  expect(argv).toContain("git fetch /tmp/bare.git dev");
-  expect(argv).toContain(`git push /tmp/bare.git HEAD:refs/heads/${branch}`);
+  expect(argv).toContain("git fetch https://github.com/contributor/project.git dev");
+  expect(argv).toContain(
+    `git push https://github.com/contributor/project.git HEAD:refs/heads/${branch}`,
+  );
   expect(prCreate(fake.calls)?.[0]).toBe("/tmp/gh-shim");
 });
 

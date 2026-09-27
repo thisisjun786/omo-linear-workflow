@@ -57,7 +57,12 @@ const manifestSchema = z.object({
   dependencies: z.record(z.string(), z.string()),
   pnpm: z.object({ patchedDependencies: z.record(z.string(), z.string()).optional() }).optional(),
 });
-const prListSchema = z.array(z.object({ url: z.string() }));
+const prSchema = z.object({
+  url: z.string(),
+  headRepository: z.object({ name: z.string() }),
+  headRepositoryOwner: z.object({ login: z.string() }),
+});
+const prListSchema = z.array(prSchema);
 const stepSchema = z.object({
   name: z.string(),
   command: z.string(),
@@ -155,6 +160,19 @@ async function exists(path: string): Promise<boolean> {
 function inside(parent: string, path: string): boolean {
   const rel = relative(parent, path);
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+function githubRepository(remote: string): { owner: string; repo: string } | null {
+  const scp = /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/.exec(remote);
+  if (scp) return { owner: scp[1] ?? "", repo: scp[2] ?? "" };
+  try {
+    const url = new URL(remote);
+    if (url.hostname.toLowerCase() !== "github.com") return null;
+    const parts = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "").split("/");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+    return { owner: parts[0], repo: parts[1] };
+  } catch {
+    return null;
+  }
 }
 function tail(text: string, lines = 30, chars = 3000): string {
   const kept = text.trimEnd().split("\n").slice(-lines).join("\n");
@@ -449,6 +467,41 @@ export async function prepareUpdate(
     }
     return { steps: results, failedPatches: failedPatchesOf(installOutput) };
   };
+  const selectedRemoteUrl =
+    githubRepository(remote) !== null
+      ? remote
+      : (await exec(["git", "remote", "get-url", remote], resolvedRoot)).stdout.trim();
+  const repository = githubRepository(selectedRemoteUrl);
+  if (repository === null) {
+    const unsupported = fail<PrepareResult>(
+      "unsupported_remote",
+      "Selected remote is not a GitHub repository",
+      { remote, url: selectedRemoteUrl },
+    );
+    await lock.value.release();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    return unsupported;
+  }
+  const repositoryName = `${repository.owner}/${repository.repo}`;
+  const verifyPrHead = async (url: string): Promise<Result<undefined>> => {
+    const viewed = await exec(
+      [gh, "pr", "view", url, "-R", repositoryName, "--json", "headRepository,headRepositoryOwner,url"],
+      resolvedRoot,
+    );
+    if (viewed.code !== 0)
+      return fail("runtime_unavailable", `${gh} pr view failed`, { stderr: tail(viewed.stderr) });
+    const pr = prSchema.parse(JSON.parse(viewed.stdout));
+    if (
+      pr.headRepositoryOwner.login.toLowerCase() !== repository.owner.toLowerCase() ||
+      pr.headRepository.name.toLowerCase() !== repository.repo.toLowerCase()
+    )
+      return fail("pr_head_mismatch", "Pull request head repository differs from pushed remote", {
+        expected: repositoryName,
+        actual: `${pr.headRepositoryOwner.login}/${pr.headRepository.name}`,
+      });
+    return { ok: true, value: undefined };
+  };
   const createPr = async (outcome: Outcome, action: "opened" | "recovered", note: string) => {
     const green = outcome.steps.every((step) => step.code === 0);
     const subject = `chore(deps): update omo-ai to ${omo} and senpi to ${senpi}`;
@@ -457,10 +510,12 @@ export async function prepareUpdate(
         gh,
         "pr",
         "create",
+        "-R",
+        repositoryName,
         "--base",
         "dev",
         "--head",
-        branch,
+        `${repository.owner}:${branch}`,
         "--title",
         subject,
         "--body",
@@ -475,12 +530,15 @@ export async function prepareUpdate(
         `${gh} pr create failed after pushing ${branch}; rerun olw update prepare to retry`,
         { branch, stderr: tail(created.stderr) },
       );
+    const pr = created.stdout.trim().split("\n").at(-1) ?? "";
+    const verified = await verifyPrHead(pr);
+    if (!verified.ok) return verified;
     return {
       ok: true as const,
       value: {
         action,
         branch,
-        pr: created.stdout.trim().split("\n").at(-1) ?? null,
+        pr: pr || null,
         draft: !green,
         versions,
         steps: outcome.steps,
@@ -509,17 +567,37 @@ export async function prepareUpdate(
         stderr: tail(remoteRef.stderr),
       });
     const listed = await exec(
-      [gh, "pr", "list", "--head", branch, "--state", "open", "--json", "url"],
+      [
+        gh,
+        "pr",
+        "list",
+        "-R",
+        repositoryName,
+        "--head",
+        `${repository.owner}:${branch}`,
+        "--state",
+        "open",
+        "--json",
+        "url,headRepository,headRepositoryOwner",
+      ],
       resolvedRoot,
     );
     if (listed.code !== 0)
       return fail("runtime_unavailable", `${gh} pr list failed`, { stderr: tail(listed.stderr) });
     const open = prListSchema.parse(JSON.parse(listed.stdout || "[]"));
-    if (open.length > 0)
+    if (open.length > 0) {
+      const candidate = open[0];
+      if (
+        candidate === undefined ||
+        candidate.headRepositoryOwner.login.toLowerCase() !== repository.owner.toLowerCase() ||
+        candidate.headRepository.name.toLowerCase() !== repository.repo.toLowerCase()
+      )
+        return fail("pr_head_mismatch", "Pull request head repository differs from pushed remote");
       return {
         ok: true,
-        value: { action: "exists", branch, pr: open[0]?.url ?? null, versions, log: logPath },
+        value: { action: "exists", branch, pr: candidate.url, versions, log: logPath },
       };
+    }
 
     const pushedHead = remoteRef.stdout.trim().split(/\s+/)[0];
     if (pushedHead) {

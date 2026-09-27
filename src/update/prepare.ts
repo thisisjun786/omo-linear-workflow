@@ -47,7 +47,10 @@ const SENPI = "@code-yeongyu/senpi";
 const versionPattern =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const checkSchema = z.object({
-  packages: z.record(z.string(), z.object({ state: z.string(), available: z.string().nullable() })),
+  packages: z.record(
+    z.string(),
+    z.object({ state: z.string(), pinned: z.string(), available: z.string().nullable() }),
+  ),
 });
 const lockSchema = z.object({ pid: z.number().int(), token: z.string() });
 const manifestSchema = z.object({
@@ -120,6 +123,20 @@ function errorCode(cause: unknown): unknown {
 }
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+function versionOrder(a: string, b: string): number | null {
+  if (!versionPattern.test(a) || !versionPattern.test(b)) return null;
+  try {
+    return Bun.semver.order(a, b);
+  } catch {
+    return null;
+  }
+}
+function checkedPinMatches(name: string, checked: string, current: string): boolean {
+  if (checked === current) return true;
+  // Early OMO beta receipts used npm's display alias before the manifest moved to the exact
+  // prerelease identifier. Preserve those already-issued receipts; all current checks are exact.
+  return name === OMO && checked.replace("-beta.", "-0.beta.") === current;
 }
 function fail<T>(code: string, message: string, details?: unknown): Result<T> {
   return details === undefined
@@ -274,6 +291,7 @@ export async function prepareUpdate(
 ): Promise<Result<PrepareResult>> {
   const run = options.run ?? spawnRunner;
   const remote = options.remote ?? "origin";
+  if (remote.startsWith("-")) return fail("invalid_input", "Git remote must not start with '-'");
   const gh = options.ghBin ?? process.env["OLW_GH_BIN"] ?? "gh";
   const now = options.now ?? (() => new Date().toISOString());
   const resolvedRoot = resolve(root);
@@ -290,6 +308,21 @@ export async function prepareUpdate(
     );
   } catch (cause) {
     return fail("update_check_missing", `Run olw update check first: ${messageOf(cause)}`);
+  }
+  for (const name of [OMO, SENPI] as const) {
+    const item = check.packages[name];
+    const current = pins.dependencies[name];
+    if (item === undefined || current === undefined)
+      return fail(
+        "update_check_missing",
+        "package.json and the update check must include both pins",
+      );
+    if (!checkedPinMatches(name, item.pinned, current))
+      return fail(
+        "update_check_stale",
+        `The update check is stale for ${name}; rerun olw update check`,
+        { package: name, checked: item.pinned, current },
+      );
   }
   const target = (name: string) => {
     const item = check.packages[name];
@@ -312,6 +345,16 @@ export async function prepareUpdate(
       );
   const versions = { omo, senpi };
   const from = { omo: pins.dependencies[OMO] ?? "", senpi: pins.dependencies[SENPI] ?? "" };
+  for (const [name, current, selected] of [
+    [OMO, from.omo, omo],
+    [SENPI, from.senpi, senpi],
+  ] as const) {
+    if (selected !== current && versionOrder(selected, current) !== 1)
+      return fail(
+        "update_not_newer",
+        `Refusing to replace ${name} ${current} with non-newer version ${selected}`,
+      );
+  }
   if (omo === from.omo && senpi === from.senpi)
     return { ok: true, value: { action: "up_to_date", branch: null, pr: null, versions } };
   const branch = `olw/update-omo-${omo}-senpi-${senpi}`;

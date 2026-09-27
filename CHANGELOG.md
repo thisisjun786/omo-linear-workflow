@@ -16,6 +16,7 @@ published.
 ### Fixed
 
 - Reject here-mode entry on a different server from the saved manager without changing its binding; report both sockets and the original-server/close recovery options.
+- Honor interruption during existing-manager host, snapshot and verification checks instead of focusing afterward and reporting success.
 - Keep manager live ownership beyond lease expiry for both bare entry and plain `manage`, fence termination, and handle interruption from before reservation, including rejected pre-launch operations; safely recover abandoned unstarted claims.
 - Retain the manager's original OLW-owned workspace across moves to user panes and back, and remove that owned workspace exactly once at close.
 - Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.

@@ -792,6 +792,111 @@ test.each(["live", "exited"] as const)(
   },
 );
 
+test.each(["host", "snapshot", "verification"] as const)(
+  "SIGTERM during existing-manager %s returns 143 without focus or launching a child",
+  async (phase) => {
+    const w = await world();
+    const manager = value(await w.orchestrator.manage()).binding;
+    if (phase === "verification") {
+      const pending = w.readRegistry((r) =>
+        value(r.beginReattach(manager.id, manager.paneId, w.hooks.now, "2020-01-01")),
+      );
+      if (!pending.claimed) throw new Error("Missing fixture reattachment claim");
+      w.readRegistry((r) => value(r.releaseReattach(manager.id, pending.token)));
+    }
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = manager.paneId ?? "";
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => deadline.reject(new Error(`Interrupted ${phase} deadline`)),
+      2000,
+    );
+    const hold = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const snapshot = herdr.snapshot.bind(herdr);
+    let snapshots = 0;
+    herdr.snapshot = async () => {
+      snapshots++;
+      // First snapshot validates the caller; the second inspects the existing manager.
+      if (phase === "snapshot" && snapshots === 2) await hold();
+      return snapshot();
+    };
+    if (phase === "verification") w.hooks.beforeAttach = hold;
+    let launches = 0;
+    const deps: OrchestratorDependencies = {
+      ...w.deps,
+      ...(phase === "host" ? { checkHostProfile: hold } : {}),
+      launchHere: () => {
+        launches++;
+        throw new Error("Focus-only entry launched a child");
+      },
+    };
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    const entry = runCli(["--root", w.root], deps);
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      process.kill(process.pid, "SIGTERM");
+      expect(await Promise.race([entry, deadline.promise])).toBe(143);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: { code: "manager_interrupted", details: { exitCode: 143 } },
+      });
+      expect(w.focused).toEqual([]);
+      expect(launches).toBe(0);
+      expect(w.runs).toHaveLength(1);
+      expect(w.readRegistry((r) => value(r.get(manager.id)))).toEqual(manager);
+      release.resolve();
+      w.hooks.beforeAttach = undefined;
+      herdr.snapshot = snapshot;
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("focused");
+    } finally {
+      clearTimeout(timer);
+      release.resolve();
+      await entry;
+      herdr.snapshot = snapshot;
+      w.hooks.beforeAttach = undefined;
+      stdout.mockRestore();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test("focus completion cannot report success after SIGTERM", async () => {
+  const w = await world();
+  const manager = value(await w.orchestrator.manage()).binding;
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = manager.paneId ?? "";
+  const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+  const focus = herdr.focusPane;
+  herdr.focusPane = async () => {
+    process.emit("SIGTERM", "SIGTERM");
+  };
+  const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+  try {
+    expect(await runCli(["--root", w.root], w.deps)).toBe(143);
+  } finally {
+    herdr.focusPane = focus;
+    stdout.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("here entry rejects a pane whose terminal does not contain the caller process", async () => {
   const w = await world();
   const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };

@@ -788,6 +788,7 @@ export class Orchestrator {
     const stop = here === undefined ? () => {} : this.#watchManagerSignals(here);
     try {
       const result = await this.#manage(here);
+      if (result.ok && here?.failure !== undefined) throw here.failure;
       if (
         !result.ok &&
         result.error.code !== "manager_interrupted" &&
@@ -1003,13 +1004,15 @@ export class Orchestrator {
         `The recorded manager is ${binding.launchState}; ${closeInstruction}`,
         { bindingId: binding.id },
       );
-    const host = await this.#checkHostProtocol(binding);
+    const host = await this.#whileForeground(this.#checkHostProtocol(binding), here);
+    if (here?.failure !== undefined) throw here.failure;
     if (host !== undefined) return host;
     const workspaceId = binding.workspaceId;
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     let token: string | undefined;
     try {
-      const snapshot = await herdr.snapshot();
+      const snapshot = await this.#whileForeground(herdr.snapshot(), here);
+      if (here?.failure !== undefined) throw here.failure;
       const workspace = snapshot.workspaces.find(
         (candidate) => candidate.workspaceId === workspaceId,
       );
@@ -1031,8 +1034,11 @@ export class Orchestrator {
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
-        if (here !== undefined && binding.paneId !== null) await herdr.focusPane(binding.paneId);
+        if (here?.failure !== undefined) throw here.failure;
+        if (here !== undefined && binding.paneId !== null)
+          await this.#whileForeground(herdr.focusPane(binding.paneId), here);
         else await herdr.focusWorkspace(workspaceId);
+        if (here?.failure !== undefined) throw here.failure;
         return ok({
           action: "focused",
           binding,
@@ -1099,15 +1105,19 @@ export class Orchestrator {
         this.#withRegistry((registry) => registry.finishReattach(binding.id, owner));
       if (tuiRunning) {
         // An interrupted attempt's TUI did come up in the recorded pane; adopt it, launch nothing.
-        const verified = await this.#verifyManagerSession(binding);
+        const verified = await this.#whileForeground(this.#verifyManagerSession(binding), here);
+        if (here?.failure !== undefined) throw here.failure;
         if (!verified.ok) return verified;
         const finished = finish();
         if (!finished.ok) return finished;
         token = undefined;
         if (!finished.value) return leaseLost();
         if (here !== undefined) here.settled = true;
-        if (here !== undefined && binding.paneId !== null) await herdr.focusPane(binding.paneId);
+        if (here?.failure !== undefined) throw here.failure;
+        if (here !== undefined && binding.paneId !== null)
+          await this.#whileForeground(herdr.focusPane(binding.paneId), here);
         else await herdr.focusWorkspace(workspaceId);
+        if (here?.failure !== undefined) throw here.failure;
         return ok({
           action: "focused",
           binding,
@@ -1169,13 +1179,16 @@ export class Orchestrator {
         readiness.close();
       }
       const verified = await this.#whileForeground(this.#verifyManagerSession(moved.value), here);
+      if (here?.failure !== undefined) throw here.failure;
       if (!verified.ok) return verified;
       const finished = finish();
       if (!finished.ok) return finished;
       token = undefined;
       if (!finished.value) return leaseLost();
       if (here !== undefined) here.settled = true;
+      if (here?.failure !== undefined) throw here.failure;
       if (here === undefined) await herdr.focusWorkspace(workspaceId);
+      if (here?.failure !== undefined) throw here.failure;
       return ok({
         action: "reattached",
         binding: moved.value,

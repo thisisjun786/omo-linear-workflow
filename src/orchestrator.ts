@@ -313,6 +313,7 @@ export interface OrchestratorDependencies {
   readonly verifyHostAfterHandoff?: (root: string, status: HostStatus) => Promise<void>;
   readonly withHostHandoffLock?: <T>(path: string, operation: () => Promise<T>) => Promise<T>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
+  readonly republishHerdrState?: (binding: Binding) => Promise<void>;
   readonly launchHere?: (
     argv: readonly string[],
     cwd: string,
@@ -545,6 +546,26 @@ async function defaultTerminateBinding(binding: Binding): Promise<void> {
   }
 }
 
+async function republishHerdrState(binding: Binding): Promise<void> {
+  if (binding.sessionPath === null) return;
+  const client = new RpcClient({ socketPath: binding.omoSocket });
+  await client.start();
+  try {
+    const opened = await client.openSession({
+      sessionPath: binding.sessionPath,
+      cwd: binding.cwd,
+      retain_on_disconnect: false,
+    });
+    if (opened.attached !== true)
+      throw new Error("Could not attach retained manager session for Herdr republish");
+    await client.requestExtension("omo.initiative.herdr-republish", {
+      sessionId: binding.durableSessionId,
+    });
+  } finally {
+    await client.stop();
+  }
+}
+
 const defaults: OrchestratorDependencies = {
   openRegistry,
   createHerdrClient,
@@ -559,6 +580,7 @@ const defaults: OrchestratorDependencies = {
   verifyHostAfterHandoff,
   withHostHandoffLock,
   prompt: defaultPrompt,
+  republishHerdrState,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
   uuid: () => crypto.randomUUID(),
@@ -1266,6 +1288,7 @@ export class Orchestrator {
       token = undefined;
       if (!finished.value) return leaseLost();
       if (here !== undefined) here.settled = true;
+      await this.#deps.republishHerdrState?.(moved.value);
       if (here?.failure !== undefined) throw here.failure;
       if (here === undefined) await herdr.focusWorkspace(workspaceId);
       if (here?.failure !== undefined) throw here.failure;

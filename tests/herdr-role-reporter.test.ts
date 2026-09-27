@@ -18,6 +18,7 @@ class Harness implements RoleHerdrReporterPort {
   wakeSource?: Parameters<RoleHerdrReporterPort["onWakeSource"]>[0];
   continuationHold?: Parameters<RoleHerdrReporterPort["onContinuationHold"]>[0];
   monitors?: Parameters<RoleHerdrReporterPort["onMonitors"]>[0];
+  republish?: Parameters<RoleHerdrReporterPort["onRepublish"]>[0];
 
   onSessionStart(handler: Parameters<RoleHerdrReporterPort["onSessionStart"]>[0]): void {
     this.sessionStart = handler;
@@ -45,6 +46,9 @@ class Harness implements RoleHerdrReporterPort {
   }
   onMonitors(handler: Parameters<RoleHerdrReporterPort["onMonitors"]>[0]): void {
     this.monitors = handler;
+  }
+  onRepublish(handler: Parameters<RoleHerdrReporterPort["onRepublish"]>[0]): void {
+    this.republish = handler;
   }
 }
 
@@ -182,6 +186,59 @@ describe("OLW role Herdr reporter", () => {
     expect(sent.at(-1)?.method).toBe("pane.release_agent");
     expect(sent.filter((item) => item.method === "pane.report_agent")).toHaveLength(0);
   });
+  test("republishes retained blocked state to a reattached pane on request", async () => {
+    const f = fixture();
+    const ctx = session();
+    f.harness.sessionStart?.("new", ctx);
+    await f.nextReport();
+    await f.nextReport();
+    f.harness.continuationHold?.({ source: "olw-question", active: true });
+    await f.nextReport();
+    f.setBinding(role({ paneId: "pane-new" }));
+    f.harness.republish?.("session-parent");
+    await f.nextReport();
+    await f.nextReport();
+    expect(f.sent.slice(-2).map((item) => [item.pane, item.method, item.params["state"]])).toEqual([
+      ["pane-new", "pane.report_agent_session", undefined],
+      ["pane-new", "pane.report_agent", "blocked"],
+    ]);
+  });
+
+  test("retries only the latest failed state with bounded backoff", async () => {
+    const harness = new Harness();
+    const sent: string[] = [];
+    let failures = 2;
+    const scheduled: Array<() => void> = [];
+    const control = registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => role(),
+      createClient: () => ({
+        send: async (method, params) => {
+          if (method !== "pane.report_agent") return;
+          sent.push(String(params["state"]));
+          if (failures-- > 0) throw new Error("offline");
+        },
+      }),
+      debug: () => undefined,
+      scheduleRetry: (callback) => {
+        scheduled.push(callback);
+        return () => undefined;
+      },
+    });
+    const ctx = session();
+    harness.sessionStart?.("new", ctx);
+    await control.drained();
+    harness.agentStart?.(ctx);
+    harness.agentSettled?.(ctx);
+    expect(scheduled).toHaveLength(1);
+    scheduled.shift()?.();
+    await control.drained();
+    expect(scheduled).toHaveLength(1);
+    scheduled.shift()?.();
+    await control.drained();
+    expect(sent).toEqual(["idle", "idle", "idle"]);
+  });
+
   test("reports a bound RPC role turn to its recorded pane", async () => {
     const f = fixture();
     const ctx = session();

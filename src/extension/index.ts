@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { debuglog } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@code-yeongyu/senpi";
+import { z } from "zod";
 import {
   isContinuationHoldStateEvent,
   isTerminalMonitorStateEvent,
@@ -72,6 +73,13 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
       onMonitors: (handler) => {
         pi.events.on("terminal_monitor_state", (data) => {
           if (isTerminalMonitorStateEvent(data)) handler(data);
+        });
+      },
+      onRepublish: (handler) => {
+        pi.rpc.handle("omo.initiative.herdr-republish", (data) => {
+          const parsed = z.object({ sessionId: z.string().min(1) }).parse(data);
+          handler(parsed.sessionId);
+          return { ok: true };
         });
       },
     },

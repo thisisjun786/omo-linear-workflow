@@ -27,6 +27,7 @@ export interface RoleHerdrReporterPort {
   onWakeSource(handler: (event: WakeSourceEvent) => void): void;
   onContinuationHold(handler: (event: ContinuationHoldEvent) => void): void;
   onMonitors(handler: (event: MonitorEvent) => void): void;
+  onRepublish(handler: (sessionId: string) => void): void;
 }
 interface BlockedEvent {
   readonly active: boolean;
@@ -49,6 +50,7 @@ export interface RoleHerdrReporterDependencies {
   lookupBinding(sessionId: string): Binding | undefined;
   createClient(socketPath: string, paneId: string): RoleHerdrClient;
   debug(message: string): void;
+  scheduleRetry?(callback: () => void, delayMs: number): () => void;
 }
 interface Target {
   readonly socket: string;
@@ -68,6 +70,8 @@ interface Reporter {
   draining: Promise<void> | undefined;
   stopped: boolean;
   sessionSource: string;
+  retryCount: number;
+  cancelRetry: (() => void) | undefined;
 }
 export interface RoleHerdrReporterControl {
   drained(): Promise<void>;
@@ -206,13 +210,36 @@ export function registerRoleHerdrReporter(
         ...next,
       });
       reporter.lastReport = key;
+      reporter.retryCount = 0;
     }
+  }
+  const scheduleRetry =
+    dependencies.scheduleRetry ??
+    ((callback: () => void, delayMs: number) => {
+      const timer = setTimeout(callback, delayMs);
+      timer.unref();
+      return () => clearTimeout(timer);
+    });
+  function retry(reporter: Reporter): void {
+    if (reporter.stopped || reporter.releasePending || reporter.retryCount >= 3) return;
+    reporter.retryCount += 1;
+    reporter.cancelRetry?.();
+    reporter.cancelRetry = scheduleRetry(
+      () => {
+        reporter.cancelRetry = undefined;
+        if (binding(reporter) === undefined || reporter.stopped || reporter.releasePending) return;
+        reporter.statePending = true;
+        startDrain(reporter);
+      },
+      100 * 2 ** (reporter.retryCount - 1),
+    );
   }
   function startDrain(reporter: Reporter): void {
     if (reporter.draining !== undefined) return;
     reporter.draining = drain(reporter)
       .catch((cause: unknown) => {
         dependencies.debug(cause instanceof Error ? cause.message : "Herdr transport failed");
+        retry(reporter);
       })
       .finally(() => {
         reporter.draining = undefined;
@@ -221,6 +248,9 @@ export function registerRoleHerdrReporter(
   }
   function publish(reporter: Reporter): void {
     if (reporter.stopped || reporter.releasePending) return;
+    reporter.cancelRetry?.();
+    reporter.cancelRetry = undefined;
+    reporter.retryCount = 0;
     reporter.statePending = true;
     startDrain(reporter);
   }
@@ -242,6 +272,8 @@ export function registerRoleHerdrReporter(
       draining: undefined,
       stopped: false,
       sessionSource: reason,
+      retryCount: 0,
+      cancelRetry: undefined,
     };
     reporters.set(sessionId, reporter);
     currentSessionId = sessionId;
@@ -298,10 +330,19 @@ export function registerRoleHerdrReporter(
     reporter.monitorCount = event.activeCount;
     publish(reporter);
   });
+  port.onRepublish((sessionId) => {
+    const reporter = reporters.get(sessionId);
+    if (reporter === undefined) return;
+    reporter.target = undefined;
+    reporter.lastReport = undefined;
+    publish(reporter);
+  });
   port.onSessionShutdown((reason, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const reporter = reporters.get(sessionId);
     if (reporter === undefined) return;
+    reporter.cancelRetry?.();
+    reporter.cancelRetry = undefined;
     if (reason === "quit") {
       reporter.releasePending = true;
       reporter.statePending = false;

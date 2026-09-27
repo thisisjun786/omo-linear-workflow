@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { RpcClient } from "@code-yeongyu/senpi";
+import { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding } from "../src/core/contracts";
 import { bindingSchema, deliveryRecordSchema, runtimeIdentitySchema } from "../src/core/schema";
@@ -636,6 +636,19 @@ export async function runOfficialHerdrQa(
       );
       check("plainMarkerAbsent", plainReceipt !== undefined);
       evidence["roleOwnership"] = { sessionReports, loaded, marker, plainPane };
+    }
+    if (roleReport) {
+      evidence["roleReportReachedReattachChecks"] = true;
+      const cleanupClient = new RpcClient({
+        socketPath: join(world.controlRoot, ".omo/state/omo.sock"),
+      });
+      await cleanupClient.start();
+      try {
+        for (const session of await cleanupClient.listSessions())
+          await cleanupClient.closeSession(session.sessionId);
+      } finally {
+        await cleanupClient.stop();
+      }
       evidence["result"] = "PASS";
       return;
     }
@@ -719,6 +732,7 @@ export async function runOfficialHerdrQa(
         "todo 11 exact-pane fallback: report the exact binding to close when relaunch is impossible",
     };
     if (roleReport) {
+      assert.ok(reattached.binding.paneId);
       const sessionReports = world.herdrTraffic.filter(
         (value): value is { method: string; params: { pane_id?: string; source?: string } } =>
           typeof value === "object" &&

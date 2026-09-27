@@ -90,6 +90,32 @@ describe("launch models by role and child stage", () => {
     }
   });
 
+  test("manager prefers the remembered level for its model over the default level", async () => {
+    const root = await mkdtemp(join(tmpdir(), "olw-manager-remembered-"));
+    roots.push(root);
+    const path = join(root, "settings.json");
+    await Bun.write(
+      path,
+      JSON.stringify({
+        defaultProvider: "fixture-native-provider",
+        defaultModel: "fixture-native-model",
+        defaultThinkingLevel: "low",
+        modelThinkingLevels: {
+          "fixture-native-provider/other-model": "max",
+          "fixture-native-provider/fixture-native-model": "high",
+        },
+      }),
+    );
+    expect(resolveManagerModel(path)).toEqual({
+      model: {
+        provider: "fixture-native-provider",
+        modelId: "fixture-native-model",
+        thinking: "high",
+      },
+      source: "settings",
+    });
+  });
+
   test("manager accepts settings written and parsed by pinned Senpi", async () => {
     const root = await mkdtemp(join(tmpdir(), "olw-manager-native-settings-"));
     roots.push(root);

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, realpath, rename, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import { z } from "zod";
 
@@ -33,6 +34,48 @@ const hostStatusSchema = z.object({
   env_keys: z.array(z.string()).default([]),
 });
 export type HostStatus = z.infer<typeof hostStatusSchema>;
+
+const observedSessionsSchema = z.object({ sessions: z.array(z.unknown()) });
+const HOST_STATUS_TIMEOUT_MS = 15_000;
+const HOST_HANDOFF_TIMEOUT_MS = 45_000;
+
+interface HostCommandProcess {
+  readonly exited: Promise<number>;
+  readonly stdout: ReadableStream<Uint8Array> | null;
+  readonly stderr: ReadableStream<Uint8Array> | null;
+  kill(signal?: NodeJS.Signals): void;
+}
+
+export class HostCommandTimeoutError extends Error {
+  public override readonly name = "HostCommandTimeoutError";
+  public constructor(
+    public readonly operation: "status" | "handoff",
+    public readonly timeoutMs: number,
+  ) {
+    super(`Native host ${operation} timed out after ${timeoutMs}ms`);
+  }
+}
+
+export class HostSessionObservationError extends Error {
+  public override readonly name = "HostSessionObservationError";
+  public constructor(message = "Native host session list could not be read") {
+    super(message);
+  }
+}
+
+export class HostSessionsPresentError extends Error {
+  public override readonly name = "HostSessionsPresentError";
+  public constructor(public readonly count: number) {
+    super(`Native host session list is not empty (${count})`);
+  }
+}
+
+export class HostPostHandoffVerificationError extends Error {
+  public override readonly name = "HostPostHandoffVerificationError";
+  public constructor(message: string) {
+    super(message);
+  }
+}
 
 function runtimeNamespace(entry: string): string {
   return createHash("sha256").update(entry).digest("hex").slice(0, 16);
@@ -84,12 +127,46 @@ export async function assertHostProtocol(
   await createHostProfile(root, await readHostStatus(root, socket, env));
 }
 
+export async function runBoundedHostCommand(
+  argv: readonly string[],
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>>,
+  timeoutMs: number,
+  spawn: () => HostCommandProcess = () =>
+    Bun.spawn([...argv], { cwd, env, stdout: "pipe", stderr: "pipe" }),
+  operation: "status" | "handoff" = "handoff",
+): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
+  const child = spawn();
+  const output = Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new HostCommandTimeoutError(operation, timeoutMs));
+      child.kill("SIGKILL");
+    }, timeoutMs);
+  });
+  try {
+    const code = await Promise.race([child.exited, timeout]);
+    const [stdout, stderr] = await output;
+    return { code, stdout, stderr };
+  } catch (cause) {
+    if (cause instanceof HostCommandTimeoutError) await child.exited;
+    await output;
+    throw cause;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function readHostStatus(
   root: string,
   socket: string,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<HostStatus> {
-  const child = Bun.spawn(
+  const result = await runBoundedHostCommand(
     [
       join(root, "node_modules/.bin/omo"),
       "host",
@@ -98,16 +175,65 @@ export async function readHostStatus(
       socket,
       "--include-workers",
     ],
-    { cwd: root, env, stdout: "pipe", stderr: "pipe" },
+    root,
+    env,
+    HOST_STATUS_TIMEOUT_MS,
+    undefined,
+    "status",
   );
-  const [code, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  if (code !== 0 && code !== 3)
-    throw new Error(`Native host status failed (${code}): ${stderr.trim()}`);
-  return hostStatusSchema.parse(JSON.parse(stdout));
+  if (result.code !== 0 && result.code !== 3)
+    throw new Error(`Native host status failed (${result.code}): ${result.stderr.trim()}`);
+  return hostStatusSchema.parse(JSON.parse(result.stdout));
+}
+
+async function requestSessionList(socketPath: string, timeoutMs: number): Promise<unknown> {
+  const id = `olw-session-proof-${crypto.randomUUID()}`;
+  return new Promise((resolve) => {
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    let settled = false;
+    const finish = (value?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(value);
+    };
+    const timeout = setTimeout(() => finish(), timeoutMs);
+    socket.once("connect", () =>
+      socket.write(`${JSON.stringify({ id, type: "list_sessions", include_workers: true })}\n`),
+    );
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try {
+          const reply = z
+            .object({ id: z.literal(id), success: z.literal(true), data: z.unknown() })
+            .safeParse(JSON.parse(line));
+          if (reply.success) return finish(reply.data.data);
+        } catch {
+          // Ignore unrelated lifecycle records and malformed lines until the bounded deadline.
+        }
+      }
+    });
+    socket.once("error", () => finish());
+    socket.once("close", () => finish());
+  });
+}
+
+export async function observeEmptyHostSessions(
+  socket: string,
+  timeoutMs = HOST_STATUS_TIMEOUT_MS,
+  request: (socket: string, timeoutMs: number) => Promise<unknown> = requestSessionList,
+): Promise<void> {
+  const parsed = observedSessionsSchema.safeParse(await request(socket, timeoutMs));
+  if (!parsed.success) throw new HostSessionObservationError();
+  if (parsed.data.sessions.length !== 0)
+    throw new HostSessionsPresentError(parsed.data.sessions.length);
 }
 
 function isContained(root: string, candidate: string): boolean {
@@ -119,19 +245,28 @@ export async function handoffHost(
   root: string,
   recovery: HostProfileMismatchError["details"]["recovery"],
 ): Promise<void> {
-  const child = Bun.spawn([...recovery.argv], {
-    cwd: root,
-    env: { ...process.env, ...recovery.env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [code, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  if (code !== 0)
-    throw new Error(`Native host handoff failed (${code}): ${stderr.trim() || stdout.trim()}`);
+  const result = await runBoundedHostCommand(
+    recovery.argv,
+    root,
+    { ...process.env, ...recovery.env },
+    HOST_HANDOFF_TIMEOUT_MS,
+    undefined,
+    "handoff",
+  );
+  if (result.code !== 0)
+    throw new Error(
+      `Native host handoff failed (${result.code}): ${result.stderr.trim() || result.stdout.trim()}`,
+    );
+}
+
+export async function verifyHostAfterHandoff(root: string, status: HostStatus): Promise<void> {
+  if (!status.reachable)
+    throw new HostPostHandoffVerificationError("Successor host is not reachable after handoff");
+  if (status.launchProfile === null)
+    throw new HostPostHandoffVerificationError(
+      "Successor host has no launch profile after handoff",
+    );
+  await createHostProfile(root, status);
 }
 
 export async function createHostProfile(rootInput: string, status?: HostStatus): Promise<string> {

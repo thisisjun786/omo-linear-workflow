@@ -62,6 +62,7 @@ async function world(agent = "omo") {
     failRun: boolean;
     hostCheck: (() => void) | undefined;
     hostStatus: OrchestratorDependencies["readHostStatus"];
+    hostSessions: OrchestratorDependencies["observeEmptyHostSessions"];
     hostHandoffs: number;
     now: string;
     /** Awaited at createTab entry, before any tab exists. */
@@ -75,6 +76,7 @@ async function world(agent = "omo") {
     failRun: false,
     hostCheck: undefined,
     hostStatus: undefined,
+    hostSessions: async () => {},
     hostHandoffs: 0,
     now: "2026-09-26T00:00:00.000Z",
     beforeTab: undefined,
@@ -204,9 +206,17 @@ async function world(agent = "omo") {
       if (hooks.hostStatus === undefined) throw new Error("injected unreadable host status");
       return hooks.hostStatus(...args);
     },
+    observeEmptyHostSessions: async (...args) => {
+      if (hooks.hostSessions === undefined) throw new Error("injected unreadable session list");
+      return hooks.hostSessions(...args);
+    },
     handoffHost: async () => {
       hooks.hostHandoffs += 1;
       hooks.hostCheck = undefined;
+    },
+    verifyHostAfterHandoff: async (_root, status) => {
+      if (!status.reachable || status.launchProfile === null)
+        throw new Error("injected successor profile unavailable");
     },
     gitTip: (cwd, ref) => fixtureTip(root, "base-commit", cwd, ref),
     now: () => hooks.now,
@@ -1832,7 +1842,7 @@ test.each(["sessions", "unreadable"] as const)(
       expect(w.hooks.hostHandoffs).toBe(0);
       const human = String(output.mock.calls.at(-1)?.[0]);
       expect(() => JSON.parse(human)).toThrow();
-      expect(human).toContain(condition === "sessions" ? "1 session" : "could not be read");
+      expect(human).toContain("1 session");
       expect(human).toContain("/fixture/omo host handoff --socket /fixture/socket");
       output.mockClear();
       expect(await runCli(["--root", w.root, "manage", "--json"], w.deps)).toBe(3);
@@ -1853,6 +1863,69 @@ test.each(["sessions", "unreadable"] as const)(
     }
   },
 );
+
+test("first manager entry preserves an unreadable session-list failure in TTY and JSON output", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  w.hooks.hostCheck = () => {
+    throw new HostProfileMismatchError({
+      missingExtensions: ["old-extension"],
+      missingCapabilities: [],
+      generation: 1,
+      sessions: {
+        total: 0,
+        interactive: 0,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
+      actualProfile: null,
+      recovery: { automatic: true, argv: ["omo", "host", "handoff"], env: {} },
+    });
+  };
+  w.hooks.hostStatus = async () => ({
+    reachable: true,
+    socket: "/fixture/socket",
+    generation: 1,
+    launchProfile: null,
+    sessions: {
+      total: 0,
+      interactive: 0,
+      worker: 0,
+      retained: 0,
+      foreign_attached: 0,
+      foreign_retained: 0,
+    },
+    env_keys: [],
+  });
+  w.hooks.hostSessions = undefined;
+  try {
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    expect(await runCli(["--root", w.root], w.deps)).toBe(3);
+    expect(String(output.mock.calls.at(-1)?.[0])).toContain("session status could not be read");
+    output.mockClear();
+    expect(await runCli(["--root", w.root, "--json"], w.deps)).toBe(3);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      error: { details: { recoveryPhase: "status_unreadable", statusError: expect.any(String) } },
+    });
+    expect(w.hooks.hostHandoffs).toBe(0);
+  } finally {
+    if (tty === undefined) delete (process.stdout as { isTTY?: boolean }).isTTY;
+    else Object.defineProperty(process.stdout, "isTTY", tty);
+    output.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("bare entry hands off an idle mismatched host once and continues", async () => {
   const w = await world();
@@ -1881,7 +1954,9 @@ test("bare entry hands off an idle mismatched host once and continues", async ()
     reachable: true,
     socket: join(w.root, ".omo/state/omo.sock"),
     generation: 1,
-    launchProfile: null,
+    launchProfile: {
+      core: { session_runtime: "in-process", multi_session: true, extensions: [] },
+    },
     sessions: {
       total: 0,
       interactive: 0,
@@ -1906,6 +1981,71 @@ test("bare entry hands off an idle mismatched host once and continues", async ()
     }
   }
 });
+
+test.each(["handoff_failed", "verification_failed"] as const)(
+  "manager entry reports the typed %s recovery phase after handoff admission",
+  async (failurePhase) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    let mismatched = true;
+    w.hooks.hostCheck = () => {
+      if (!mismatched) return;
+      throw new HostProfileMismatchError({
+        missingExtensions: ["old-extension"],
+        missingCapabilities: [],
+        generation: 1,
+        sessions: {
+          total: 0,
+          interactive: 0,
+          worker: 0,
+          retained: 0,
+          foreign_attached: 0,
+          foreign_retained: 0,
+        },
+        actualProfile: null,
+        recovery: { automatic: true, argv: ["omo", "host", "handoff"], env: {} },
+      });
+    };
+    w.hooks.hostStatus = async () => ({
+      reachable: failurePhase !== "verification_failed",
+      socket: "/fixture/socket",
+      generation: 1,
+      launchProfile:
+        failurePhase === "verification_failed"
+          ? null
+          : {
+              core: { session_runtime: "in-process", multi_session: true, extensions: [] },
+            },
+      sessions: {
+        total: 0,
+        interactive: 0,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
+      env_keys: [],
+    });
+    const orchestrator = new Orchestrator(w.root, "/fixture/herdr.sock", {
+      ...w.deps,
+      handoffHost: async () => {
+        w.hooks.hostHandoffs += 1;
+        if (failurePhase === "handoff_failed") throw new Error("injected handoff failure");
+        mismatched = false;
+      },
+    });
+    const result = await orchestrator.manage();
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "runtime_unavailable",
+        details: { recoveryPhase: failurePhase },
+      },
+    });
+    expect(w.hooks.hostHandoffs).toBe(1);
+    expect(value(w.orchestrator.status()).find((binding) => binding.id === first.id)).toBeDefined();
+  },
+);
 
 test("concurrent manage calls perform exactly one idle-host handoff", async () => {
   const w = await world();
@@ -1934,7 +2074,9 @@ test("concurrent manage calls perform exactly one idle-host handoff", async () =
     reachable: true,
     socket: "/fixture/socket",
     generation: 1,
-    launchProfile: null,
+    launchProfile: {
+      core: { session_runtime: "in-process", multi_session: true, extensions: [] },
+    },
     sessions: {
       total: 0,
       interactive: 0,

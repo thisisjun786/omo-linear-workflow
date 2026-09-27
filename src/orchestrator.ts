@@ -40,11 +40,15 @@ import { withHostHandoffLock } from "./host-handoff-lock";
 import {
   assertHostProtocol,
   createHostProfile,
+  HostPostHandoffVerificationError,
   HostProfileMismatchError,
+  HostSessionsPresentError,
   type HostStatus,
   handoffHost,
+  observeEmptyHostSessions,
   readHostStatus,
   runtimeCacheEnvironment,
+  verifyHostAfterHandoff,
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting, globalOmo } from "./proxy/routing-launch";
@@ -301,10 +305,12 @@ export interface OrchestratorDependencies {
     socket: string,
     env: Readonly<Record<string, string | undefined>>,
   ) => Promise<HostStatus>;
+  readonly observeEmptyHostSessions?: (socket: string) => Promise<void>;
   readonly handoffHost?: (
     root: string,
     recovery: HostProfileMismatchError["details"]["recovery"],
   ) => Promise<void>;
+  readonly verifyHostAfterHandoff?: (root: string, status: HostStatus) => Promise<void>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
   readonly launchHere?: (
     argv: readonly string[],
@@ -350,6 +356,26 @@ export function planPathForIssueKey(key: string | undefined): Result<string> {
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+type HostRecoveryPhase = "refused" | "status_unreadable" | "handoff_failed" | "verification_failed";
+
+class HostProtocolResultError extends Error {
+  public override readonly name = "HostProtocolResultError";
+  public constructor(public readonly result: Result<never>) {
+    super(result.ok ? "Unexpected successful host protocol result" : result.error.message);
+  }
+}
+
+class HostRecoveryError extends Error {
+  public override readonly name = "HostRecoveryError";
+  public constructor(
+    public readonly phase: Exclude<HostRecoveryPhase, "refused">,
+    public readonly mismatch: HostProfileMismatchError,
+    public override readonly cause: unknown,
+  ) {
+    super(messageOf(cause), { cause });
+  }
+}
+
 function hostIsIdle(status: HostStatus): boolean {
   return (
     status.sessions.total === 0 &&
@@ -509,7 +535,9 @@ const defaults: OrchestratorDependencies = {
   ensureHost: defaultEnsureHost,
   checkHostProfile: assertHostProtocol,
   readHostStatus,
+  observeEmptyHostSessions,
   handoffHost,
+  verifyHostAfterHandoff,
   prompt: defaultPrompt,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
@@ -2361,19 +2389,52 @@ export class Orchestrator {
               environment,
             );
             if (status === undefined || !hostIsIdle(status)) throw current;
-            await this.#deps.handoffHost?.(this.#root, current.details.recovery);
-            await check();
+            try {
+              await this.#deps.observeEmptyHostSessions?.(binding.omoSocket);
+            } catch (statusCause) {
+              if (statusCause instanceof HostSessionsPresentError) throw current;
+              throw new HostRecoveryError("status_unreadable", current, statusCause);
+            }
+            // Native generation handoff atomically replaces the socket and drains the predecessor.
+            // A session attaching after this proof remains preserved by that native drain window.
+            try {
+              await this.#deps.handoffHost?.(this.#root, current.details.recovery);
+            } catch (handoffCause) {
+              throw new HostRecoveryError("handoff_failed", current, handoffCause);
+            }
+            try {
+              const successor = await this.#deps.readHostStatus?.(
+                this.#root,
+                binding.omoSocket,
+                environment,
+              );
+              if (successor === undefined)
+                throw new HostPostHandoffVerificationError(
+                  "Successor host status is unavailable after handoff",
+                );
+              await this.#deps.verifyHostAfterHandoff?.(this.#root, successor);
+              await check();
+            } catch (verificationCause) {
+              throw new HostRecoveryError("verification_failed", current, verificationCause);
+            }
           }
         });
         return undefined;
       } catch (recoveryCause) {
+        if (recoveryCause instanceof HostRecoveryError)
+          return failure("runtime_unavailable", recoveryCause.mismatch.message, {
+            reason: "host_profile_mismatch",
+            ...recoveryCause.mismatch.details,
+            recoveryPhase: recoveryCause.phase,
+            ...(recoveryCause.phase === "status_unreadable"
+              ? { statusError: messageOf(recoveryCause.cause) }
+              : { recoveryError: messageOf(recoveryCause.cause) }),
+          });
         const mismatch = recoveryCause instanceof HostProfileMismatchError ? recoveryCause : cause;
         return failure("runtime_unavailable", mismatch.message, {
           reason: "host_profile_mismatch",
           ...mismatch.details,
-          ...(recoveryCause instanceof HostProfileMismatchError
-            ? {}
-            : { statusError: messageOf(recoveryCause) }),
+          recoveryPhase: "refused",
         });
       }
     }
@@ -3285,38 +3346,7 @@ export class Orchestrator {
         this.#checkHostProtocol(reserved.value, assignment.role === "manager"),
         here,
       );
-      if (host !== undefined)
-        throw new HostProfileMismatchError(
-          z
-            .object({
-              missingExtensions: z.array(z.string()),
-              missingCapabilities: z.array(z.string()),
-              generation: z.number().nullable(),
-              sessions: z.object({
-                total: z.number(),
-                interactive: z.number(),
-                worker: z.number(),
-                retained: z.number(),
-                foreign_attached: z.number(),
-                foreign_retained: z.number(),
-              }),
-              actualProfile: z
-                .object({
-                  core: z.object({
-                    session_runtime: z.string(),
-                    multi_session: z.boolean(),
-                    extensions: z.array(z.string()),
-                  }),
-                })
-                .nullable(),
-              recovery: z.object({
-                automatic: z.boolean(),
-                argv: z.array(z.string()),
-                env: z.record(z.string(), z.string()),
-              }),
-            })
-            .parse(host.ok ? undefined : host.error.details),
-        );
+      if (host !== undefined) throw new HostProtocolResultError(host);
       if (here?.failure !== undefined) throw here.failure;
       await this.#whileForeground(
         this.#deps.ensureHost(this.#root, this.#omoSocket, environment),
@@ -3338,11 +3368,7 @@ export class Orchestrator {
           const closing = registry.beginClose(bindingId);
           return closing.ok ? registry.finishClose(bindingId) : closing;
         });
-      if (cause instanceof HostProfileMismatchError)
-        return failure("runtime_unavailable", cause.message, {
-          reason: "host_profile_mismatch",
-          ...cause.details,
-        });
+      if (cause instanceof HostProtocolResultError) return cause.result;
       return failure("runtime_unavailable", "Native host launch failed", messageOf(cause));
     }
 

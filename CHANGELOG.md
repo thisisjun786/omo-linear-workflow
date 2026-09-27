@@ -15,7 +15,7 @@ published.
 
 ### Fixed
 
-- Make bare `olw` and `olw manage` automatically hand off a mismatched shared OMO host only when every session counter is zero, with cross-process serialization, post-handoff profile verification, readable TTY failures, and unchanged `--json` output. Hosts with attached sessions or unreadable status remain untouched and report the exact manual command.
+- Make bare `olw` and `olw manage` automatically hand off a mismatched shared OMO host only when every session counter is zero and a separate validated native session-list read proves it empty, with cross-process serialization, bounded native commands, post-handoff reachability/profile verification, and phase-accurate TTY failures. Hosts with attached sessions or unreadable status remain untouched and report the exact manual command. The occupied-host JSON response intentionally changes its `message` and expands `details.sessions` to all six counters; recovery failures add a machine-readable `recoveryPhase` and error field.
 - Carry authorized sender data with manager notice claims so a failed secondary lookup cannot strand reports or questions in `sending`; same-ID replay keeps the original delivery attempt.
 - Exit promptly on interruption during abandoned manager startup recovery, releasing the recovery claim without closing the binding or starting another manager.
 - Reject here-mode entry on a different server from the saved manager without changing its binding; report both sockets and the original-server/close recovery options.

@@ -6,6 +6,8 @@ import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/mod
 import {
   createHostProfile,
   EXTENSION_PROTOCOL_MARKER,
+  HostCommandTimeoutError,
+  observeEmptyHostSessions,
   RUNTIME_CACHE_MARKER,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
@@ -169,6 +171,44 @@ test("separates cache namespaces by control root and installed runtime", () => {
   expect(first["XDG_CACHE_HOME"]).not.toBe(otherControl["XDG_CACHE_HOME"]);
   expect(first["XDG_CACHE_HOME"]).not.toBe(first["BUN_RUNTIME_TRANSPILER_CACHE_PATH"]);
   expect(runtimeCacheEnvironment("/control-a", "/sdk/version-a/index.js")).toEqual(first);
+});
+
+test("requires a validated raw empty session list before idle handoff", async () => {
+  await expect(
+    observeEmptyHostSessions("/fixture.sock", 10, async () => undefined),
+  ).rejects.toThrow("session list");
+  await expect(
+    observeEmptyHostSessions("/fixture.sock", 10, async () => ({ sessions: "invalid" })),
+  ).rejects.toThrow("session list");
+  await expect(
+    observeEmptyHostSessions("/fixture.sock", 10, async () => ({ sessions: [{}] })),
+  ).rejects.toThrow("not empty");
+  await expect(
+    observeEmptyHostSessions("/fixture.sock", 10, async () => ({ sessions: [] })),
+  ).resolves.toBeUndefined();
+});
+
+test("bounded host commands kill and reap a timed-out child", async () => {
+  const killed: NodeJS.Signals[] = [];
+  let reaped = false;
+  const exit = Promise.withResolvers<number>();
+  const child = {
+    exited: exit.promise,
+    stdout: new Response("").body,
+    stderr: new Response("").body,
+    kill(signal?: NodeJS.Signals) {
+      killed.push(signal ?? "SIGTERM");
+      reaped = true;
+      exit.resolve(137);
+    },
+  };
+  await expect(
+    import("../src/host-profile").then(({ runBoundedHostCommand }) =>
+      runBoundedHostCommand(["fixture"], "/tmp", {}, 20, () => child),
+    ),
+  ).rejects.toBeInstanceOf(HostCommandTimeoutError);
+  expect(killed).toEqual(["SIGKILL"]);
+  expect(reaped).toBe(true);
 });
 
 test("prepares a new profile when no host is reachable", async () => {

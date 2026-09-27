@@ -206,16 +206,24 @@ function humanError(result: Result<unknown>): string | undefined {
     .object({
       reason: z.literal("host_profile_mismatch"),
       sessions: z.object({ total: z.number() }),
+      recoveryPhase: z
+        .enum(["refused", "status_unreadable", "handoff_failed", "verification_failed"])
+        .default("refused"),
       statusError: z.string().optional(),
+      recoveryError: z.string().optional(),
       recovery: z.object({ argv: z.array(z.string()) }),
     })
     .safeParse(result.error.details);
   if (!details.success) return undefined;
   const command = details.data.recovery.argv.map(shellArg).join(" ");
-  if (details.data.statusError !== undefined)
-    return `The running OMO host is from an older OLW generation, and its session status could not be read. OLW did not hand it off. When every host session is finished, run:\n${command}`;
+  if (details.data.recoveryPhase === "status_unreadable")
+    return `The running OMO host is from an older OLW generation, but its session status could not be read. No handoff was attempted. Inspect the host, then run when every session is finished:\n${command}`;
+  if (details.data.recoveryPhase === "handoff_failed")
+    return `The idle OMO host handoff was attempted but failed: ${details.data.recoveryError ?? "unknown error"}\nRetry with:\n${command}`;
+  if (details.data.recoveryPhase === "verification_failed")
+    return `The OMO host handoff completed, but the successor profile could not be verified: ${details.data.recoveryError ?? "unknown error"}\nInspect host status before retrying:\n${command}`;
   const count = details.data.sessions.total;
-  return `The running OMO host is from an older OLW generation with ${count} session${count === 1 ? "" : "s"} attached. OLW did not hand it off. When they are finished, run:\n${command}`;
+  return `The running OMO host is from an older OLW generation with ${count} session${count === 1 ? "" : "s"} attached. No handoff was attempted. When they are finished, run:\n${command}`;
 }
 
 function print(result: Result<unknown>, json: boolean): void {

@@ -288,6 +288,51 @@ test.each(["stage", "close"] as const)(
           completedAt: "now",
         }),
       );
+      if (operation === "stage") {
+        const planPath = join(w.root, "plan.md");
+        await Bun.write(planPath, "fixture plan");
+        const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+        try {
+          const handoff = db
+            .query<{ handoff_json: string }, []>(
+              "SELECT handoff_json FROM stage_lineage WHERE binding_id = 'plan'",
+            )
+            .get();
+          if (handoff === null) throw new Error("Missing fixture handoff");
+          const parsed = JSON.parse(handoff.handoff_json);
+          parsed.planSha256 = new Bun.CryptoHasher("sha256").update("fixture plan").digest("hex");
+          parsed.completionReportId = "fixture-plan-report";
+          db.query("UPDATE stage_lineage SET handoff_json = ? WHERE binding_id = 'plan'").run(
+            JSON.stringify(parsed),
+          );
+          db.query(
+            "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'accepted', ?)",
+          ).run(
+            "fixture-plan-report",
+            JSON.stringify({
+              version: 1,
+              id: "fixture-plan-report",
+              fromBindingId: plan.id,
+              toBindingId: "parent",
+              designationId: plan.designationId,
+              snapshotDigest: value(w.registry.designation(plan.designationId)).snapshotDigest,
+              kind: "report",
+              text: "done",
+              outcome: "completed",
+              evidence: [planPath],
+            }),
+            JSON.stringify({
+              kind: "ok",
+              thread_id: "s-parent",
+              message_seq: 1,
+              deduplicated: false,
+              delivery: { kind: "started", turn_id: "fixture" },
+            }),
+          );
+        } finally {
+          db.close();
+        }
+      }
       const snapshot = w.herdr.snapshot;
       w.herdr.snapshot = async () => ({
         ...(await snapshot()),

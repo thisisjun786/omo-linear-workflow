@@ -1067,6 +1067,30 @@ test.each(["accepted", "uncertain"] as const)(
   },
 );
 
+test("a new parent report bypasses a paused manager and replay keeps the inbox recipient", async () => {
+  const w = await world();
+  const p = value(await w.create()).binding;
+  const m = await w.createManager();
+  value(w.orchestrator.linkParent(p.id, m.id));
+  value(w.orchestrator.setPaused(m.id, true));
+  const input = {
+    fromId: p.id,
+    messageId: "paused-manager-report",
+    outcome: "completed" as const,
+    text: "finished while manager was paused",
+    evidence: [],
+  };
+
+  const posted = await w.orchestrator.report(input);
+  expect(posted).toMatchObject({
+    ok: true,
+    value: { state: "posted", envelope: { toBindingId: null } },
+  });
+  value(w.orchestrator.setPaused(m.id, false));
+  expect(await w.orchestrator.report(input)).toEqual(posted);
+  expect(w.sends).toHaveLength(0);
+});
+
 test("manager pause, loss and close are independent of parent pause and local user reporting", async () => {
   const w = await world();
   const p = value(await w.create()).binding;
@@ -1083,8 +1107,8 @@ test("manager pause, loss and close are independent of parent pause and local us
     });
   value(w.orchestrator.setPaused(m.id, true));
   expect(await report("manager-paused")).toMatchObject({
-    ok: false,
-    error: { code: "contact_paused" },
+    ok: true,
+    value: { state: "posted", envelope: { toBindingId: null } },
   });
   expect(await report("question", true)).toMatchObject({ ok: true, value: { state: "posted" } });
   const c = value(await w.orchestrator.createChild({ parentId: p.id, issueId: "issue" })).binding;

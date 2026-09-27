@@ -1895,15 +1895,16 @@ export class Orchestrator {
       return failure("route_denied", "Only parents report to the user inbox");
     const existing = this.#withRegistry((registry) => registry.delivery(input.messageId));
     if (!existing.ok && existing.error.code !== "not_found") return existing;
-    let targetId = sender.value.assignment.ownerBindingId;
-    // A replay is a read of the original attempt, never a new routing decision.
-    if (existing.ok) targetId = existing.value.envelope.toBindingId;
-    else if (sender.value.assignment.role === "parent" && targetId !== null && !input.toUser) {
-      const manager = this.#binding(targetId);
-      if (!manager.ok && manager.error.code !== "not_found") return manager;
-      if (!manager.ok || manager.value.launchState !== "ready") targetId = null;
-    }
-    if (input.toUser) targetId = null;
+    const ownerId = sender.value.assignment.ownerBindingId;
+    const owner = ownerId === null || existing.ok || input.toUser ? null : this.#binding(ownerId);
+    if (owner !== null && !owner.ok && owner.error.code !== "not_found") return owner;
+    const targetId = input.toUser
+      ? null
+      : questionRecipient(
+          sender.value.assignment.role,
+          existing.ok ? existing.value : null,
+          owner?.ok ? owner.value : null,
+        );
     const envelope: Envelope = {
       version: 1,
       id: input.messageId,

@@ -425,6 +425,7 @@ async function world() {
       tabCalls.push({ method: "sendKeys", paneId, text, keys });
     },
     async focusWorkspace() {},
+    async focusPane() {},
     async run(paneId, argv) {
       launches.push(paneId);
       const path = argv[argv.indexOf("--session") + 1];

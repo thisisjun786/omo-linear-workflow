@@ -63,6 +63,7 @@ const booleanFlags = new Set([
   "to-user",
   "as-user",
   "no-manager",
+  "here",
   "draft",
   "discard",
 ]);
@@ -359,7 +360,7 @@ export async function runCli(
           ],
           deprecatedOptions: { "parent create": ["--repo"] },
           options: {
-            manage: "[--json]",
+            manage: "[--here] [--json] (bare olw runs here; requires Herdr)",
             "update check": "[--tag omo-ai=beta] [--tag @code-yeongyu/senpi=latest] [--json]",
             "update prepare":
               "[--remote NAME|URL] [--json] (PR to dev for the latest check's versions; OLW_GH_BIN overrides gh)",
@@ -448,8 +449,10 @@ export async function runCli(
       result = values.ok
         ? { ok: true, value: await fetchMirror(root, values.value["remote"] ?? "") }
         : values;
-    } else if (command === "manage") {
-      result = await orchestrator.manage();
+    } else if (command === "manage" || command === "") {
+      const managed = await orchestrator.manage({ here: command === "" || has(options, "here") });
+      if (managed.ok && managed.value.tuiExited !== undefined) return await managed.value.tuiExited;
+      result = managed;
     } else if (command === "scope import") {
       const values = requireOptions(options, ["file"]);
       result = values.ok

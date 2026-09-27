@@ -159,6 +159,7 @@ try {
         },
         renameTab: (tab, label) => client.renameTab(tab, label),
         focusWorkspace: (workspace) => client.focusWorkspace(workspace),
+        focusPane: (pane) => client.focusPane(pane),
         sendKeys: (pane, text, keys) => client.sendKeys(pane, text, keys),
         snapshot: () => client.snapshot(),
         subscribe: (listener) => client.subscribe(listener),

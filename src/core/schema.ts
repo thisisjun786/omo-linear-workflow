@@ -83,6 +83,7 @@ export const bindingSchema = z.strictObject({
   herdrSocket: text,
   omoSocket: text,
   workspaceId: text.nullable(),
+  workspaceOwned: z.boolean().optional(),
   paneId: text.nullable(),
   sessionPath: text.nullable(),
   launchState: z.enum([

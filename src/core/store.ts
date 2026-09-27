@@ -602,7 +602,12 @@ export function openRegistry(
     }
   }
 
-  function provision(id: string, workspaceId: string, paneId: string): Result<Binding> {
+  function provision(
+    id: string,
+    workspaceId: string,
+    paneId: string,
+    workspaceOwned = true,
+  ): Result<Binding> {
     if (workspaceId.length === 0 || paneId.length === 0)
       return error("invalid_input", "Workspace and pane IDs are required");
     return transaction(() => {
@@ -610,7 +615,13 @@ export function openRegistry(
       if (!binding.ok) return binding;
       if (binding.value.launchState !== "reserved")
         return error("invalid_transition", "Only a reserved binding can be provisioned");
-      return saveBinding({ ...binding.value, workspaceId, paneId, launchState: "provisioning" });
+      return saveBinding({
+        ...binding.value,
+        workspaceId,
+        paneId,
+        ...(workspaceOwned ? {} : { workspaceOwned }),
+        launchState: "provisioning",
+      });
     });
   }
 
@@ -677,14 +688,23 @@ export function openRegistry(
     });
   }
 
-  function recordReattachPane(id: string, token: string, paneId: string): Result<Binding> {
+  function recordReattachPane(
+    id: string,
+    token: string,
+    paneId: string,
+    workspaceId?: string,
+  ): Result<Binding> {
     if (paneId.length === 0) return error("invalid_input", "Pane ID is required");
     return transaction(() => {
       const binding = readyManager(id);
       if (!binding.ok) return binding;
       if (reattachClaim(id)?.owner !== token)
         return error("lease_lost", "Manager reattachment is owned by another caller");
-      return saveBinding({ ...binding.value, paneId });
+      return saveBinding({
+        ...binding.value,
+        paneId,
+        ...(workspaceId === undefined ? {} : { workspaceId, workspaceOwned: false }),
+      });
     });
   }
 

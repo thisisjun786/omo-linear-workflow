@@ -110,6 +110,7 @@ async function world() {
     },
     async renameTab() {},
     async focusWorkspace() {},
+    async focusPane() {},
     async sendKeys() {},
     async run(paneId, argv) {
       const path = argv[argv.indexOf("--session") + 1];

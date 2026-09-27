@@ -45,8 +45,11 @@ The installer builds everything, including Herdr, and creates `~/.local/bin/olw`
 
 ## Quick start
 
+Type `olw` in any Herdr pane. It opens the manager here, or focuses its existing live pane. After exiting the TUI, type `olw` again to reattach the same durable conversation here. The session remains a normal assistant for ordinary work; OLW guidance applies when handling OLW messages.
+
 ```sh
-olw manage --json
+olw
+# In another pane, approve and launch project work:
 olw scope import --file approved-scope.json --json
 olw parent create --scope-digest DIGEST --designation ID --execute --project ID --json
 olw child create --parent BINDING --issue ID --mode planned --json
@@ -60,7 +63,8 @@ olw status --project ID --json
 | Command | What it does |
 | --- | --- |
 | `doctor` | Check the local runtime, repository mirrors and legacy parents |
-| `manage` | Open or reattach your manager session on the OLW host |
+| `olw` / `manage --here` | Open or reattach the manager in this Herdr pane; focus it if already live |
+| `manage` | Open the manager in its own workspace, or focus/reattach the existing manager |
 | `update check` | Compare pinned OMO and Senpi versions with npm; never installs |
 | `update prepare` | Verify a pin update in a separate worktree and open a PR to `dev` |
 | `scope import` | Import an approved Linear snapshot and return its digest |

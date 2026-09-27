@@ -124,6 +124,9 @@ async function world(agent = "omo") {
     async focusWorkspace(workspaceId) {
       focused.push(workspaceId);
     },
+    async focusPane(paneId) {
+      focused.push(paneId);
+    },
     async run(paneId, argv, env) {
       if (hooks.failRun) throw new Error("injected send_input failure before launching TUI");
       runs.push({ paneId, argv, env });
@@ -177,6 +180,10 @@ async function world(agent = "omo") {
     createHerdrClient: () => herdr,
     resolveHerdrArtifact: async () => ({ artifactDir: join(root, ".managed-herdr") }),
     ensureHost: async () => {},
+    launchHere: (argv, _cwd, env) => ({
+      exited: herdr.run(process.env["HERDR_PANE_ID"] ?? "", argv, env).then(() => 0),
+      kill() {},
+    }),
     checkHostProfile: async () => hooks.hostCheck?.(),
     gitTip: (cwd, ref) => fixtureTip(root, "base-commit", cwd, ref),
     now: () => hooks.now,
@@ -280,6 +287,7 @@ async function world(agent = "omo") {
     created,
     tabs,
     focused,
+    deps,
     prompts,
     hooks,
   };
@@ -288,6 +296,78 @@ async function world(agent = "omo") {
 function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
+
+test("bare olw outside Herdr fails before creating state; help remains available", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-entry-cli-"));
+  roots.push(root);
+  const child = Bun.spawn(
+    [process.execPath, join(import.meta.dir, "../src/cli.ts"), "--root", root],
+    {
+      env: { ...process.env, HERDR_ENV: undefined, HERDR_PANE_ID: undefined },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+  expect(code).toBe(2);
+  expect(JSON.parse(stdout)).toMatchObject({ ok: false, error: { code: "herdr_required" } });
+  expect(await Bun.file(join(root, ".omo/state/registry.sqlite")).exists()).toBe(false);
+});
+
+test("bare olw launches in the caller pane, focuses it, then reattaches there without owning the workspace", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+  w.workspaces.set("caller", {
+    workspaceId: "caller",
+    rootPaneId: "caller:p1",
+    cwd: process.cwd(),
+  });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  w.workspaces.set("second", { workspaceId: "second", rootPaneId: "second:p1", cwd: "/other" });
+  w.panes.set("second:p1", { workspaceId: "second" });
+  try {
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    const first = managers(value(w.orchestrator.status()))[0];
+    if (!first) throw new Error("No manager");
+    expect(first).toMatchObject({
+      paneId: "caller:p1",
+      workspaceId: "caller",
+      cwd: process.cwd(),
+      workspaceOwned: false,
+    });
+    expect(w.created).toHaveLength(0);
+    expect(w.tabs).toHaveLength(0);
+    process.env["HERDR_PANE_ID"] = "second:p1";
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(w.runs).toHaveLength(1);
+    expect(w.focused.at(-1)).toBe("caller:p1");
+    w.panes.delete("caller:p1");
+    w.workspaces.delete("caller");
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(managers(value(w.orchestrator.status()))[0]).toMatchObject({
+      id: first.id,
+      durableSessionId: first.durableSessionId,
+      sessionPath: first.sessionPath,
+      workspaceId: "second",
+      paneId: "second:p1",
+      workspaceOwned: false,
+    });
+    expect(w.runs).toHaveLength(2);
+    expect(w.created).toHaveLength(0);
+    expect(w.tabs).toHaveLength(0);
+    value(await w.orchestrator.close(first.id));
+    expect(w.workspaces.has("second")).toBe(true);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    stdout.mockRestore();
+  }
+});
 
 test("a hanging injected update check cannot delay manager creation or focus", async () => {
   const w = await world();
@@ -775,7 +855,7 @@ test("CLI manage and parent create --no-manager reach the orchestrator", async (
       value: {
         commands: expect.arrayContaining(["manage"]),
         options: {
-          manage: "[--json]",
+          manage: expect.stringContaining("--here"),
           "parent create": expect.stringContaining("--no-manager"),
         },
       },

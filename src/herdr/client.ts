@@ -81,6 +81,7 @@ export interface HerdrClient {
   ): Promise<{ tabId: string; rootPaneId: string }>;
   renameTab(tabId: string, label: string): Promise<void>;
   focusWorkspace(workspaceId: string): Promise<void>;
+  focusPane(paneId: string): Promise<void>;
   sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void>;
   run(
     paneId: string,
@@ -187,6 +188,12 @@ class SocketHerdrClient implements HerdrClient {
       await this.#request("workspace.focus", {
         workspace_id: nonEmptyStringSchema.parse(workspaceId),
       }),
+    );
+  }
+
+  public async focusPane(paneId: string): Promise<void> {
+    z.object({ type: z.literal("pane_info") }).parse(
+      await this.#request("pane.focus", { pane_id: nonEmptyStringSchema.parse(paneId) }),
     );
   }
 

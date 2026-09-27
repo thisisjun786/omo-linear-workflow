@@ -115,6 +115,8 @@ export interface Binding {
   readonly herdrSocket: string;
   readonly omoSocket: string;
   readonly workspaceId: string | null;
+  /** False for a manager attached in the user's existing workspace. Legacy bindings own theirs. */
+  readonly workspaceOwned?: boolean | undefined;
   readonly paneId: string | null;
   readonly sessionPath: string | null;
   readonly launchState:
@@ -308,7 +310,12 @@ export interface Registry {
   get(id: string): Result<Binding>;
   bySession(id: string): Result<Binding>;
   list(): Result<Binding[]>;
-  provision(id: string, workspaceId: string, paneId: string): Result<Binding>;
+  provision(
+    id: string,
+    workspaceId: string,
+    paneId: string,
+    workspaceOwned?: boolean,
+  ): Result<Binding>;
   observeSession(id: string, sessionPath: string): Result<Binding>;
   /** Claim the single manager TUI reattachment if the binding still records `expectedPaneId`. */
   beginReattach(
@@ -320,7 +327,12 @@ export interface Registry {
   /** True only while `token` still owns the binding's reattachment claim. */
   ownsReattach(id: string, token: string): Result<boolean>;
   /** Point the claimed manager at the pane its TUI is launched into; a retry reuses it. */
-  recordReattachPane(id: string, token: string, paneId: string): Result<Binding>;
+  recordReattachPane(
+    id: string,
+    token: string,
+    paneId: string,
+    workspaceId?: string,
+  ): Result<Binding>;
   /** True while a reattachment is claimed or was interrupted before its TUI was verified. */
   reattachPending(id: string): Result<boolean>;
   /** Give up the claim after a failure; the reattachment stays pending for the next caller. */

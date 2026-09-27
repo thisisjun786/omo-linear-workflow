@@ -15,6 +15,7 @@ published.
 
 ### Changed
 
+- Type `olw` in Herdr to open or reattach the single durable manager in the current pane, or focus its live pane. `manage --here` shares this entry; plain `manage` retains separate-workspace behavior.
 - Pinned `omo-ai` 5.0.1 and its exact `@code-yeongyu/senpi` 2026.9.27 dependency, porting the maintained runtime repairs to the new executable bundles.
 
 ## [0.2.0]

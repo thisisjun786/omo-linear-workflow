@@ -13,10 +13,12 @@ import { resolveHerdrArtifact } from "../src/herdr/artifact";
 import { createHerdrClient } from "../src/herdr/client";
 import { planPaneExited } from "../src/orchestrator";
 import { attach, idle } from "./qa-hierarchy";
+import { managerBusyNoticeQa, managerEntryQa } from "./qa-manager-entry";
 import { checkedQaCommand, prepareQaWorld } from "./qa-world";
 
 export async function runOfficialHerdrQa(
   evidenceName = "lina-275-official-qa.json",
+  entry = false,
 ): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const scratch = await mkdtemp(join(tmpdir(), "olw-official-"));
@@ -44,6 +46,7 @@ export async function runOfficialHerdrQa(
     await mkdir(join(agent, "extensions"), { recursive: true });
     await mkdir(join(home, ".config/herdr"), { recursive: true });
     await mkdir(join(scratch, "bin"));
+    await mkdir(join(scratch, "gate"));
     await writeFile(join(home, ".zshrc"), "# isolated QA\n");
     await writeFile(
       join(home, ".config/herdr/config.toml"),
@@ -51,7 +54,7 @@ export async function runOfficialHerdrQa(
     );
     await writeFile(
       join(agent, "extensions/offline.ts"),
-      `export { default } from ${JSON.stringify(join(root, "scripts/qa-official-provider.ts"))};\n`,
+      `import offline from ${JSON.stringify(join(root, "scripts/qa-official-provider.ts"))};\nexport default (pi) => offline(pi, ${JSON.stringify(join(scratch, "gate"))});\n`,
     );
     const ids = ["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1", "gpt-6-astra"];
     await writeFile(
@@ -101,6 +104,7 @@ export async function runOfficialHerdrQa(
       OMO_CODING_AGENT_DIR: agent,
       SENPI_CODING_AGENT_DIR: agent,
       PI_OFFLINE: "1",
+      QA_OFFICIAL_GATE: join(scratch, "gate"),
       HERDR_ENV: "1",
       PATH: `${join(scratch, "bin")}:${envBefore["PATH"]}`,
       GIT_AUTHOR_NAME: "QA",
@@ -132,89 +136,97 @@ export async function runOfficialHerdrQa(
       await idle(client);
       return client;
     };
-    const manager = z.object({ binding: bindingSchema }).parse(await invoke(["manage"])).binding;
+    const entryResult = entry ? await managerEntryQa(world, herdr) : undefined;
+    if (entryResult) evidence["managerEntry"] = entryResult.evidence;
+    const manager =
+      entryResult?.manager ??
+      z.object({ binding: bindingSchema }).parse(await invoke(["manage"])).binding;
     const managerClient = await connected(manager);
-    const initialManagerIdentity = {
-      durableSessionId: manager.durableSessionId,
-      sessionPath: manager.sessionPath,
-    };
-    const initialSnapshot = await herdr.snapshot();
-    check(
-      "builtinAgentDetection",
-      initialSnapshot.panes.some(
-        (pane) => pane.paneId === manager.paneId && (pane.agent === "pi" || pane.agent === "omo"),
-      ),
-    );
-    const again = z
-      .object({ action: z.string(), binding: bindingSchema })
-      .parse(await invoke(["manage"]));
-    check(
-      "managerFocusWithoutDuplicate",
-      again.action === "focused" && again.binding.paneId === manager.paneId,
-    );
-    assert.ok(manager.paneId);
-    const exited = Promise.withResolvers<void>();
-    const stop = await herdr.subscribe((event) => {
-      if (planPaneExited(event, manager.paneId ?? "")) exited.resolve();
-    });
-    const deadline = setTimeout(() => exited.reject(new Error("manager exit timeout")), 30000);
-    try {
-      await herdr.sendKeys(manager.paneId, "/quit", ["Enter"]);
-      await exited.promise;
-    } finally {
-      stop();
-      clearTimeout(deadline);
+    let reattached = { binding: manager };
+    if (!entry) {
+      const initialManagerIdentity = {
+        durableSessionId: manager.durableSessionId,
+        sessionPath: manager.sessionPath,
+      };
+      const initialSnapshot = await herdr.snapshot();
+      check(
+        "builtinAgentDetection",
+        initialSnapshot.panes.some(
+          (pane) => pane.paneId === manager.paneId && (pane.agent === "pi" || pane.agent === "omo"),
+        ),
+      );
+      const again = z
+        .object({ action: z.string(), binding: bindingSchema })
+        .parse(await invoke(["manage"]));
+      check(
+        "managerFocusWithoutDuplicate",
+        again.action === "focused" && again.binding.paneId === manager.paneId,
+      );
+      assert.ok(manager.paneId);
+      const exited = Promise.withResolvers<void>();
+      const stop = await herdr.subscribe((event) => {
+        if (planPaneExited(event, manager.paneId ?? "")) exited.resolve();
+      });
+      const deadline = setTimeout(() => exited.reject(new Error("manager exit timeout")), 30000);
+      try {
+        await herdr.sendKeys(manager.paneId, "/quit", ["Enter"]);
+        await exited.promise;
+      } finally {
+        stop();
+        clearTimeout(deadline);
+      }
+      check(
+        "managerExitFrameReleasedTui",
+        !(await herdr.snapshot()).panes.some(
+          (pane) =>
+            pane.paneId === manager.paneId &&
+            (pane.agent === "pi" || pane.agent === "omo") &&
+            pane.sessionPath !== null,
+        ),
+      );
+      const reopened = z
+        .object({ action: z.string(), binding: bindingSchema })
+        .parse(await invoke(["manage"]));
+      reattached = reopened;
+      const reattachedSnapshot = await herdr.snapshot();
+      check(
+        "managerReattachSameBindingAndSession",
+        reopened.action === "reattached" &&
+          reattached.binding.id === manager.id &&
+          reattached.binding.paneId !== manager.paneId &&
+          reattached.binding.durableSessionId === initialManagerIdentity.durableSessionId &&
+          reattached.binding.sessionPath === initialManagerIdentity.sessionPath,
+      );
+      check(
+        "managerReattachExactlyOneWorkspace",
+        reattachedSnapshot.workspaces.filter((workspace) => workspace.label === "manager")
+          .length === 1,
+      );
+      check(
+        "managerReattachTuiLive",
+        reattachedSnapshot.panes.some(
+          (pane) =>
+            pane.paneId === reattached.binding.paneId &&
+            pane.workspaceId === reattached.binding.workspaceId &&
+            (pane.agent === "pi" || pane.agent === "omo"),
+        ),
+      );
+      const native = runtimeIdentitySchema.parse(
+        success.parse(await managerClient.requestExtension("omo.initiative.describe")).value,
+      );
+      check(
+        "managerReattachNativeSession",
+        native.durableSessionId === initialManagerIdentity.durableSessionId &&
+          native.sessionPath === initialManagerIdentity.sessionPath,
+      );
+      evidence["managerReattach"] = {
+        initial: manager,
+        reattached: reattached.binding,
+        initialSnapshot,
+        reattachedSnapshot,
+        nativeIdentity: native,
+      };
     }
-    check(
-      "managerExitFrameReleasedTui",
-      !(await herdr.snapshot()).panes.some(
-        (pane) =>
-          pane.paneId === manager.paneId &&
-          (pane.agent === "pi" || pane.agent === "omo") &&
-          pane.sessionPath !== null,
-      ),
-    );
-    const reattached = z
-      .object({ action: z.string(), binding: bindingSchema })
-      .parse(await invoke(["manage"]));
-    const reattachedSnapshot = await herdr.snapshot();
-    check(
-      "managerReattachSameBindingAndSession",
-      reattached.action === "reattached" &&
-        reattached.binding.id === manager.id &&
-        reattached.binding.paneId !== manager.paneId &&
-        reattached.binding.durableSessionId === initialManagerIdentity.durableSessionId &&
-        reattached.binding.sessionPath === initialManagerIdentity.sessionPath,
-    );
-    check(
-      "managerReattachExactlyOneWorkspace",
-      reattachedSnapshot.workspaces.filter((workspace) => workspace.label === "manager").length ===
-        1,
-    );
-    check(
-      "managerReattachTuiLive",
-      reattachedSnapshot.panes.some(
-        (pane) =>
-          pane.paneId === reattached.binding.paneId &&
-          pane.workspaceId === reattached.binding.workspaceId &&
-          (pane.agent === "pi" || pane.agent === "omo"),
-      ),
-    );
-    const native = runtimeIdentitySchema.parse(
-      success.parse(await managerClient.requestExtension("omo.initiative.describe")).value,
-    );
-    check(
-      "managerReattachNativeSession",
-      native.durableSessionId === initialManagerIdentity.durableSessionId &&
-        native.sessionPath === initialManagerIdentity.sessionPath,
-    );
-    evidence["managerReattach"] = {
-      initial: manager,
-      reattached: reattached.binding,
-      initialSnapshot,
-      reattachedSnapshot,
-      nativeIdentity: native,
-    };
     await idle(managerClient);
     const remote = join(world.scratch, "remote.git");
     await checkedQaCommand(
@@ -267,6 +279,8 @@ export async function runOfficialHerdrQa(
     }
     const parent = parents[0];
     assert.ok(parent);
+    if (entry)
+      evidence["busyNotice"] = await managerBusyNoticeQa(world, manager, parent, managerClient);
     const plan = z
       .object({ binding: bindingSchema })
       .parse(
@@ -505,4 +519,8 @@ export async function runOfficialHerdrQa(
   if (failure) throw failure;
   console.log("OFFICIAL_HERDR_QA_PASS");
 }
-if (import.meta.main) await runOfficialHerdrQa();
+if (import.meta.main)
+  await runOfficialHerdrQa(
+    process.argv.includes("--entry") ? "qa-manager-entry.json" : "lina-275-official-qa.json",
+    process.argv.includes("--entry"),
+  );

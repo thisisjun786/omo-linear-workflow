@@ -386,7 +386,7 @@ export async function runCli(
             report:
               "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--pr URL --head SHA | --deliverable-path PATH_OR_URL] [--to-user]",
             reports:
-              "[--initiative ID | --project ID] (read-only user inbox; posted is not native acceptance)",
+              "[--initiative ID | --project ID] (read-only user inbox and manager reports; posted is not native acceptance)",
             ask: "--from BINDING --id ID --text-file PATH [--questions-file JSON] [--to-user]",
             answer:
               "(--from BINDING | --as-user) --question QUESTION_ID --text-file PATH [--answers-file JSON]",

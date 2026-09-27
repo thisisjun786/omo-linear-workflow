@@ -1953,7 +1953,11 @@ export function openRegistry(
         SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
         JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
         WHERE ((? = 1 AND json_extract(d.envelope_json, '$.kind') = 'operational_notice')
-          OR (? = 0 AND d.state = 'posted' AND json_extract(d.envelope_json, '$.kind') = 'report'))
+          OR (? = 0 AND json_extract(d.envelope_json, '$.kind') = 'report'
+            AND (d.state = 'posted' OR EXISTS (
+              SELECT 1 FROM bindings recipient
+              WHERE recipient.id = json_extract(d.envelope_json, '$.toBindingId')
+                AND json_extract(recipient.json, '$.assignment.role') = 'manager'))))
           AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
           AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
         ORDER BY d.rowid

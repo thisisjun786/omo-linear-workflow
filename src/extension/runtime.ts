@@ -123,7 +123,7 @@ type WorkerAction =
 const nativeSendInputSchema = z.strictObject({
   thread: z.string().min(1),
   message: z.string(),
-  delivery: z.literal("auto"),
+  delivery: z.enum(["auto", "follow_up"]),
   all_scope: z.literal(true),
   idempotency_key: z.string().min(1),
 });
@@ -622,7 +622,23 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     active.add("thread_send");
     port.setActiveTools([...active]);
     let details: unknown;
-    if (envelope.kind === "answer") {
+    const managerNotice =
+      claim.target.assignment.role === "manager" &&
+      (envelope.kind === "report" || envelope.kind === "question");
+    let message = JSON.stringify(envelope);
+    if (managerNotice) {
+      const sender = await lookup(ctx.sessionManager.getSessionId());
+      if (!sender.ok) return sender;
+      const project =
+        sender.value.assignment.role === "parent"
+          ? sender.value.assignment.projectId
+          : sender.value.id;
+      const summary =
+        envelope.text.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim().slice(0, 100) ?? "";
+      const command = envelope.kind === "report" ? "reports" : "questions";
+      message = `[OLW] ${project} ${envelope.kind}: ${summary} - details: olw ${command} --project ${project}\n${message}`;
+    }
+    if (envelope.kind === "answer" || managerNotice) {
       try {
         await port.waitForIdle(claim.target);
       } catch (cause) {
@@ -649,8 +665,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     try {
       const input = nativeSendInputSchema.parse({
         thread: claim.target.durableSessionId,
-        message: JSON.stringify(envelope),
-        delivery: "auto",
+        message,
+        // Idle admission is event-driven. follow_up also prevents steering if a user starts
+        // another turn between the idle observation and native acceptance.
+        delivery: managerNotice ? "follow_up" : "auto",
         all_scope: true,
         idempotency_key: nativeKey,
       });
@@ -761,7 +779,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     }
     let decoded: unknown;
     try {
-      decoded = JSON.parse(nativeInput.data.message);
+      const message = nativeInput.data.message;
+      decoded = JSON.parse(
+        message.startsWith("[OLW] ") ? message.slice(message.indexOf("\n") + 1) : message,
+      );
     } catch {
       return { block: true, reason: "Direct thread_send message is not an envelope" };
     }

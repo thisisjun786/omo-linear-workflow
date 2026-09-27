@@ -1,9 +1,34 @@
-import { dirname } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { getPackageDir } from "@code-yeongyu/senpi";
 import { z } from "zod";
-import {
+import type {
+  Goal,
+  GoalStoreRef,
+} from "../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/goal/types.js";
+
+// Native require bypasses Senpi's per-generation extension import graph. Static
+// external imports alone still get their own mutationTails Map in that graph.
+// getPackageDir comes from the host's virtual Senpi export, not an independently
+// resolved package. Never inline the store or import it through the generation.
+const requireSenpi = createRequire(join(getPackageDir(), "dist/index.js"));
+const {
   readGoal,
-  updateGoal,
-} from "../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/goal/store.js";
+}: typeof import("../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/goal/store.js") =
+  requireSenpi("./core/extensions/builtin/goal/store.js");
+const {
+  goalFilePath,
+  writeGoalFile,
+}: typeof import("../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/goal/persistence.js") =
+  requireSenpi("./core/extensions/builtin/goal/persistence.js");
+const {
+  transitionGoalStatus,
+}: typeof import("../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/goal/transitions.js") =
+  requireSenpi("./core/extensions/builtin/goal/transitions.js");
+const {
+  serializeByKey,
+}: typeof import("../../node_modules/@code-yeongyu/senpi/dist/core/session-sidecar-store.js") =
+  requireSenpi("./core/session-sidecar-store.js");
 
 // The only production dependency on the pinned Senpi goal-store implementation.
 // updatedAt is monotonic even within one second; it distinguishes our pause from
@@ -25,7 +50,43 @@ function ref(ctx: GoalContext) {
     ? null
     : { baseDir: dirname(ctx.goalStoreFile), threadId: ctx.sessionManager.getSessionId() };
 }
-export async function pauseGoal(ctx: GoalContext): Promise<GoalPause | null> {
+export async function compareAndSetGoalStatus(
+  store: GoalStoreRef,
+  expected: Pick<Goal, "id" | "status" | "updatedAt">,
+  status: "active" | "paused",
+): Promise<Goal | null> {
+  return serializeByKey(goalFilePath(store), async () => {
+    const current = await readGoal(store);
+    if (current === null) return null;
+    const valid = nativeGoalSchema.parse(current);
+    if (valid.threadId !== store.threadId) throw new Error("Pinned Senpi goal identity mismatch");
+    if (
+      valid.id !== expected.id ||
+      valid.status !== expected.status ||
+      valid.updatedAt !== expected.updatedAt
+    )
+      return null;
+    // The status-only branch of pinned updateGoal: same transition, monotonic
+    // timestamp and continuation accounting, no objective/history replacement.
+    // Do not call updateGoal/writeGoal here: they acquire this same key again.
+    const next = transitionGoalStatus(
+      current,
+      status,
+      "user",
+      undefined,
+      Math.max(Math.trunc(Date.now() / 1000), current.updatedAt + 1),
+    );
+    if (next.status !== current.status) {
+      next.consecutiveContinuations = 0;
+      next.unattendedContinuations = 0;
+      delete next.lastContinuationSignature;
+    }
+    await writeGoalFile(store, next);
+    return next;
+  });
+}
+
+export async function pauseGoal(ctx: GoalContext): Promise<GoalPause | null | false> {
   const store = ref(ctx);
   if (!store) return null;
   const goal = await readGoal(store);
@@ -33,8 +94,8 @@ export async function pauseGoal(ctx: GoalContext): Promise<GoalPause | null> {
   const valid = nativeGoalSchema.parse(goal);
   if (valid.threadId !== store.threadId) throw new Error("Pinned Senpi goal identity mismatch");
   if (valid.status !== "active") return null;
-  const paused = nativeGoalSchema.parse(await updateGoal(store, { status: "paused" }, "user"));
-  return { id: paused.id, updatedAt: paused.updatedAt };
+  const paused = await compareAndSetGoalStatus(store, valid, "paused");
+  return paused === null ? false : { id: paused.id, updatedAt: paused.updatedAt };
 }
 export async function ownsGoalPause(ctx: GoalContext, pause: GoalPause): Promise<boolean> {
   const store = ref(ctx);
@@ -49,8 +110,16 @@ export async function ownsGoalPause(ctx: GoalContext, pause: GoalPause): Promise
     valid.updatedAt === pause.updatedAt
   );
 }
-export async function resumeGoal(ctx: GoalContext, pause: GoalPause): Promise<void> {
+export async function resumeGoal(
+  ctx: GoalContext,
+  pause: GoalPause,
+  onOwnershipLost?: () => void,
+): Promise<void> {
   const store = ref(ctx);
-  if (store && (await ownsGoalPause(ctx, pause)))
-    await updateGoal(store, { status: "active" }, "user");
+  if (!store || !(await ownsGoalPause(ctx, pause))) {
+    onOwnershipLost?.();
+    return;
+  }
+  if ((await compareAndSetGoalStatus(store, { ...pause, status: "paused" }, "active")) === null)
+    onOwnershipLost?.();
 }

@@ -53,9 +53,13 @@ export interface RuntimePort {
   onMessageStart(handler: (message: unknown, ctx: SessionContextPort) => Promise<void>): void;
   emitQuestionWait(active: boolean, ids: readonly string[]): void;
   appendQuestionWait(data: unknown): void;
-  pauseGoal(ctx: SessionContextPort): Promise<GoalPause | null>;
+  pauseGoal(ctx: SessionContextPort): Promise<GoalPause | null | false>;
   ownsGoalPause(ctx: SessionContextPort, pause: GoalPause): Promise<boolean>;
-  resumeGoal(ctx: SessionContextPort, pause: GoalPause): Promise<void>;
+  resumeGoal(
+    ctx: SessionContextPort,
+    pause: GoalPause,
+    onOwnershipLost?: () => void,
+  ): Promise<void>;
   onUserInterrupt(handler: (ctx: SessionContextPort) => Promise<void>): void;
   onGoalCheck(handler: (ctx: SessionContextPort) => Promise<void>): void;
   waitForIdle(target: Binding): Promise<void>;
@@ -272,7 +276,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     await changeWait(async () => {
       if (waiting.has(id) || settledQuestions.has(id)) return;
       await checkOwnership(ctx);
-      if (waiting.size === 0 && !userOverride) pause = await port.pauseGoal(ctx);
+      if (waiting.size === 0 && !userOverride) {
+        const acquired = await port.pauseGoal(ctx);
+        if (acquired === false) userOverride = true;
+        else pause = acquired;
+      }
       waiting.add(id);
       publishWait();
     });
@@ -288,7 +296,9 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       waiting.delete(id);
       if (settled) settledQuestions.add(id);
       if (waiting.size === 0 && pause !== null) {
-        await port.resumeGoal(ctx, pause);
+        await port.resumeGoal(ctx, pause, () => {
+          userOverride = true;
+        });
         pause = null;
       }
       publishWait();

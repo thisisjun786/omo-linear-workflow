@@ -100,9 +100,10 @@ bun "$OMO_INITIATIVE_ROOT/dist/cli.js" send --from <PARENT> --to <CHILD> --id <M
 - `research`: the deliverable is findings, not code. One session, ulw-research.
 
 A packet whose mode disagrees with the child's mode yields a `blocked` report without work.
-If a plan stage finds the work smaller than expected, it says so. Close that generation
-first (`close --binding <plan or execute binding>`), then create a new child with
-`--mode direct`; the registry allows one live owner per issue.
+If a plan stage finds no plan is needed, it reports `blocked` with the reason
+`no_plan_needed`. The parent then closes that generation (`close --binding <plan or execute
+binding>`) and creates a new child with `--mode direct`; the registry allows one live owner per
+issue.
 
 The child's base branch comes from the registry, not the packet. The packet carries the issue
 ID/key, `deliverable: pr | report | document`, the criteria verbatim, the integration branch, allowed write scope, delivery limits, an

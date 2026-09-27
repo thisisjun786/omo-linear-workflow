@@ -121,6 +121,7 @@ export function buildRoleBrief(
         ...(options.planHead === undefined ? [] : [`plan_head: ${options.planHead}`]),
         "approval: ask the parent with olw_ask; never wait for a user",
         "on_approval: olw stage complete",
+        "no_plan_needed: report blocked with reason no_plan_needed; the parent recreates the child with --mode direct",
       );
     } else if (stage === "execute") {
       parts.push(

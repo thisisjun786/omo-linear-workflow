@@ -413,6 +413,9 @@ describe("buildRoleBrief", () => {
       expect(parsed["plan_path"]).toBe(".omo/plans/<issue-key>.md");
       expect(parsed["approval"]).toBe("ask the parent with olw_ask; never wait for a user");
       expect(parsed["on_approval"]).toBe("olw stage complete");
+      expect(parsed["no_plan_needed"]).toBe(
+        "report blocked with reason no_plan_needed; the parent recreates the child with --mode direct",
+      );
     }
     if (stage === "execute") {
       expect(parsed["plan_path"]).toBe(".omo/plans/ISS-1.md");

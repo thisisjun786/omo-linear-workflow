@@ -170,10 +170,15 @@ async function acquireLock(
         ok: true,
         value: {
           release: async () => {
-            const held = lockSchema.safeParse(
-              JSON.parse(await readFile(path, "utf8").catch(() => "{}")),
-            );
-            if (held.success && held.data.token === token) await rm(path, { force: true });
+            let raw: string;
+            try {
+              raw = await readFile(path, "utf8");
+            } catch (cause) {
+              if (errorCode(cause) === "ENOENT") return;
+              throw cause;
+            }
+            const held = lockSchema.parse(JSON.parse(raw));
+            if (held.token === token) await rm(path, { force: true });
           },
         },
       };

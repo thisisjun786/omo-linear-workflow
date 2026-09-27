@@ -424,6 +424,27 @@ test("an unparseable lock is reported as corrupt with its path and left in place
   expect(fake.calls).toEqual([]);
 });
 
+test("an unreadable lock during release is reported and left in place", async () => {
+  const root = await prepareFixture();
+  const lock = join(root, ".omo/state/update.lock");
+  const fake = fakeRunner(async (argv) => {
+    if (argv[1] !== "pr" || argv[2] !== "list") return undefined;
+    await rm(lock);
+    await mkdir(lock);
+    return { code: 0, stdout: JSON.stringify([{ url: "https://example.test/pull/3" }]) };
+  });
+  fake.pushed.set(branch, "def456");
+
+  const result = await prepareUpdate(root, { run: fake.run, ghBin: "gh" });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.value.action).toBe("exists");
+  expect(result.value.cleanupErrors).toHaveLength(1);
+  expect(result.value.cleanupErrors?.[0]).toMatch(/^lock release: .*EISDIR/);
+  expect((await stat(lock)).isDirectory()).toBe(true);
+});
+
 test("thrown runner errors still remove the worktree and release the lock", async () => {
   const root = await prepareFixture();
   const fake = fakeRunner((argv) => {

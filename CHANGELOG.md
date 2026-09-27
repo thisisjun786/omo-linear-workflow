@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Exit promptly on interruption during abandoned manager startup recovery, releasing the recovery claim without closing the binding or starting another manager.
 - Reject here-mode entry on a different server from the saved manager without changing its binding; report both sockets and the original-server/close recovery options.
 - Honor interruption during existing-manager host, snapshot and verification checks instead of focusing afterward and reporting success.
 - Keep manager live ownership beyond lease expiry for both bare entry and plain `manage`, fence termination, and handle interruption from before reservation, including rejected pre-launch operations; safely recover abandoned unstarted claims.

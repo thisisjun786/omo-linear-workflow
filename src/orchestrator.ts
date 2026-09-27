@@ -1290,6 +1290,7 @@ export class Orchestrator {
   }
 
   async #recoverUnstartedManager(binding: Binding, here: ManagerHere): Promise<Result<true>> {
+    if (here.failure !== undefined) throw here.failure;
     const now = this.#deps.now();
     const claimed = this.#withRegistry((r) =>
       r.beginReattach(
@@ -1306,7 +1307,8 @@ export class Orchestrator {
     const token = claimed.value.token;
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     try {
-      const snapshot = await herdr.snapshot();
+      const snapshot = await this.#whileForeground(herdr.snapshot(), here);
+      if (here.failure !== undefined) throw here.failure;
       if (
         snapshot.panes.some(
           (pane) =>
@@ -1321,8 +1323,21 @@ export class Orchestrator {
         );
       if (binding.sessionPath !== null) {
         try {
-          const session = await this.#deps.attachBinding(binding);
-          await session.close();
+          // Keep detach attached to the lookup promise: a session arriving after interruption
+          // must still be closed, without keeping the foreground entry or its claim blocked.
+          await this.#whileForeground(
+            this.#deps.attachBinding(binding).then(async (session) => {
+              try {
+                await session.close();
+              } catch (cause) {
+                if (here.failure !== undefined)
+                  console.error(`Interrupted recovery session detach failed: ${messageOf(cause)}`);
+                throw cause;
+              }
+            }),
+            here,
+          );
+          if (here.failure !== undefined) throw here.failure;
           return failure(
             "manager_unavailable",
             "An unfinished manager has a live host session; reconcile it before recovery",
@@ -1331,6 +1346,7 @@ export class Orchestrator {
           if (!(cause instanceof NativeSessionAbsentError)) throw cause;
         }
       }
+      if (here.failure !== undefined) throw here.failure;
       if (binding.workspaceId !== null && binding.workspaceOwned !== false) {
         const owned = snapshot.workspaces.find(
           (workspace) => workspace.workspaceId === binding.workspaceId,
@@ -1341,17 +1357,23 @@ export class Orchestrator {
         if (owned !== undefined && owned.workspaceId !== here.workspaceId) {
           if (owned.cwd !== binding.cwd)
             return failure("identity_mismatch", "Unfinished manager workspace changed");
-          await herdr.closeWorkspace(owned.workspaceId);
+          if (here.failure !== undefined) throw here.failure;
+          await this.#whileForeground(herdr.closeWorkspace(owned.workspaceId), here);
         }
       }
+      if (here.failure !== undefined) throw here.failure;
       const closed = this.#withRegistry((r) => r.closeUnstartedManager(binding.id, token));
       if (!closed.ok) return closed;
       if (here.failure !== undefined) throw here.failure;
       return ok(true);
     } finally {
-      const released = this.#withRegistry((r) => r.releaseReattach(binding.id, token));
-      if (!released.ok) console.error(`Manager startup release failed: ${released.error.message}`);
-      herdr.close();
+      try {
+        const released = this.#withRegistry((r) => r.releaseReattach(binding.id, token));
+        if (!released.ok)
+          console.error(`Manager startup release failed: ${released.error.message}`);
+      } finally {
+        herdr.close();
+      }
     }
   }
 

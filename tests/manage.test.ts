@@ -600,6 +600,137 @@ test.each(["reserved", "provisioning"] as const)(
   },
 );
 
+test.each(["snapshot", "attach", "detach", "workspace-close"] as const)(
+  "SIGTERM interrupts dead-owner recovery during %s and releases its token before the operation settles",
+  async (phase) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    const dead = Bun.spawn([process.execPath, "--eval", "process.exit(0)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await dead.exited;
+    const claim = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+    );
+    if (!claim.claimed) throw new Error("Missing abandoned claim");
+    const abandoned: Binding = {
+      ...first,
+      launchState: "provisioning",
+      sessionPath: phase === "attach" || phase === "detach" ? first.sessionPath : null,
+      initialization: { state: "pending", text: null },
+    };
+    const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+    db.query("UPDATE bindings SET launch_state = 'provisioning', json = ? WHERE id = ?").run(
+      JSON.stringify(abandoned),
+      first.id,
+    );
+    db.query("UPDATE manager_reattach SET owner_pid = ? WHERE binding_id = ?").run(
+      dead.pid,
+      first.id,
+    );
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    w.workspaces.set("recovery", {
+      workspaceId: "recovery",
+      rootPaneId: "recovery:p1",
+      cwd: w.root,
+    });
+    w.panes.set("recovery:p1", { workspaceId: "recovery" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "recovery:p1";
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const completed = Promise.withResolvers<void>();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(() => deadline.reject(new Error(`Recovery ${phase} deadline`)), 2000);
+    const hold = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const snapshot = herdr.snapshot.bind(herdr);
+    const closeWorkspace = herdr.closeWorkspace.bind(herdr);
+    let snapshots = 0;
+    let workspaceCloses = 0;
+    let nativeCloses = 0;
+    herdr.snapshot = async () => {
+      if (phase === "snapshot" && ++snapshots === 2) {
+        await hold();
+        completed.resolve();
+      }
+      return snapshot();
+    };
+    herdr.closeWorkspace = async (id) => {
+      workspaceCloses++;
+      if (phase === "workspace-close") await hold();
+      await closeWorkspace(id);
+      if (phase === "workspace-close") completed.resolve();
+    };
+    const deps: OrchestratorDependencies = {
+      ...w.deps,
+      attachBinding: async (binding) => {
+        if (phase === "attach") await hold();
+        const session = await w.deps.attachBinding(binding);
+        return {
+          ...session,
+          close: async () => {
+            if (phase === "detach") await hold();
+            nativeCloses++;
+            await session.close();
+            completed.resolve();
+          },
+        };
+      },
+    };
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    const pending = runCli(["--root", w.root], deps);
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      process.kill(process.pid, "SIGTERM");
+      expect(await Promise.race([pending, deadline.promise])).toBe(143);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: { code: "manager_interrupted" },
+      });
+      expect(w.readRegistry((r) => value(r.get(first.id)))).toEqual(abandoned);
+      expect(
+        db
+          .query<{ claimed_at: string }, [string]>(
+            "SELECT claimed_at FROM manager_reattach WHERE binding_id = ?",
+          )
+          .get(first.id)?.claimed_at,
+      ).toBe("");
+      expect(w.runs).toHaveLength(1);
+      expect(workspaceCloses).toBe(phase === "workspace-close" ? 1 : 0);
+      release.resolve();
+      await Promise.race([completed.promise, deadline.promise]);
+      expect(nativeCloses).toBe(phase === "attach" || phase === "detach" ? 1 : 0);
+      expect(w.readRegistry((r) => value(r.get(first.id)))).toEqual(abandoned);
+      expect(w.workspaces.has("recovery")).toBe(true);
+    } finally {
+      release.resolve();
+      try {
+        await pending;
+        await Promise.race([completed.promise, deadline.promise]);
+      } finally {
+        clearTimeout(timer);
+        herdr.snapshot = snapshot;
+        herdr.closeWorkspace = closeWorkspace;
+        stdout.mockRestore();
+        db.close();
+        for (const [key, value] of Object.entries(old)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    }
+  },
+);
+
 test("moving an owned manager to a user pane retains its owned workspace for close", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage()).binding;

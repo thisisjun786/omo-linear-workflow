@@ -15,6 +15,7 @@ export interface PrepareStep {
   readonly command: string;
   readonly code: number;
   readonly tail: string;
+  readonly skipped?: "install failed" | undefined;
 }
 export interface PrepareResult {
   /** `recovered`: the branch was already pushed without an open PR, and the PR was created now. */
@@ -68,6 +69,7 @@ const stepSchema = z.object({
   command: z.string(),
   code: z.number().int(),
   tail: z.string(),
+  skipped: z.literal("install failed").optional(),
 });
 const recordSchema = z.object({
   branch: z.string(),
@@ -167,7 +169,10 @@ function githubRepository(remote: string): { owner: string; repo: string } | nul
   try {
     const url = new URL(remote);
     if (url.hostname.toLowerCase() !== "github.com") return null;
-    const parts = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "").split("/");
+    const parts = url.pathname
+      .replace(/^\/+|\/+$/g, "")
+      .replace(/\.git$/, "")
+      .split("/");
     if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
     return { owner: parts[0], repo: parts[1] };
   } catch {
@@ -280,14 +285,11 @@ function prBody(outcome: Outcome, versions: { omo: string; senpi: string }, note
     "",
     "## How it was verified",
     "",
-    ...outcome.steps.flatMap((step) => [
-      `### \`${step.command}\`: exit ${step.code}`,
-      "",
-      "```",
-      step.tail,
-      "```",
-      "",
-    ]),
+    ...outcome.steps.flatMap((step) =>
+      step.skipped === undefined
+        ? [`### \`${step.command}\`: exit ${step.code}`, "", "```", step.tail, "```", ""]
+        : [`### ${step.name}: skipped (${step.skipped})`, ""],
+    ),
     "## Patches",
     "",
     outcome.failedPatches.length
@@ -455,6 +457,16 @@ export async function prepareUpdate(
     const results: PrepareStep[] = [];
     let installOutput = "";
     for (const step of steps) {
+      if (results.length > 0 && results[0]?.code !== 0) {
+        results.push({
+          name: step.name,
+          command: step.argv.join(" "),
+          code: -1,
+          tail: "skipped (install failed)",
+          skipped: "install failed",
+        });
+        continue;
+      }
       const result = await exec(step.argv, worktree, step.timeoutMs);
       const output = `${result.stdout}\n${result.stderr}`;
       if (step.name === "pnpm install") installOutput = output;
@@ -486,7 +498,16 @@ export async function prepareUpdate(
   const repositoryName = `${repository.owner}/${repository.repo}`;
   const verifyPrHead = async (url: string): Promise<Result<undefined>> => {
     const viewed = await exec(
-      [gh, "pr", "view", url, "-R", repositoryName, "--json", "headRepository,headRepositoryOwner,url"],
+      [
+        gh,
+        "pr",
+        "view",
+        url,
+        "-R",
+        repositoryName,
+        "--json",
+        "headRepository,headRepositoryOwner,url",
+      ],
       resolvedRoot,
     );
     if (viewed.code !== 0)

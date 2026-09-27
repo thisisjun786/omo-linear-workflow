@@ -238,6 +238,12 @@ test("failed patch application opens a draft PR with the failure in the body", a
   const body = create[create.indexOf("--body") + 1] ?? "";
   expect(body).toContain("ERR_PNPM_PATCH_FAILED");
   expect(body).toContain("patches/omo-ai@5.0.0-0.beta.84.patch");
+  expect(body).toContain("typecheck: skipped (install failed)");
+  expect(body).toContain("test: skipped (install failed)");
+  expect(body).toContain("build: skipped (install failed)");
+  expect(ran(fake.calls, "bun run typecheck")).toBe(false);
+  expect(ran(fake.calls, "bun test")).toBe(false);
+  expect(ran(fake.calls, "bun run build")).toBe(false);
   expect(await exists(join(root, ".omo/update-worktrees", branch))).toBe(false);
 });
 

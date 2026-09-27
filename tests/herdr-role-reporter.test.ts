@@ -116,6 +116,72 @@ function fixture(initial: Binding | undefined = role()) {
 }
 
 describe("OLW role Herdr reporter", () => {
+  test("revalidates a binding after a delayed session report", async () => {
+    const harness = new Harness();
+    let binding = role();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const sent: Sent[] = [];
+    const control = registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => binding,
+      createClient: (socket, pane) => ({
+        send: async (method, params) => {
+          sent.push({ socket, pane, method, params });
+          if (method === "pane.report_agent_session" && pane === "pane-parent") {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      }),
+      debug: () => undefined,
+    });
+
+    harness.sessionStart?.("new", session());
+    await entered.promise;
+    binding = role({ paneId: "pane-new", herdrSocket: "/tmp/new.sock" });
+    release.resolve();
+    await control.drained();
+
+    expect(sent.map((item) => [item.pane, item.method])).toEqual([
+      ["pane-parent", "pane.report_agent_session"],
+      ["pane-new", "pane.report_agent_session"],
+      ["pane-new", "pane.report_agent"],
+    ]);
+  });
+
+  test("coalesces an outage burst and puts release last", async () => {
+    const harness = new Harness();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const control = registerRoleHerdrReporter(harness, {
+      hostRuntime: true,
+      lookupBinding: () => role(),
+      createClient: () => ({
+        send: async (method, params) => {
+          sent.push({ method, params });
+          if (sent.length === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      }),
+      debug: () => undefined,
+    });
+    const ctx = session();
+    harness.sessionStart?.("new", ctx);
+    await entered.promise;
+    for (let count = 1; count <= 10_000; count++)
+      harness.wakeSource?.({ source: "senpi-codemode", activeCount: count });
+    harness.sessionShutdown?.("quit", ctx);
+    release.resolve();
+    await control.drained();
+
+    expect(sent.length).toBeLessThanOrEqual(3);
+    expect(sent.at(-1)?.method).toBe("pane.release_agent");
+    expect(sent.filter((item) => item.method === "pane.report_agent")).toHaveLength(0);
+  });
   test("reports a bound RPC role turn to its recorded pane", async () => {
     const f = fixture();
     const ctx = session();

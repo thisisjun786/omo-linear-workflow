@@ -63,9 +63,14 @@ interface Reporter {
   readonly wakeSources: Map<string, number>;
   monitorCount: number;
   lastReport: string | undefined;
-  queue: Promise<void>;
+  statePending: boolean;
+  releasePending: boolean;
+  draining: Promise<void> | undefined;
   stopped: boolean;
   sessionSource: string;
+}
+export interface RoleHerdrReporterControl {
+  drained(): Promise<void>;
 }
 const representedWakeSources = new Set(["terminal-monitors", "senpi-task", "ask-user"]);
 const wakeLabels: Readonly<Record<string, readonly [string, string]>> = {
@@ -74,7 +79,6 @@ const wakeLabels: Readonly<Record<string, readonly [string, string]>> = {
   "omo-dag": ["DAG run", "DAG runs"],
   "loop-guard-hard-stop": ["loop-guard recovery pending", "loop-guard recoveries pending"],
 };
-
 function selectedReport(reporter: Reporter) {
   if (reporter.blocked.size > 0) {
     const message = reporter.blocked.values().next().value;
@@ -100,68 +104,125 @@ function selectedReport(reporter: Reporter) {
 export function registerRoleHerdrReporter(
   port: RoleHerdrReporterPort,
   dependencies: RoleHerdrReporterDependencies,
-): void {
+): RoleHerdrReporterControl {
   const reporters = new Map<string, Reporter>();
   let currentSessionId: string | undefined;
+  const releasable = (binding: Binding | undefined): binding is Binding & { paneId: string } =>
+    binding !== undefined && binding.paneId !== null && binding.launchState !== "closed";
   const live = (binding: Binding | undefined): binding is Binding & { paneId: string } =>
-    binding !== undefined &&
-    binding.paneId !== null &&
-    binding.launchState !== "closing" &&
-    binding.launchState !== "closed";
+    releasable(binding) && binding.launchState !== "closing";
   const sessionRef = (reporter: Reporter) => {
     const path = reporter.sessionManager.getSessionFile();
     return path
       ? { agent_session_path: path }
       : { agent_session_id: reporter.sessionManager.getSessionId() };
   };
-  function enqueue(reporter: Reporter, work: () => Promise<void>): void {
-    reporter.queue = reporter.queue.then(work).catch((cause: unknown) => {
-      dependencies.debug(cause instanceof Error ? cause.message : "Herdr transport failed");
-    });
-  }
-  async function target(reporter: Reporter): Promise<Target | undefined> {
-    if (reporter.stopped) return undefined;
-    let binding: Binding | undefined;
+  function binding(reporter: Reporter): (Binding & { paneId: string }) | undefined {
     try {
-      binding = dependencies.lookupBinding(reporter.sessionManager.getSessionId());
+      const current = dependencies.lookupBinding(reporter.sessionManager.getSessionId());
+      return live(current) ? current : undefined;
     } catch (cause) {
       dependencies.debug(cause instanceof Error ? cause.message : "Herdr binding lookup failed");
       return undefined;
     }
-    if (!live(binding)) {
-      reporter.target = undefined;
-      reporter.lastReport = undefined;
-      return undefined;
-    }
-    if (reporter.target?.socket === binding.herdrSocket && reporter.target.pane === binding.paneId)
-      return reporter.target;
-    reporter.target = {
-      socket: binding.herdrSocket,
-      pane: binding.paneId,
-      client: dependencies.createClient(binding.herdrSocket, binding.paneId),
-    };
-    reporter.lastReport = undefined;
-    await reporter.target.client.send("pane.report_agent_session", {
-      agent: "pi",
-      ...sessionRef(reporter),
-      session_start_source: reporter.sessionSource,
-    });
-    reporter.sessionSource = "resume";
-    return reporter.target;
   }
-  function publish(reporter: Reporter): void {
-    enqueue(reporter, async () => {
+  async function currentTarget(reporter: Reporter): Promise<Target | undefined> {
+    for (;;) {
+      if (reporter.stopped && !reporter.releasePending) return undefined;
+      const before = binding(reporter);
+      if (before === undefined) {
+        reporter.target = undefined;
+        reporter.lastReport = undefined;
+        return undefined;
+      }
+      if (reporter.target?.socket === before.herdrSocket && reporter.target.pane === before.paneId)
+        return reporter.target;
+      const candidate = {
+        socket: before.herdrSocket,
+        pane: before.paneId,
+        client: dependencies.createClient(before.herdrSocket, before.paneId),
+      };
+      await candidate.client.send("pane.report_agent_session", {
+        agent: "pi",
+        ...sessionRef(reporter),
+        session_start_source: reporter.sessionSource,
+      });
+      const after = binding(reporter);
+      if (after === undefined) return undefined;
+      if (after.herdrSocket !== candidate.socket || after.paneId !== candidate.pane) continue;
+      reporter.target = candidate;
+      reporter.lastReport = undefined;
+      reporter.sessionSource = "resume";
+      return candidate;
+    }
+  }
+  async function drain(reporter: Reporter): Promise<void> {
+    while (reporter.releasePending || reporter.statePending) {
+      if (reporter.releasePending) {
+        reporter.releasePending = false;
+        reporter.statePending = false;
+        let current: (Binding & { paneId: string }) | undefined;
+        try {
+          const stored = dependencies.lookupBinding(reporter.sessionManager.getSessionId());
+          current = releasable(stored) ? stored : undefined;
+        } catch (cause) {
+          dependencies.debug(
+            cause instanceof Error ? cause.message : "Herdr binding lookup failed",
+          );
+        }
+        if (current !== undefined) {
+          const destination =
+            reporter.target?.socket === current.herdrSocket &&
+            reporter.target.pane === current.paneId
+              ? reporter.target
+              : {
+                  socket: current.herdrSocket,
+                  pane: current.paneId,
+                  client: dependencies.createClient(current.herdrSocket, current.paneId),
+                };
+          await destination.client.send("pane.release_agent", { agent: "pi" });
+        }
+        reporter.stopped = true;
+        continue;
+      }
+      reporter.statePending = false;
+      const destination = await currentTarget(reporter);
+      if (reporter.releasePending || destination === undefined) continue;
+      const latest = binding(reporter);
+      if (
+        latest === undefined ||
+        latest.herdrSocket !== destination.socket ||
+        latest.paneId !== destination.pane
+      ) {
+        reporter.statePending = true;
+        continue;
+      }
       const next = selectedReport(reporter);
       const key = JSON.stringify(next);
-      const destination = await target(reporter);
-      if (destination === undefined || reporter.lastReport === key) return;
+      if (reporter.lastReport === key) continue;
       await destination.client.send("pane.report_agent", {
         agent: "pi",
         ...sessionRef(reporter),
         ...next,
       });
       reporter.lastReport = key;
-    });
+    }
+  }
+  function startDrain(reporter: Reporter): void {
+    if (reporter.draining !== undefined) return;
+    reporter.draining = drain(reporter)
+      .catch((cause: unknown) => {
+        dependencies.debug(cause instanceof Error ? cause.message : "Herdr transport failed");
+      })
+      .finally(() => {
+        reporter.draining = undefined;
+        if (reporter.releasePending || reporter.statePending) startDrain(reporter);
+      });
+  }
+  function publish(reporter: Reporter): void {
+    if (reporter.stopped || reporter.releasePending) return;
+    reporter.statePending = true;
+    startDrain(reporter);
   }
   function ensureReporter(ctx: RoleSessionContext, reason: string): Reporter | undefined {
     if (!dependencies.hostRuntime || ctx.mode === "tui") return undefined;
@@ -176,7 +237,9 @@ export function registerRoleHerdrReporter(
       wakeSources: new Map(),
       monitorCount: 0,
       lastReport: undefined,
-      queue: Promise.resolve(),
+      statePending: false,
+      releasePending: false,
+      draining: undefined,
       stopped: false,
       sessionSource: reason,
     };
@@ -239,27 +302,27 @@ export function registerRoleHerdrReporter(
     const sessionId = ctx.sessionManager.getSessionId();
     const reporter = reporters.get(sessionId);
     if (reporter === undefined) return;
-    if (reason === "quit")
-      enqueue(reporter, async () => {
-        const binding = dependencies.lookupBinding(sessionId);
-        if (live(binding)) {
-          const destination =
-            reporter.target?.socket === binding.herdrSocket &&
-            reporter.target.pane === binding.paneId
-              ? reporter.target
-              : {
-                  socket: binding.herdrSocket,
-                  pane: binding.paneId,
-                  client: dependencies.createClient(binding.herdrSocket, binding.paneId),
-                };
-          await destination.client.send("pane.release_agent", { agent: "pi" });
-        }
-        reporter.stopped = true;
-      });
-    else reporter.stopped = true;
-    reporters.delete(sessionId);
+    if (reason === "quit") {
+      reporter.releasePending = true;
+      reporter.statePending = false;
+      startDrain(reporter);
+    } else {
+      reporter.stopped = true;
+      reporter.statePending = false;
+    }
     if (currentSessionId === sessionId) currentSessionId = undefined;
   });
+  return {
+    async drained(): Promise<void> {
+      for (;;) {
+        const pending = [...reporters.values()].flatMap((reporter) =>
+          reporter.draining === undefined ? [] : [reporter.draining],
+        );
+        if (pending.length === 0) return;
+        await Promise.all(pending);
+      }
+    },
+  };
 }
 
 let sequence = 0;

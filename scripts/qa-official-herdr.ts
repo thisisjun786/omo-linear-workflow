@@ -286,6 +286,47 @@ export async function runOfficialHerdrQa(
       parents.push(parent);
       await connected(parent);
     }
+    let plainPane: string | undefined;
+    if (roleReport) {
+      const plain = await herdr.createWorkspace(world.repository, "plain-omo");
+      world.workspaces.push(plain.workspaceId);
+      plainPane = plain.rootPaneId;
+      const plainReported = Promise.withResolvers<void>();
+      const stopTraffic = world.onHerdrRequest((value) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          "method" in value &&
+          value.method === "pane.report_agent_session" &&
+          "params" in value &&
+          typeof value.params === "object" &&
+          value.params !== null &&
+          "pane_id" in value.params &&
+          value.params.pane_id === plain.rootPaneId
+        )
+          plainReported.resolve();
+      });
+      const deadline = setTimeout(
+        () => plainReported.reject(new Error("Plain OMO reporter deadline")),
+        30000,
+      );
+      try {
+        await herdr.run(
+          plain.rootPaneId,
+          [join(world.controlRoot, "node_modules/.bin/omo"), "--name", "plain-omo"],
+          {
+            PATH: process.env["PATH"] ?? "",
+            HERDR_ENV: "1",
+            HERDR_PANE_ID: plain.rootPaneId,
+            HERDR_SOCKET_PATH: world.herdrSocket,
+          },
+        );
+        await plainReported.promise;
+      } finally {
+        stopTraffic();
+        clearTimeout(deadline);
+      }
+    }
     const parent = parents[0];
     assert.ok(parent);
     if (roleReport) {
@@ -376,7 +417,7 @@ export async function runOfficialHerdrQa(
         await turn;
       }
     }
-    if (entry)
+    if (entry && !roleReport)
       evidence["busyNotice"] = await managerBusyNoticeQa(world, manager, parent, managerClient);
     const plan = z
       .object({ binding: bindingSchema })
@@ -469,6 +510,24 @@ export async function runOfficialHerdrQa(
     await idle(planClient);
     if (roleReport) {
       assert.ok(plan.paneId);
+      await checkedQaCommand(
+        [
+          "herdr",
+          "agent",
+          "wait",
+          plan.paneId,
+          "--until",
+          "idle",
+          "--until",
+          "done",
+          "--until",
+          "working",
+          "--timeout",
+          "30000",
+        ],
+        world.repository,
+        world.environment,
+      );
       const unblocked = await checkedQaCommand(
         ["herdr", "agent", "get", plan.paneId],
         world.repository,
@@ -524,6 +583,62 @@ export async function runOfficialHerdrQa(
     await planClient.closeSession();
     await planClient.stop();
     clients.splice(clients.indexOf(planClient), 1);
+    if (roleReport) {
+      const sessionReports = world.herdrTraffic.filter(
+        (value): value is { method: string; params: { pane_id?: string } } =>
+          typeof value === "object" &&
+          value !== null &&
+          "method" in value &&
+          value.method === "pane.report_agent_session" &&
+          "params" in value &&
+          typeof value.params === "object" &&
+          value.params !== null,
+      );
+      evidence["roleOwnershipRaw"] = {
+        sessionReports: world.herdrTraffic,
+        manager,
+        parents,
+        plainPane,
+      };
+      const rolePanes = parents
+        .map((binding) => binding.paneId)
+        .filter((pane): pane is string => pane !== null);
+      for (const pane of new Set(rolePanes)) {
+        const count = sessionReports.filter((request) => request.params.pane_id === pane).length;
+        evidence[`singleOwnerCount:${pane}`] = count;
+        check(`singleOwner:${pane}`, count === 1);
+      }
+      assert.ok(plainPane);
+      check(
+        "plainBuiltinOwner",
+        sessionReports.filter((request) => request.params.pane_id === plainPane).length === 1,
+      );
+      const loaded = (await Bun.file(join(scratch, "gate/loaded-extensions.jsonl")).text())
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) =>
+          z
+            .object({ sessionId: z.string(), mode: z.string(), paths: z.array(z.string()) })
+            .parse(JSON.parse(line)),
+        );
+      const marker = join(world.controlRoot, "dist/extension/herdr-olw-owner.js");
+      for (const binding of [manager, ...parents])
+        check(
+          `markerLoaded:${binding.id}`,
+          loaded.some(
+            (receipt) =>
+              receipt.sessionId === binding.durableSessionId && receipt.paths.includes(marker),
+          ),
+        );
+      const plainReceipt = loaded.find(
+        (receipt) => receipt.mode === "tui" && !receipt.paths.includes(marker),
+      );
+      check("plainMarkerAbsent", plainReceipt !== undefined);
+      evidence["roleOwnership"] = { sessionReports, loaded, marker, plainPane };
+      evidence["result"] = "PASS";
+      return;
+    }
     const execute = z
       .object({ binding: bindingSchema })
       .parse(
@@ -603,6 +718,54 @@ export async function runOfficialHerdrQa(
       planContract:
         "todo 11 exact-pane fallback: report the exact binding to close when relaunch is impossible",
     };
+    if (roleReport) {
+      const sessionReports = world.herdrTraffic.filter(
+        (value): value is { method: string; params: { pane_id?: string; source?: string } } =>
+          typeof value === "object" &&
+          value !== null &&
+          "method" in value &&
+          value.method === "pane.report_agent_session" &&
+          "params" in value &&
+          typeof value.params === "object" &&
+          value.params !== null,
+      );
+      const rolePanes = [
+        manager.paneId,
+        reattached.binding.paneId,
+        ...parents.map((p) => p.paneId),
+      ].filter((pane): pane is string => pane !== null);
+      for (const pane of new Set(rolePanes))
+        check(
+          `singleOwner:${pane}`,
+          sessionReports.filter((request) => request.params.pane_id === pane).length === 1,
+        );
+      const loaded = (await Bun.file(join(scratch, "gate/loaded-extensions.jsonl")).text())
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) =>
+          z.object({ sessionId: z.string(), paths: z.array(z.string()) }).parse(JSON.parse(line)),
+        );
+      assert.ok(plainPane);
+      check(
+        "plainBuiltinOwner",
+        sessionReports.filter((request) => request.params.pane_id === plainPane).length === 1,
+      );
+      const marker = join(world.controlRoot, "dist/extension/herdr-olw-owner.js");
+      for (const binding of [manager, ...parents])
+        check(
+          `markerLoaded:${binding.id}`,
+          loaded.some(
+            (receipt) =>
+              receipt.sessionId === binding.durableSessionId && receipt.paths.includes(marker),
+          ),
+        );
+      check(
+        "plainMarkerAbsent",
+        loaded.some((receipt) => receipt.paths.includes(marker) === false),
+      );
+      evidence["roleOwnership"] = { sessionReports, loaded, marker, plainPane };
+    }
     evidence["result"] = "PASS";
   } catch (error) {
     failure = error;

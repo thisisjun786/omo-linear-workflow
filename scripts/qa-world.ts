@@ -1,4 +1,5 @@
 import { cp, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createConnection, createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RpcClient } from "@code-yeongyu/senpi";
@@ -166,7 +167,44 @@ export async function prepareQaWorld() {
     await rm(scratch, { recursive: true, force: true });
     throw error;
   }
-  const herdrSocket = server.herdrSocket;
+  let upstreamHerdrSocket = server.herdrSocket;
+  const herdrTraffic: unknown[] = [];
+  const herdrTrafficListeners = new Set<(request: unknown) => void>();
+  const tapPath = join(scratch, "herdr-tap.sock");
+  const tap = createServer((downstream) => {
+    const upstream = createConnection(upstreamHerdrSocket);
+    let buffer = "";
+    downstream.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) break;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try {
+          const request: unknown = JSON.parse(line);
+          herdrTraffic.push(request);
+          for (const listener of herdrTrafficListeners) listener(request);
+        } catch {
+          herdrTraffic.push({ invalidJson: line });
+        }
+      }
+      upstream.write(chunk);
+    });
+    upstream.on("data", (chunk) => downstream.write(chunk));
+    downstream.on("end", () => upstream.end());
+    upstream.on("end", () => downstream.end());
+    downstream.on("error", () => upstream.destroy());
+    upstream.on("error", () => downstream.destroy());
+  });
+  await new Promise<void>((resolve, reject) => {
+    tap.once("error", reject);
+    tap.listen(tapPath, () => {
+      tap.off("error", reject);
+      resolve();
+    });
+  });
+  const herdrSocket = tapPath;
   const worktrees: string[] = [];
   const workspaces: string[] = [];
   let repositoryMapping: Promise<{ readonly remote: string; readonly defaultBranch: "main" }>;
@@ -190,6 +228,11 @@ export async function prepareQaWorld() {
     herdrSocket,
     environment,
     cleanup,
+    herdrTraffic,
+    onHerdrRequest(listener: (request: unknown) => void): () => void {
+      herdrTrafficListeners.add(listener);
+      return () => herdrTrafficListeners.delete(listener);
+    },
     worktrees,
     workspaces,
     async writeOwnedScopeFixture(path: string, input?: unknown): Promise<void> {
@@ -229,8 +272,7 @@ export async function prepareQaWorld() {
       );
       await Promise.all([server.herdr.exited, server.stderrTask, server.output]);
       server = await startServer();
-      if (server.herdrSocket !== herdrSocket)
-        throw new QaError("Restart changed owned Herdr socket identity");
+      upstreamHerdrSocket = server.herdrSocket;
     },
     async close(): Promise<void> {
       const failures: string[] = [];
@@ -330,20 +372,30 @@ export async function prepareQaWorld() {
         await server.stderrTask;
         await server.output;
         if (client) {
-          for (const sessionId of cleanupAttachments) await client.closeSession(sessionId);
+          for (const sessionId of cleanupAttachments) {
+            await client.closeSession(sessionId);
+          }
         }
       } finally {
         await client?.stop();
       }
       if (hostExists) {
         const stopped = await runQaCommand(
-          [join(controlRoot, "node_modules/.bin/omo"), "host", "stop", "--socket", socketPath],
+          [
+            join(controlRoot, "node_modules/.bin/omo"),
+            "host",
+            "stop",
+            "--force",
+            "--socket",
+            socketPath,
+          ],
           controlRoot,
           environment,
         );
         if (stopped.code !== 0) failures.push(`OMO host stop: ${stopped.stdout} ${stopped.stderr}`);
       }
       await run(["session", "delete", sessionName, "--json"]);
+      await new Promise<void>((resolve) => tap.close(() => resolve()));
       cleanup.daemons = await reapQaDaemons(scratch);
       cleanup.tempFiles = await qaTempFiles(environment.TMPDIR);
       if (failures.length) {

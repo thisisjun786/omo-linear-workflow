@@ -1,5 +1,5 @@
 import { existsSync, watch } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ProviderConfig } from "@code-yeongyu/senpi";
 import { createAssistantMessageEventStream } from "../node_modules/@code-yeongyu/senpi/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js";
@@ -7,6 +7,13 @@ import { createAssistantMessageEventStream } from "../node_modules/@code-yeongyu
 // Offline QA replaces only inference. Native TUI, shared host, extension delivery,
 // question persistence and Herdr integration are unchanged and can fail normally.
 export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
+  pi.on("session_start", async (_event, ctx) => {
+    if (gate === undefined) return;
+    await appendFile(
+      join(gate, "loaded-extensions.jsonl"),
+      `${JSON.stringify({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, mode: ctx.mode, paths: ctx.loadedExtensionPaths ?? [] })}\n`,
+    );
+  });
   pi.rpc.handle("oi.qa.olw-ask", async (input: unknown) => {
     const result = await pi.executeTool("olw_ask", input);
     if (result.isError)

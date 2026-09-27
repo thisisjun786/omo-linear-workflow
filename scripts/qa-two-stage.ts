@@ -18,7 +18,13 @@ import { prepareQaWorld } from "./qa-world";
 // Native boundaries remain real. Only npm's read-only version lookup is offline.
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--official-offline") {
-  await (await import("./qa-official-herdr")).runOfficialHerdrQa();
+  await (await import("./qa-official-herdr")).runOfficialHerdrQa(
+    "qa-two-stage-official-offline.json",
+  );
+  process.exit(0);
+}
+if (args.length === 1 && args[0] === "--manager-reattach") {
+  await (await import("./qa-official-herdr")).runOfficialHerdrQa("qa-manager-reattach.json");
   process.exit(0);
 }
 assert.ok(args.length === 0 || (args.length === 1 && args[0] === "--break-answer"));

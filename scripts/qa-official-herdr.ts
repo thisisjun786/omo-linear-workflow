@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import type { Binding } from "../src/core/contracts";
-import { bindingSchema, deliveryRecordSchema } from "../src/core/schema";
+import { bindingSchema, deliveryRecordSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { resolveHerdrArtifact } from "../src/herdr/artifact";
 import { createHerdrClient } from "../src/herdr/client";
@@ -15,7 +15,9 @@ import { planPaneExited } from "../src/orchestrator";
 import { attach, idle } from "./qa-hierarchy";
 import { checkedQaCommand, prepareQaWorld } from "./qa-world";
 
-export async function runOfficialHerdrQa(): Promise<void> {
+export async function runOfficialHerdrQa(
+  evidenceName = "lina-275-official-qa.json",
+): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const scratch = await mkdtemp(join(tmpdir(), "olw-official-"));
   const home = join(scratch, "home");
@@ -132,9 +134,16 @@ export async function runOfficialHerdrQa(): Promise<void> {
     };
     const manager = z.object({ binding: bindingSchema }).parse(await invoke(["manage"])).binding;
     const managerClient = await connected(manager);
+    const initialManagerIdentity = {
+      durableSessionId: manager.durableSessionId,
+      sessionPath: manager.sessionPath,
+    };
+    const initialSnapshot = await herdr.snapshot();
     check(
-      "builtinPiDetection",
-      (await herdr.snapshot()).panes.some((p) => p.paneId === manager.paneId && p.agent === "pi"),
+      "builtinAgentDetection",
+      initialSnapshot.panes.some(
+        (pane) => pane.paneId === manager.paneId && (pane.agent === "pi" || pane.agent === "omo"),
+      ),
     );
     const again = z
       .object({ action: z.string(), binding: bindingSchema })
@@ -156,15 +165,56 @@ export async function runOfficialHerdrQa(): Promise<void> {
       stop();
       clearTimeout(deadline);
     }
+    check(
+      "managerExitFrameReleasedTui",
+      !(await herdr.snapshot()).panes.some(
+        (pane) =>
+          pane.paneId === manager.paneId &&
+          (pane.agent === "pi" || pane.agent === "omo") &&
+          pane.sessionPath !== null,
+      ),
+    );
     const reattached = z
       .object({ action: z.string(), binding: bindingSchema })
       .parse(await invoke(["manage"]));
+    const reattachedSnapshot = await herdr.snapshot();
     check(
-      "managerReattach",
+      "managerReattachSameBindingAndSession",
       reattached.action === "reattached" &&
         reattached.binding.id === manager.id &&
-        reattached.binding.paneId !== manager.paneId,
+        reattached.binding.paneId !== manager.paneId &&
+        reattached.binding.durableSessionId === initialManagerIdentity.durableSessionId &&
+        reattached.binding.sessionPath === initialManagerIdentity.sessionPath,
     );
+    check(
+      "managerReattachExactlyOneWorkspace",
+      reattachedSnapshot.workspaces.filter((workspace) => workspace.label === "manager").length ===
+        1,
+    );
+    check(
+      "managerReattachTuiLive",
+      reattachedSnapshot.panes.some(
+        (pane) =>
+          pane.paneId === reattached.binding.paneId &&
+          pane.workspaceId === reattached.binding.workspaceId &&
+          (pane.agent === "pi" || pane.agent === "omo"),
+      ),
+    );
+    const native = runtimeIdentitySchema.parse(
+      success.parse(await managerClient.requestExtension("omo.initiative.describe")).value,
+    );
+    check(
+      "managerReattachNativeSession",
+      native.durableSessionId === initialManagerIdentity.durableSessionId &&
+        native.sessionPath === initialManagerIdentity.sessionPath,
+    );
+    evidence["managerReattach"] = {
+      initial: manager,
+      reattached: reattached.binding,
+      initialSnapshot,
+      reattachedSnapshot,
+      nativeIdentity: native,
+    };
     await idle(managerClient);
     const remote = join(world.scratch, "remote.git");
     await checkedQaCommand(
@@ -369,6 +419,29 @@ export async function runOfficialHerdrQa(): Promise<void> {
           keys[1],
     );
     await invoke(["doctor"]);
+    assert.ok(reattached.binding.workspaceId);
+    await herdr.closeWorkspace(reattached.binding.workspaceId);
+    const missingWorkspace = await world.cli(["manage"]);
+    const missingWorkspaceResult = z
+      .object({
+        ok: z.literal(false),
+        error: z.object({ code: z.literal("manager_unavailable"), message: z.string() }),
+      })
+      .parse(JSON.parse(missingWorkspace.stdout));
+    check(
+      "managerMissingWorkspaceTypedOutcome",
+      missingWorkspace.code === 2 &&
+        missingWorkspaceResult.error.message.includes("workspace is gone or changed") &&
+        missingWorkspaceResult.error.message.includes(
+          `run olw close --binding ${manager.id} first`,
+        ),
+    );
+    evidence["managerMissingWorkspace"] = {
+      exitCode: missingWorkspace.code,
+      result: missingWorkspaceResult,
+      planContract:
+        "todo 11 exact-pane fallback: report the exact binding to close when relaunch is impossible",
+    };
     evidence["result"] = "PASS";
   } catch (error) {
     failure = error;
@@ -397,9 +470,9 @@ export async function runOfficialHerdrQa(): Promise<void> {
     for (const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env, envBefore);
     if (failure) evidence["result"] = "FAIL";
-    await mkdir(join(root, ".omo/evidence"), { recursive: true });
+    await mkdir(join(root, ".omo/evidence/two-stage"), { recursive: true });
     await writeFile(
-      join(root, ".omo/evidence/lina-275-official-qa.json"),
+      join(root, ".omo/evidence/two-stage", evidenceName),
       JSON.stringify(evidence, null, 2),
     );
   }

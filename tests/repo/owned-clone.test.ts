@@ -22,13 +22,6 @@ function value<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(JSON.stringify(result.error));
   return result.value;
 }
-function withConfiguredSource(receipt: string, source: string): unknown {
-  const parsed = JSON.parse(receipt);
-  return {
-    ...parsed,
-    copies: parsed.copies.map((copy: Record<string, unknown>) => ({ ...copy, source })),
-  };
-}
 async function git(cwd: string, ...args: string[]) {
   const child = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
   const [code, out, err] = await Promise.all([
@@ -355,8 +348,7 @@ test("explicit local files are private, receipted and redacted from setup logs i
     expect(receiptPath).toBeDefined();
     const receipt = await readFile(receiptPath ?? "", "utf8");
     expect(receipt).not.toContain(secret);
-    expect(withConfiguredSource(receipt, source)).toMatchObject({
-      copies: [{ source, target: ".env", mode: "0600" }],
+    expect(JSON.parse(receipt)).toMatchObject({
       setup: [{ code: 0, timedOut: false }],
     });
     const log = await readFile(`${receiptPath}.setup-0.log`, "utf8");

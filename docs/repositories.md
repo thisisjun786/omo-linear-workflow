@@ -114,7 +114,10 @@ snapshot remote URL:
 Only named sources are read: OLW never scans or copies from the user's repository. Each new
 mapped parent and child gets its own copy, mode `0600`. Targets must be relative, cannot traverse
 symlink directories, and cannot address `.git`. A target file is atomically replaced, not followed
-as a symlink. Legacy checkouts and execute-stage tab reuse are not initialized again.
+as a symlink. Legacy checkouts and execute-stage tab reuse are not initialized again. Descriptor-relative copies
+prevent repository symlinks and configured paths from redirecting writes; initialization assumes
+exclusive same-user ownership, since another process with permission to rename checkout directories
+can already write anywhere that user can.
 
 Receipts are recorded incrementally in `.omo/state/checkouts/<binding>.json` with each source's
 basename label, target path and permissions, never absolute source paths or file contents. Optional

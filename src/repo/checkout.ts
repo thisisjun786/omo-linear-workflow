@@ -5,14 +5,23 @@ import type { Checkout } from "../core/contracts";
 import { CheckoutPathError, copyIntoCheckout } from "./checkout-fd";
 import { mirrorPath } from "./mirror";
 
+const hasControlCharacter = (value: string) =>
+  [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
 const localFileSchema = z.strictObject({
-  source: z.string().refine(isAbsolute, "Source must be absolute"),
+  source: z
+    .string()
+    .refine(isAbsolute, "Source must be absolute")
+    .refine((path) => !hasControlCharacter(path), "Source must not contain control characters"),
   target: z
     .string()
     .min(1)
     .refine(
       (path) =>
         !isAbsolute(path) &&
+        !hasControlCharacter(path) &&
         path
           .split(/[\\/]/)
           .every((part) => part !== ".." && part !== "." && part !== ".git" && part !== ""),

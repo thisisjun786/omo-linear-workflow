@@ -79,7 +79,7 @@ bun run cli -- --root "$PWD" update check --json          # pinned versions vs n
 bun run cli -- --root "$PWD" update prepare --json        # update branch + PR to dev in a separate worktree; never merges
 ```
 
-`update check` compares the pinned `omo-ai` (`beta`) and `@code-yeongyu/senpi` (`latest`) versions with npm; `--tag pkg=tag` overrides a dist-tag. `update prepare` creates `olw/update-omo-<v>-senpi-<v>` from the remote's `dev` in a separate worktree (`--remote NAME|URL` picks the remote to fetch `dev` from and push to; default `origin`), runs install, typecheck, test and build there and opens a PR to `dev` (a draft if anything failed). It never touches the live host.
+`update check` compares the pinned `omo-ai` (`beta`) and `@code-yeongyu/senpi` (`latest`) versions with npm; `--tag pkg=tag` overrides a dist-tag. `update prepare` creates `olw/update-omo-<v>-senpi-<v>` from the remote's `dev` in a separate worktree (`--remote NAME|URL` picks a GitHub remote to fetch `dev` from and push to; default `origin`; non-GitHub remotes are refused), runs install, typecheck, test and build there and opens a PR to `dev` (a draft if anything failed). It never touches the live host.
 
 `--root` is this tool's control root, and `$PWD` in the examples is this repository. The default Herdr socket comes from the current pane's `HERDR_SOCKET_PATH`. Pass `--herdr-socket /abs/socket` only when selecting a different server. Creating and shutting down isolated QA servers is handled by the QA scripts below.
 

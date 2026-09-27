@@ -108,13 +108,14 @@ function fakeRunner(
     if (bin === "git" && sub === "commit")
       committedPackage = JSON.parse(await readFile(join(options.cwd, "package.json"), "utf8"));
     if (sub === "pr" && argv[2] === "list") {
-      const head = (argv[argv.indexOf("--head") + 1] ?? "").replace(/^[^:]+:/, "");
+      const head = argv[argv.indexOf("--head") + 1] ?? "";
       const repository = argv[argv.indexOf("-R") + 1] ?? "thisisjun786/omo-linear-workflow";
       const [owner, name] = repository.split("/");
       return ok(
         openPrs.has(head)
           ? JSON.stringify([
               {
+                number: 3,
                 url: "https://example.test/pull/3",
                 headRepository: { name },
                 headRepositoryOwner: { login: owner },
@@ -213,6 +214,8 @@ test("all green opens a ready PR to dev from a removed worktree", async () => {
     action: "exists",
     pr: "https://example.test/pull/3",
   });
+  expect(fake.calls.filter((call) => call.argv[2] === "create")).toHaveLength(1);
+  expect(fake.calls.filter((call) => call.argv[2] === "list").at(-1)?.argv).toContain(branch);
   expect(await readFile(logPath, "utf8")).toContain(
     "gh pr create -R thisisjun786/omo-linear-workflow --base dev",
   );
@@ -244,6 +247,12 @@ test("failed patch application opens a draft PR with the failure in the body", a
   expect(ran(fake.calls, "bun run typecheck")).toBe(false);
   expect(ran(fake.calls, "bun test")).toBe(false);
   expect(ran(fake.calls, "bun run build")).toBe(false);
+  const commit = fake.calls.find((call) => call.argv[1] === "commit")?.argv ?? [];
+  const message = commit[commit.lastIndexOf("-m") + 1] ?? "";
+  expect(message).toContain("bun run typecheck: skipped (install failed)");
+  expect(message).toContain("bun test: skipped (install failed)");
+  expect(message).toContain("bun run build: skipped (install failed)");
+  expect(message).not.toContain("exit -1");
   expect(await exists(join(root, ".omo/update-worktrees", branch))).toBe(false);
 });
 
@@ -490,6 +499,7 @@ test("an unreadable lock during release is reported and left in place", async ()
       code: 0,
       stdout: JSON.stringify([
         {
+          number: 3,
           url: "https://example.test/pull/3",
           headRepository: { name: "omo-linear-workflow" },
           headRepositoryOwner: { login: "thisisjun786" },
@@ -587,6 +597,43 @@ test("a named GitHub remote scopes lookup, creation and head verification to its
   expect(create[create.indexOf("--head") + 1]).toBe(`contributor:${branch}`);
   const view = fake.calls.find((call) => call.argv[2] === "view")?.argv ?? [];
   expect(view[view.indexOf("-R") + 1]).toBe("contributor/project");
+
+  const again = await prepareUpdate(root, { run: fake.run, remote: "fork", ghBin: "gh-shim" });
+  expect(again.ok && again.value.action).toBe("exists");
+  expect(fake.calls.filter((call) => call.argv[2] === "create")).toHaveLength(1);
+  const lastList = fake.calls.filter((call) => call.argv[2] === "list").at(-1)?.argv ?? [];
+  expect(lastList[lastList.indexOf("--head") + 1]).toBe(branch);
+});
+
+test.each([
+  "https://github.com/owner/repo.git",
+  "https://www.github.com/owner/repo.git",
+  "ssh://git@github.com/owner/repo.git",
+  "ssh://git@ssh.github.com:443/owner/repo.git",
+  "git@github.com:owner/repo.git",
+  "git+ssh://git@github.com/owner/repo.git",
+])("accepts supported GitHub remote %s", async (remote) => {
+  const root = await prepareFixture();
+  const fake = fakeRunner();
+  const result = await prepareUpdate(root, { run: fake.run, remote });
+  expect(result.ok && result.value.action).toBe("opened");
+});
+
+test.each([
+  "ftp://github.com/owner/repo.git",
+  "git://github.com/owner/repo.git",
+  "file://github.com/owner/repo.git",
+  "https://github.com/-owner/repo.git",
+  "https://github.com/owner/-repo.git",
+  "https://github.com/owner/repo.git.git",
+  "https://github.com/owner%2Fother/repo.git",
+])("rejects unsupported GitHub-like remote %s before push", async (remote) => {
+  const root = await prepareFixture();
+  const fake = fakeRunner();
+  const result = await prepareUpdate(root, { run: fake.run, remote });
+  expect(result).toMatchObject({ ok: false, error: { code: "unsupported_remote" } });
+  expect(ran(fake.calls, "git push")).toBe(false);
+  expect(fake.calls.some((call) => call.argv[1] === "pr")).toBe(false);
 });
 
 test("a non-GitHub remote fails before push", async () => {
@@ -604,7 +651,22 @@ test("a non-GitHub remote fails before push", async () => {
   expect(fake.calls.some((call) => call.argv[1] === "pr")).toBe(false);
 });
 
-test("custom remote and gh binary are used", async () => {
+test("a local-path custom remote is refused before push", async () => {
+  const root = await prepareFixture();
+  const fake = fakeRunner();
+
+  const result = await prepareUpdate(root, {
+    run: fake.run,
+    remote: "/tmp/bare.git",
+    ghBin: "/tmp/gh-shim",
+  });
+
+  expect(result).toMatchObject({ ok: false, error: { code: "unsupported_remote" } });
+  expect(ran(fake.calls, "git push")).toBe(false);
+  expect(fake.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+});
+
+test("custom GitHub remote and gh binary are used", async () => {
   const root = await prepareFixture();
   const fake = fakeRunner();
   const result = await prepareUpdate(root, {

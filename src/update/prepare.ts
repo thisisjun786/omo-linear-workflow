@@ -63,7 +63,7 @@ const prSchema = z.object({
   headRepository: z.object({ name: z.string() }),
   headRepositoryOwner: z.object({ login: z.string() }),
 });
-const prListSchema = z.array(prSchema);
+const prListSchema = z.array(prSchema.extend({ number: z.number().int() }));
 const stepSchema = z.object({
   name: z.string(),
   command: z.string(),
@@ -164,20 +164,47 @@ function inside(parent: string, path: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 function githubRepository(remote: string): { owner: string; repo: string } | null {
-  const scp = /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/.exec(remote);
-  if (scp) return { owner: scp[1] ?? "", repo: scp[2] ?? "" };
+  const repository = (path: string) => {
+    const trimmed = path.replace(/^\/+|\/+$/g, "");
+    const withoutSuffix = trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
+    const parts = withoutSuffix.split("/");
+    if (
+      parts.length !== 2 ||
+      parts.some(
+        (part) =>
+          part === "" ||
+          part.startsWith("-") ||
+          part.endsWith(".git") ||
+          !/^[A-Za-z0-9_.-]+$/.test(part),
+      )
+    )
+      return null;
+    return { owner: parts[0] ?? "", repo: parts[1] ?? "" };
+  };
+  const scp = /^git@github\.com:(.+)$/.exec(remote);
+  if (scp) return repository(scp[1] ?? "");
+  let url: URL;
   try {
-    const url = new URL(remote);
-    if (url.hostname.toLowerCase() !== "github.com") return null;
-    const parts = url.pathname
-      .replace(/^\/+|\/+$/g, "")
-      .replace(/\.git$/, "")
-      .split("/");
-    if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-    return { owner: parts[0], repo: parts[1] };
+    url = new URL(remote);
   } catch {
     return null;
   }
+  const protocol = url.protocol.toLowerCase();
+  const host = url.hostname.toLowerCase();
+  const standardHost = host === "github.com" || host === "www.github.com";
+  const ssh443 = host === "ssh.github.com" && url.port === "443";
+  if (
+    !(
+      (protocol === "https:" && standardHost && url.username === "" && url.password === "") ||
+      ((protocol === "ssh:" || protocol === "git+ssh:") &&
+        (standardHost || ssh443) &&
+        url.username === "git" &&
+        url.password === "")
+    )
+  )
+    return null;
+  if (url.search !== "" || url.hash !== "" || url.pathname.includes("%")) return null;
+  return repository(url.pathname);
 }
 function tail(text: string, lines = 30, chars = 3000): string {
   const kept = text.trimEnd().split("\n").slice(-lines).join("\n");
@@ -479,10 +506,9 @@ export async function prepareUpdate(
     }
     return { steps: results, failedPatches: failedPatchesOf(installOutput) };
   };
-  const selectedRemoteUrl =
-    githubRepository(remote) !== null
-      ? remote
-      : (await exec(["git", "remote", "get-url", remote], resolvedRoot)).stdout.trim();
+  const selectedRemoteUrl = /^[A-Za-z0-9._-]+$/.test(remote)
+    ? (await exec(["git", "remote", "get-url", remote], resolvedRoot)).stdout.trim()
+    : remote;
   const repository = githubRepository(selectedRemoteUrl);
   if (repository === null) {
     const unsupported = fail<PrepareResult>(
@@ -595,30 +621,27 @@ export async function prepareUpdate(
         "-R",
         repositoryName,
         "--head",
-        `${repository.owner}:${branch}`,
+        branch,
         "--state",
         "open",
         "--json",
-        "url,headRepository,headRepositoryOwner",
+        "number,url,headRepositoryOwner,headRepository",
       ],
       resolvedRoot,
     );
     if (listed.code !== 0)
       return fail("runtime_unavailable", `${gh} pr list failed`, { stderr: tail(listed.stderr) });
     const open = prListSchema.parse(JSON.parse(listed.stdout || "[]"));
-    if (open.length > 0) {
-      const candidate = open[0];
-      if (
-        candidate === undefined ||
-        candidate.headRepositoryOwner.login.toLowerCase() !== repository.owner.toLowerCase() ||
-        candidate.headRepository.name.toLowerCase() !== repository.repo.toLowerCase()
-      )
-        return fail("pr_head_mismatch", "Pull request head repository differs from pushed remote");
+    const candidate = open.find(
+      (pr) =>
+        pr.headRepositoryOwner.login.toLowerCase() === repository.owner.toLowerCase() &&
+        pr.headRepository.name.toLowerCase() === repository.repo.toLowerCase(),
+    );
+    if (candidate !== undefined)
       return {
         ok: true,
         value: { action: "exists", branch, pr: candidate.url, versions, log: logPath },
       };
-    }
 
     const pushedHead = remoteRef.stdout.trim().split(/\s+/)[0];
     if (pushedHead) {
@@ -670,7 +693,11 @@ export async function prepareUpdate(
     const subject = `chore(deps): update omo-ai to ${omo} and senpi to ${senpi}`;
     const checkLog = [
       `Update check: ${JSON.stringify(check.packages)}`,
-      ...verified.steps.map((step) => `${step.command}: exit ${step.code}`),
+      ...verified.steps.map((step) =>
+        step.skipped === undefined
+          ? `${step.command}: exit ${step.code}`
+          : `${step.command}: skipped (${step.skipped})`,
+      ),
       verified.failedPatches.length
         ? `Failed patches: ${verified.failedPatches.join(", ")}`
         : "Failed patches: none",

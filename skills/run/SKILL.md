@@ -344,7 +344,7 @@ Instruct linked parents with `send --kind instruction`; never address a child. C
 Senpi versions against the npm dist-tags (`omo-ai` `beta`, `@code-yeongyu/senpi` `latest`)
 and never installs anything. When newer versions exist, `olw update prepare [--remote NAME|URL] [--json]`
 creates an update branch `olw/update-omo-<v>-senpi-<v>` from the selected remote's `dev`
-(`--remote` picks the remote to fetch from and push to; default `origin`) in a separate
+(`--remote` picks a GitHub remote to fetch from and push to; default `origin`; non-GitHub remotes are refused) in a separate
 worktree, runs install, typecheck, test and build there, and opens a PR to `dev` (a draft
 if anything failed). It never merges and never touches the live host. Merging and
 reinstalling remain the user's decision.

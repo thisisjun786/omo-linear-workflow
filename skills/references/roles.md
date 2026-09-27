@@ -193,7 +193,7 @@ Commands and flags below follow the frozen implementation contract; confirm agai
 | Close a role | `close --binding BINDING [--confirm-absent]` |
 | One explicit observation | `reconcile --project ID` (or `--initiative ID`) |
 | Check for OMO/Senpi updates (never installs) | `update check [--json] [--tag pkg=tag]` |
-| Prepare an update PR in a separate worktree (never merges) | `update prepare [--remote NAME\|URL] [--json]` |
+| Prepare an update PR in a separate worktree (GitHub remote only; never merges) | `update prepare [--remote NAME\|URL] [--json]` |
 | List known repository mirrors | `repo list [--json]` |
 | Create or fetch one repository mirror | `repo fetch --remote URL [--json]` |
 

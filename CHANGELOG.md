@@ -13,6 +13,10 @@ published.
 
 ## [Unreleased]
 
+## [0.2.0]
+
+Released: 2026-09-27
+
 ### Added
 
 - Official checksum-pinned Herdr 0.9.1 releases replace the vendored patch and Rust/Zig
@@ -82,6 +86,8 @@ published.
   agent with no working model or a single remaining model, and OLW role models
   missing from the opencodex catalog. Warnings never block a start and print once
   per change.
+- Durable execute-stage launch intent: concurrent recovery of an execute stage is fenced to
+  one launch, and `reconcile` settles a recovery whose outcome is uncertain.
 
 ### Changed
 
@@ -105,6 +111,18 @@ published.
 - A managed category or agent route whose upstream choices opencodex no longer
   publishes is written without models and listed as `unroutable`, instead of
   rejecting the whole routing update.
+- `stage start --stage execute` requires an accepted plan report and an unchanged plan file;
+  legacy hand-offs without one fail closed. Repeating an identical `stage complete` attaches
+  the accepted report id to the hand-off. Reported plan paths are resolved.
+- The manager session keeps the user's native model and thinking level instead of
+  pinning them.
+- A report addressed to a paused manager goes to the user inbox.
+- The child CLI `ask` command is rejected; children use the `olw_ask` tool. `ask` stays
+  available to parents.
+- `update prepare` rejects a stale check or one that isn't an upgrade, targets the selected
+  GitHub remote with `gh -R`, reuses an existing remote pull request, and skips typecheck,
+  test and build after the install step fails. `--remote` accepts GitHub remotes only.
+- Repository mirror locks use a kernel `flock` that the spawned `git` inherits.
 
 ### Removed
 
@@ -126,6 +144,40 @@ published.
   interactive `omo` launcher: it prints the error and starts OMO with the retained
   routing. Before adoption, and for OLW role launches, a failed preflight still
   stops the launch.
+- `pr merge` matches the child's report to the requested PR instead of the latest
+  report from that binding.
+
+### Security
+
+- Explicit local-file copies are anchored to directory handles inside the owned checkout,
+  reject C0 and C1 control characters at both path boundaries, and surface cleanup failures.
+  Receipts store only a source label, never the source path.
+- Git remote arguments get explicit option boundaries (`--`), so a remote name or URL can't
+  be read as a flag.
+
+### Migration
+
+Do these steps in order after pulling `v0.2.0`.
+
+1. Rebuild the control root. Run `bun run install:local` from the checkout, or follow the
+   upgrade steps in [docs/policy/releases.md](docs/policy/releases.md#upgrading). Running
+   Herdr servers and OMO sessions keep the old code until you close and recreate them.
+2. Switch to official Herdr. Run `olw doctor`; `legacy_parents_remaining` lists every
+   linked-worktree parent from 0.1.0. Close or migrate those parents first, with approval,
+   or keep them on the pre-switch stack. Then remove
+   `~/.omo/agent/extensions/herdr-senpi-agent-state.ts` and restart the Herdr server.
+   Rollback for one release is to keep the pre-switch checkout and its patched Herdr
+   artifact directory; see [docs/operations.md](docs/operations.md#one-release-rollback).
+3. Stop using `parent create --repo`. It's rejected with `legacy_parent_unsupported`. Map
+   each project to a repository in the scope snapshot instead; the format is in
+   [docs/repositories.md](docs/repositories.md).
+4. Routing is pinned by default. Existing installs migrate without rewriting `omo.jsonc`.
+   Run `bun run proxy:routing baseline save` once so the baseline gets a catalog snapshot;
+   until then, `proxy:routing status` reports that the save is needed.
+5. Remove the CLIProxyAPI extension path (`dist/proxy/index.js`) from OMO's `settings.json`
+   `extensions`, as noted under Removed.
+6. Children that called the CLI `ask` command must use the `olw_ask` tool. The command
+   itself stays for parents.
 
 ## [0.1.0]
 

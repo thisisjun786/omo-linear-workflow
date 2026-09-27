@@ -75,7 +75,7 @@ olw status --project ID --json
 | `send` | Send an `instruction` or `coordination` message between roles |
 | `report` | Report `completed`, `blocked` or `failed` to the parent, manager or your inbox (`--to-user`) |
 | `reports` | Read the user inbox (read-only) |
-| `ask` | Ask a blocking question upward |
+| `ask` | Ask a blocking question upward (parent only; children use the `olw_ask` tool) |
 | `answer` | Answer one question by ID, as a role (`--from`) or as the user (`--as-user`) |
 | `questions` / `notices` | List open questions or operational notices (read-only) |
 | `status` | Show stored state for a project or initiative |

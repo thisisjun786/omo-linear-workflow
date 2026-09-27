@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
@@ -33,6 +33,21 @@ const created = z.object({
   ),
   readiness: z.literal("ready"),
   execution: z.literal("brief_accepted"),
+});
+const stageSchema = z.enum(["direct", "plan", "execute", "research"]);
+const statusBindingSchema = bindingSchema.extend({
+  mode: z.enum(["direct", "planned", "research"]).optional(),
+  stage: stageSchema.optional(),
+  stageBindings: z
+    .array(
+      z.object({
+        bindingId: z.string(),
+        stage: stageSchema,
+        launchState: bindingSchema.shape.launchState,
+      }),
+    )
+    .optional(),
+  openQuestions: z.number().int().nonnegative().optional(),
 });
 const models = [modelForRole("supervisor").modelId, modelForRole("parent").modelId];
 const evidenceDir = join(import.meta.dir, "../.omo/evidence/real-use-repairs/host-recovery");
@@ -74,7 +89,7 @@ async function main() {
   };
   const importScope = async (world: Awaited<ReturnType<typeof prepareQaWorld>>) => {
     const path = join(world.scratch, "scope.json");
-    await writeFile(path, await readFile(join(world.installRoot, "tests/fixtures/scope.json")));
+    await world.writeOwnedScopeFixture(path);
     return z
       .object({ digest: z.string() })
       .parse(await invoke(world, ["scope", "import", "--file", path, "--fixture"])).digest;
@@ -192,7 +207,7 @@ async function main() {
       socket,
     ]);
     const preStatus = z
-      .array(bindingSchema)
+      .array(statusBindingSchema)
       .parse(await invoke(qa, ["status", "--initiative", "initiative-omo-1"]));
     assert.equal(preStatus.filter((b) => b.launchState !== "closed").length, 0);
     const preNative = await native.listSessions();
@@ -281,7 +296,7 @@ async function main() {
       await supervisorRpc.stop();
     }
     const status = z
-      .array(bindingSchema)
+      .array(statusBindingSchema)
       .parse(await invoke(qa, ["status", "--initiative", "initiative-omo-1"]));
     assert.deepEqual(
       status.filter((b) => b.launchState === "ready").map((b) => b.id),
@@ -303,10 +318,6 @@ async function main() {
         supervisor.id,
         "--project",
         "project-omo-1",
-        "--repo",
-        qa.repository,
-        "--base",
-        "main",
       ]),
     ).binding;
     const parentRpc = await attach(parent);
@@ -355,10 +366,6 @@ async function main() {
         prodSupervisor.id,
         "--project",
         "project-omo-1",
-        "--repo",
-        production.repository,
-        "--base",
-        "main",
       ]),
     ).binding;
     const prodRpc = await attach(prodParent);

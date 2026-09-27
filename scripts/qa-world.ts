@@ -1,6 +1,8 @@
 import { cp, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { RpcClient } from "@code-yeongyu/senpi";
+import { scopeSnapshotSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
 import { loadHerdrBuild, resolveHerdrArtifact } from "../src/herdr/artifact";
@@ -167,6 +169,19 @@ export async function prepareQaWorld() {
   const herdrSocket = server.herdrSocket;
   const worktrees: string[] = [];
   const workspaces: string[] = [];
+  let repositoryMapping: Promise<{ readonly remote: string; readonly defaultBranch: "main" }>;
+  const ownedRepositoryMapping = () => {
+    repositoryMapping ??= (async () => {
+      const remotePath = join(scratch, "fixture-remote.git");
+      await checkedQaCommand(
+        ["git", "clone", "--bare", repository, remotePath],
+        scratch,
+        environment,
+      );
+      return { remote: pathToFileURL(remotePath).href, defaultBranch: "main" as const };
+    })();
+    return repositoryMapping;
+  };
   return {
     installRoot,
     scratch,
@@ -177,6 +192,19 @@ export async function prepareQaWorld() {
     cleanup,
     worktrees,
     workspaces,
+    async writeOwnedScopeFixture(path: string, input?: unknown): Promise<void> {
+      const source =
+        input ?? JSON.parse(await Bun.file(join(installRoot, "tests/fixtures/scope.json")).text());
+      const fixture = scopeSnapshotSchema.parse(source);
+      const repository = await ownedRepositoryMapping();
+      await writeFile(
+        path,
+        JSON.stringify({
+          ...fixture,
+          projects: fixture.projects.map((project) => ({ ...project, repository })),
+        }),
+      );
+    },
     async cli(args: readonly string[]) {
       return runQaCommand(
         [

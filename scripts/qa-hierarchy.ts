@@ -17,6 +17,24 @@ const createdSchema = z.object({
   readiness: z.literal("ready"),
   execution: z.literal("brief_accepted"),
 });
+const stageSchema = z.enum(["direct", "plan", "execute", "research"]);
+const closedBindingSchema = bindingSchema.extend({
+  unpushedCommits: z.array(z.string()).optional(),
+});
+const statusBindingSchema = bindingSchema.extend({
+  mode: z.enum(["direct", "planned", "research"]).optional(),
+  stage: stageSchema.optional(),
+  stageBindings: z
+    .array(
+      z.object({
+        bindingId: z.string(),
+        stage: stageSchema,
+        launchState: bindingSchema.shape.launchState,
+      }),
+    )
+    .optional(),
+  openQuestions: z.number().int().nonnegative().optional(),
+});
 
 export async function attach(binding: Binding): Promise<RpcClient> {
   if (!binding.sessionPath) throw new QaError("No role session path");
@@ -73,10 +91,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
     world.workspaces.push(anchor.workspaceId);
     const initial = await herdr.snapshot();
     const fixturePath = join(world.scratch, "scope.json");
-    await writeFile(
-      fixturePath,
-      await readFile(join(world.installRoot, "tests/fixtures/scope.json"), "utf8"),
-    );
+    await world.writeOwnedScopeFixture(fixturePath);
     const imported = z
       .object({ digest: z.string() })
       .parse(await invoke(["scope", "import", "--file", fixturePath, "--fixture"]));
@@ -102,14 +117,19 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
         supervisor.id,
         "--project",
         "project-omo-1",
-        "--repo",
-        world.repository,
-        "--base",
-        "main",
       ]),
     ).binding;
     const child = createdSchema.parse(
-      await invoke(["child", "create", "--parent", parent.id, "--issue", "issue-omo-1"]),
+      await invoke([
+        "child",
+        "create",
+        "--parent",
+        parent.id,
+        "--issue",
+        "issue-omo-1",
+        "--deliverable",
+        "report",
+      ]),
     ).binding;
     if (!parent.checkout || !child.checkout) throw new QaError("Missing worktree metadata");
     if (parent.cwd === child.cwd) throw new QaError("Parent and child share a checkout");
@@ -207,28 +227,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
           `QA fixture message: reply exactly ${sentinel}. Do not take other actions.`,
         );
         try {
-          const receipt = z
-            .object({ state: z.literal("accepted") })
-            .passthrough()
-            .parse(
-              await invoke([
-                "report",
-                "--from",
-                sender.id,
-                "--id",
-                id,
-                "--outcome",
-                "completed",
-                "--evidence",
-                textPath,
-                "--text-file",
-                textPath,
-              ]),
-            );
-          console.log("REPORT_ACCEPTED", id, JSON.stringify(receipt));
-          await response.promise;
-          await idle(receiver);
-          const replay = await invoke([
+          const reportArgs = [
             "report",
             "--from",
             sender.id,
@@ -240,7 +239,16 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
             textPath,
             "--text-file",
             textPath,
-          ]);
+          ];
+          if (sender.assignment.role === "child") reportArgs.push("--deliverable-path", textPath);
+          const receipt = z
+            .object({ state: z.literal("accepted") })
+            .passthrough()
+            .parse(await invoke(reportArgs));
+          console.log("REPORT_ACCEPTED", id, JSON.stringify(receipt));
+          await response.promise;
+          await idle(receiver);
+          const replay = await invoke(reportArgs);
           if (JSON.stringify(replay) !== JSON.stringify(receipt)) {
             const replayState = z.object({ state: z.literal("accepted") }).safeParse(replay);
             if (!replayState.success) throw new QaError("Replay did not preserve acceptance");
@@ -308,7 +316,7 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
     if (reconciledLoss.code !== 4)
       throw new QaError(`Missing runtime was not reported: ${reconciledLoss.stdout}`);
     const afterLoss = z
-      .array(bindingSchema)
+      .array(statusBindingSchema)
       .parse(await invoke(["status", "--initiative", "initiative-omo-1"]));
     if (afterLoss.find((binding) => binding.id === child.id)?.launchState !== "uncertain")
       throw new QaError("Missing child stayed ready");
@@ -326,11 +334,14 @@ export async function runHierarchyQa(withEvents: boolean): Promise<void> {
     for (const binding of bindings.toReversed()) {
       const marker = binding.checkout === null ? null : join(binding.cwd, "keep-on-close.txt");
       if (marker !== null) {
-        if (!binding.cwd.startsWith(`${world.controlRoot}/.omo/worktrees/`))
-          throw new QaError("Unexpected QA checkout");
+        const expectedRoot =
+          binding.checkout?.kind === "owned-clone"
+            ? `${world.controlRoot}/.omo/checkouts/`
+            : `${world.controlRoot}/.omo/worktrees/`;
+        if (!binding.cwd.startsWith(expectedRoot)) throw new QaError("Unexpected QA checkout");
         await writeFile(marker, "QA_PRESERVED_DATA\n");
       }
-      const closed = bindingSchema.parse(await invoke(["close", "--binding", binding.id]));
+      const closed = closedBindingSchema.parse(await invoke(["close", "--binding", binding.id]));
       if (closed.launchState !== "closed" || closed.contactState !== "cancelled")
         throw new QaError("Role did not close");
       if (

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { RpcClient } from "@code-yeongyu/senpi";
 import { z } from "zod";
 import { modelForRole } from "../src/core/policy";
-import { bindingSchema, runtimeIdentitySchema, scopeSnapshotSchema } from "../src/core/schema";
+import { bindingSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { createHerdrClient } from "../src/herdr";
 import { attach, idle } from "./qa-hierarchy";
@@ -146,18 +146,7 @@ try {
   world.workspaces.push(anchor.workspaceId);
   const baseline = await herdr.snapshot();
   const fixturePath = join(world.scratch, "scope.json");
-  const fixture = scopeSnapshotSchema.parse(
-    JSON.parse(await readFile(join(world.installRoot, "tests/fixtures/scope.json"), "utf8")),
-  );
-  // This regression exercises the explicit local --repo route, not owned remote
-  // clones. Never inherit the shared fixture's example GitHub repository mapping.
-  await writeFile(
-    fixturePath,
-    JSON.stringify({
-      ...fixture,
-      projects: fixture.projects.map(({ repository: _repository, ...project }) => project),
-    }),
-  );
+  await world.writeOwnedScopeFixture(fixturePath);
   const { digest } = z
     .object({ digest: z.string() })
     .parse(await invoke(["scope", "import", "--file", fixturePath, "--fixture"]));
@@ -176,21 +165,19 @@ try {
     ]),
   ).binding;
   const parent = created.parse(
-    await invoke([
-      "parent",
-      "create",
-      "--supervisor",
-      supervisor.id,
-      "--project",
-      "project-omo-1",
-      "--repo",
-      world.repository,
-      "--base",
-      "main",
-    ]),
+    await invoke(["parent", "create", "--supervisor", supervisor.id, "--project", "project-omo-1"]),
   ).binding;
   const child = created.parse(
-    await invoke(["child", "create", "--parent", parent.id, "--issue", "issue-omo-1"]),
+    await invoke([
+      "child",
+      "create",
+      "--parent",
+      parent.id,
+      "--issue",
+      "issue-omo-1",
+      "--deliverable",
+      "report",
+    ]),
   ).binding;
   evidence.bindings = [supervisor.id, parent.id, child.id];
   const supervisorClient = await attach(supervisor);

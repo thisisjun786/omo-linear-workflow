@@ -86,7 +86,7 @@ export async function exercise(cache: string | undefined) {
       { ...qa.environment, ...cacheEnv },
     );
     const path = join(qa.scratch, "scope.json");
-    await cp(join(root, "tests/fixtures/scope.json"), path);
+    await qa.writeOwnedScopeFixture(path);
     const { digest } = z
       .object({ digest: z.string() })
       .parse(await invoke(["scope", "import", "--file", path, "--fixture"]));
@@ -112,10 +112,6 @@ export async function exercise(cache: string | undefined) {
         supervisor.id,
         "--project",
         "project-omo-1",
-        "--repo",
-        qa.repository,
-        "--base",
-        "main",
       ]),
     ).binding;
     const child = created.parse(

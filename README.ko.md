@@ -78,7 +78,7 @@ olw status --project ID --json
 | `stage start` | 같은 worktree에서 execute 단계를 시작 |
 | `send` | 역할 사이에 `instruction` 또는 `coordination` 메시지를 전송 |
 | `report` | `completed`, `blocked`, `failed` 결과를 부모, 매니저 또는 사용자 inbox(`--to-user`)에 보고 |
-| `reports` | 사용자 inbox를 읽음 (읽기 전용) |
+| `reports` | 게시된 사용자 inbox를 읽음. `--all`은 매니저에게 보낸 보고도 포함 (읽기 전용) |
 | `ask` | 막힌 질문을 위로 올림 (부모 전용; 자식은 `olw_ask` 도구 사용) |
 | `answer` | 질문 ID 하나에 역할(`--from`) 또는 사용자(`--as-user`)로서 답함 |
 | `questions` / `notices` | 열린 질문 또는 운영 알림 목록 (읽기 전용) |

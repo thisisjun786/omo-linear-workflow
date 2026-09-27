@@ -647,7 +647,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           : sender.value.id;
       const summary =
         envelope.text.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim().slice(0, 100) ?? "";
-      const command = envelope.kind === "report" ? "reports" : "questions";
+      const command = envelope.kind === "report" ? "reports --all" : "questions";
       message = `[OLW] ${project} ${envelope.kind}: ${summary} - details: olw ${command} --project ${project}\n${message}`;
     }
     const admissionDeadline = Date.now() + 25_000;

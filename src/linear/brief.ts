@@ -155,7 +155,7 @@ export function buildRoleBrief(
     parts.push(
       "scope: unbound",
       "ask_user_directly: true",
-      "olw_messages: Read details with olw reports or olw questions --project ID; use the envelope ID for correlation.",
+      "olw_messages: Read details with olw reports --all or olw questions --project ID; use the envelope ID for correlation.",
       "olw_answers: Answer a parent with olw answer --from BINDING --question ID --text-file PATH.",
       "olw_approval: Review evidence against approved scope before accepting work; a management link never grants execution approval.",
       "olw_escalation: Ask the user directly when a decision exceeds existing approval; do not expand scope on their behalf.",

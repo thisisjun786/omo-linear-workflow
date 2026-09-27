@@ -2357,20 +2357,24 @@ export class Orchestrator {
     }
   }
 
-  public reports(filter: ScopeFilter = {}): Result<DeliveryRecord[]> {
-    return this.#readDeliveryRecords("reports", filter);
+  public reports(filter: ScopeFilter = {}, includeManager = false): Result<DeliveryRecord[]> {
+    return this.#readDeliveryRecords("reports", filter, includeManager);
   }
 
   public notices(filter: ScopeFilter = {}): Result<DeliveryRecord[]> {
     return this.#readDeliveryRecords("notices", filter);
   }
 
-  #readDeliveryRecords(view: "reports" | "notices", filter: ScopeFilter): Result<DeliveryRecord[]> {
+  #readDeliveryRecords(
+    view: "reports" | "notices",
+    filter: ScopeFilter,
+    includeManager = false,
+  ): Result<DeliveryRecord[]> {
     if (!existsSync(this.#dbPath)) return ok([]);
     const registry = this.#deps.openRegistry(this.#dbPath, { readonly: true });
     try {
       return view === "reports"
-        ? registry.postedReports(filter)
+        ? registry.postedReports(filter, includeManager)
         : registry.operationalNotices(filter);
     } finally {
       registry.close();

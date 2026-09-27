@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.
 - Identify manager reattachment owners by PID and process start time, so recycled PIDs do not block recovery. Legacy claims with unknown start time keep PID-only liveness.
 - Preserve foreground manager exit codes before readiness and release failed startup reservations immediately.
 - Forward foreground entry signals and recover dead-owner reattachment claims without a lease wait; live owners return `manager_busy` instead of an empty-pane success.

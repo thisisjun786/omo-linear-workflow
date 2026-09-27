@@ -78,7 +78,7 @@ olw status --project ID --json
 | `stage start` | Open the execute stage in the same worktree |
 | `send` | Send an `instruction` or `coordination` message between roles |
 | `report` | Report `completed`, `blocked` or `failed` to the parent, manager or your inbox (`--to-user`) |
-| `reports` | Read the user inbox (read-only) |
+| `reports` | Read posted user-inbox records; `--all` also includes manager-addressed reports (read-only) |
 | `ask` | Ask a blocking question upward (parent only; children use the `olw_ask` tool) |
 | `answer` | Answer one question by ID, as a role (`--from`) or as the user (`--as-user`) |
 | `questions` / `notices` | List open questions or operational notices (read-only) |

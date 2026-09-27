@@ -387,7 +387,7 @@ export interface Registry {
   delivery(messageId: string): Result<DeliveryRecord>;
   childReports(parentId: string): Result<DeliveryRecord[]>;
   post(senderSessionId: string, envelope: Envelope): Result<DeliveryRecord>;
-  postedReports(filter: ScopeFilter): Result<DeliveryRecord[]>;
+  postedReports(filter: ScopeFilter, includeManager?: boolean): Result<DeliveryRecord[]>;
   postedQuestions(
     filter: ScopeFilter,
   ): Result<Array<{ readonly record: DeliveryRecord; readonly answered: boolean }>>;

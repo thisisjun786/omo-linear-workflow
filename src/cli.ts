@@ -64,6 +64,7 @@ const booleanFlags = new Set([
   "as-user",
   "no-manager",
   "here",
+  "all",
   "draft",
   "discard",
 ]);
@@ -389,7 +390,7 @@ export async function runCli(
             report:
               "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--pr URL --head SHA | --deliverable-path PATH_OR_URL] [--to-user]",
             reports:
-              "[--initiative ID | --project ID] (read-only user inbox and manager reports; posted is not native acceptance)",
+              "[--initiative ID | --project ID] [--all] (posted user inbox by default; --all also includes manager reports in every state)",
             ask: "--from BINDING --id ID --text-file PATH [--questions-file JSON] [--to-user]",
             answer:
               "(--from BINDING | --as-user) --question QUESTION_ID --text-file PATH [--answers-file JSON]",
@@ -718,7 +719,7 @@ export async function runCli(
       const filter = scopeFilter(options, false);
       result = filter.ok
         ? command === "reports"
-          ? orchestrator.reports(filter.value)
+          ? orchestrator.reports(filter.value, has(options, "all"))
           : command === "notices"
             ? orchestrator.notices(filter.value)
             : command === "questions"

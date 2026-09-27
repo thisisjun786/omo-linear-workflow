@@ -1,10 +1,38 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { z } from "zod";
+import { runCli } from "../src/cli";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
 import { registerInitiativeRuntime } from "../src/extension/runtime";
 import { context, envelope, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
+
+test("reports defaults to posted user inbox; --all explicitly includes manager delivery states", async () => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const report = envelope(parent, manager, digest, "manager-sending", "report");
+      value(registry.claim(parent.durableSessionId, report));
+      const posted = { ...report, id: "inbox-posted", toBindingId: null };
+      value(registry.post(parent.durableSessionId, posted));
+      expect(await runCli(["--root", root, "reports", "--project", "project-1", "--json"])).toBe(0);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: true,
+        value: [{ envelope: { id: posted.id }, state: "posted" }],
+      });
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0])).value).toHaveLength(1);
+      expect(
+        await runCli(["--root", root, "reports", "--project", "project-1", "--all", "--json"]),
+      ).toBe(0);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0])).value).toHaveLength(2);
+    } finally {
+      stdout.mockRestore();
+      registry.close();
+    }
+  });
+});
 
 test.each(["report", "question"] as const)(
   "manager %s waits for idle, sends one-line notice and preserves its envelope",
@@ -68,9 +96,9 @@ test.each(["report", "question"] as const)(
         expect(input.delivery).toBe("auto");
         expect(value(registry.delivery(message.id)).envelope).toEqual(message);
         if (kind === "report")
-          expect(value(registry.postedReports({ projectId: "project-1" }))[0]?.envelope).toEqual(
-            message,
-          );
+          expect(
+            value(registry.postedReports({ projectId: "project-1" }, true))[0]?.envelope,
+          ).toEqual(message);
         else
           expect(value(registry.questions({ projectId: "project-1" }))[0]?.record.envelope).toEqual(
             message,

@@ -47,7 +47,7 @@ The manager is a scope-free management role, not a launcher identity. Type `olw`
 (or `olw manage --here`) to attach it in the current pane; a live manager is focused instead.
 `olw manage` retains the separate-workspace entry. The durable session is never replaced by
 an unrelated session. Outside OLW message handling it is a normal assistant. For an OLW
-notice, inspect `olw reports` or `olw questions --project ID`, answer with `olw answer`,
+notice, inspect `olw reports --all` or `olw questions --project ID`, answer with `olw answer`,
 review evidence within existing approval, and escalate decisions beyond that approval to
 the user. Reports and questions arrive only at idle, as a one-line notice plus the envelope.
 It holds a fixed designation, not an initiative or project. A parent created

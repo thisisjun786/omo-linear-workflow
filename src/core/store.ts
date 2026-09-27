@@ -2007,21 +2007,25 @@ export function openRegistry(
     });
   }
 
-  function inboxRecords(filter: ScopeFilter, operational: boolean): Result<DeliveryRecord[]> {
+  function inboxRecords(
+    filter: ScopeFilter,
+    operational: boolean,
+    includeManager = false,
+  ): Result<DeliveryRecord[]> {
     try {
       const rows = db
         .query<
           DeliveryRow,
-          [number, number, string | null, string | null, string | null, string | null]
+          [number, number, number, string | null, string | null, string | null, string | null]
         >(`
         SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
         JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
         WHERE ((? = 1 AND json_extract(d.envelope_json, '$.kind') = 'operational_notice')
           OR (? = 0 AND json_extract(d.envelope_json, '$.kind') = 'report'
-            AND (d.state = 'posted' OR EXISTS (
+            AND ((d.state = 'posted' AND json_extract(d.envelope_json, '$.toBindingId') IS NULL) OR (? = 1 AND EXISTS (
               SELECT 1 FROM bindings recipient
               WHERE recipient.id = json_extract(d.envelope_json, '$.toBindingId')
-                AND json_extract(recipient.json, '$.assignment.role') = 'manager'))))
+                AND json_extract(recipient.json, '$.assignment.role') = 'manager')))))
           AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
           AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
         ORDER BY d.rowid
@@ -2029,6 +2033,7 @@ export function openRegistry(
         .all(
           Number(operational),
           Number(operational),
+          Number(includeManager),
           filter.projectId ?? null,
           filter.projectId ?? null,
           filter.initiativeId ?? null,
@@ -2101,7 +2106,7 @@ export function openRegistry(
     setContactState,
     setOwner,
     post,
-    postedReports: (filter) => inboxRecords(filter, false),
+    postedReports: (filter, includeManager) => inboxRecords(filter, false, includeManager),
     postedQuestions,
     questions,
     answerFromUser,

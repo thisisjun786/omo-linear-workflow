@@ -13,8 +13,26 @@ published.
 
 ## [Unreleased]
 
+### Fixed
+
+- Carry authorized sender data with manager notice claims so a failed secondary lookup cannot strand reports or questions in `sending`; same-ID replay keeps the original delivery attempt.
+- Exit promptly on interruption during abandoned manager startup recovery, releasing the recovery claim without closing the binding or starting another manager.
+- Reject here-mode entry on a different server from the saved manager without changing its binding; report both sockets and the original-server/close recovery options.
+- Honor interruption during existing-manager host, snapshot and verification checks instead of focusing afterward and reporting success.
+- Keep manager live ownership beyond lease expiry for both bare entry and plain `manage`, fence termination, and handle interruption from before reservation, including rejected pre-launch operations; safely recover abandoned unstarted claims.
+- Retain the manager's original OLW-owned workspace across moves to user panes and back, and remove that owned workspace exactly once at close.
+- Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.
+- Reject here-mode socket or foreground-process mismatches rather than binding to a same-named pane on another server.
+- Identify manager reattachment owners by PID and process start time, so recycled PIDs do not block recovery. Legacy claims with unknown start time keep PID-only liveness.
+- Preserve foreground manager exit codes before readiness and release failed startup reservations immediately.
+- Forward foreground entry signals and recover dead-owner reattachment claims without a lease wait; live owners return `manager_busy` instead of an empty-pane success.
+- Recheck manager idle state at native send admission without the native follow-up polling queue.
+
 ### Changed
 
+- Type `olw` in Herdr to open or reattach the single durable manager in the current pane, or focus its live pane. `manage --here` shares this entry; plain `manage` retains separate-workspace behavior.
+- Parent reports and questions wait for manager idle admission and arrive as compact notices with retrievable full payloads and unchanged delivery receipts. Accepted limitation: a turn starting between the idle check and native acceptance may receive the notice mid-turn; delivery remains exactly once.
+- Manager guidance applies only when handling OLW messages, leaving ordinary assistant work unrestricted.
 - Pinned `omo-ai` 5.0.1 and its exact `@code-yeongyu/senpi` 2026.9.27 dependency, porting the maintained runtime repairs to the new executable bundles.
 
 ## [0.2.0]

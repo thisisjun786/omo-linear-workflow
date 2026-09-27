@@ -115,6 +115,10 @@ export interface Binding {
   readonly herdrSocket: string;
   readonly omoSocket: string;
   readonly workspaceId: string | null;
+  /** False for a manager attached in the user's existing workspace. Legacy bindings own theirs. */
+  readonly workspaceOwned?: boolean | undefined;
+  /** Original OLW-owned manager workspace retained when its TUI moves to a user pane. */
+  readonly ownedWorkspaceId?: string | undefined;
   readonly paneId: string | null;
   readonly sessionPath: string | null;
   readonly launchState:
@@ -266,9 +270,12 @@ export interface ClaimResult {
   readonly disposition: "new" | "replay" | "in_progress";
   readonly record: DeliveryRecord;
   readonly target: Binding | null;
+  /** Sender snapshot read in the same transaction as manager-notice authorization. */
+  readonly noticeSender?: Binding | undefined;
   readonly nativeKey?: string | undefined;
 }
 export interface ReserveInput {
+  readonly managerLaunch?: { readonly token: string; readonly claimedAt: string } | undefined;
   readonly bindingId: string;
   readonly durableSessionId: string;
   readonly deliverable?: Deliverable | undefined;
@@ -308,7 +315,12 @@ export interface Registry {
   get(id: string): Result<Binding>;
   bySession(id: string): Result<Binding>;
   list(): Result<Binding[]>;
-  provision(id: string, workspaceId: string, paneId: string): Result<Binding>;
+  provision(
+    id: string,
+    workspaceId: string,
+    paneId: string,
+    workspaceOwned?: boolean,
+  ): Result<Binding>;
   observeSession(id: string, sessionPath: string): Result<Binding>;
   /** Claim the single manager TUI reattachment if the binding still records `expectedPaneId`. */
   beginReattach(
@@ -316,11 +328,18 @@ export interface Registry {
     expectedPaneId: string | null,
     claimedAt: string,
     staleBefore: string,
+    reclaimDeadOwner?: boolean,
   ): Result<ReattachClaim>;
   /** True only while `token` still owns the binding's reattachment claim. */
   ownsReattach(id: string, token: string): Result<boolean>;
+  closeUnstartedManager(id: string, token: string): Result<Binding>;
   /** Point the claimed manager at the pane its TUI is launched into; a retry reuses it. */
-  recordReattachPane(id: string, token: string, paneId: string): Result<Binding>;
+  recordReattachPane(
+    id: string,
+    token: string,
+    paneId: string,
+    workspaceId?: string,
+  ): Result<Binding>;
   /** True while a reattachment is claimed or was interrupted before its TUI was verified. */
   reattachPending(id: string): Result<boolean>;
   /** Give up the claim after a failure; the reattachment stays pending for the next caller. */
@@ -374,7 +393,7 @@ export interface Registry {
   delivery(messageId: string): Result<DeliveryRecord>;
   childReports(parentId: string): Result<DeliveryRecord[]>;
   post(senderSessionId: string, envelope: Envelope): Result<DeliveryRecord>;
-  postedReports(filter: ScopeFilter): Result<DeliveryRecord[]>;
+  postedReports(filter: ScopeFilter, includeManager?: boolean): Result<DeliveryRecord[]>;
   postedQuestions(
     filter: ScopeFilter,
   ): Result<Array<{ readonly record: DeliveryRecord; readonly answered: boolean }>>;

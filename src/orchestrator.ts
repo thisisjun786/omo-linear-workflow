@@ -44,7 +44,7 @@ import {
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting, globalOmo } from "./proxy/routing-launch";
-import { type Readiness, removeReadiness, subscribeReadiness } from "./readiness";
+import { type Readiness, readReadiness, removeReadiness, subscribeReadiness } from "./readiness";
 import {
   checkoutGit,
   cloneCheckout,
@@ -150,7 +150,37 @@ export type ManagerLinkReason =
   | "manager_paused"
   | "manager_closed"
   | "manager_unavailable";
+interface ManagerHere {
+  readonly paneId: string;
+  readonly workspaceId: string;
+  readonly cwd: string;
+  tui?: ForegroundTui;
+  failure?: ManagerInterrupted;
+  bindingId?: string;
+  token?: string;
+  settled?: boolean;
+  readonly interruption: Promise<never>;
+  readonly interrupt: (cause: ManagerInterrupted) => void;
+}
+class ManagerInterrupted extends Error {
+  constructor(readonly signal: NodeJS.Signals) {
+    super(`Manager entry interrupted by ${signal}`);
+  }
+  get exitCode(): number {
+    return this.signal === "SIGINT" ? 130 : this.signal === "SIGHUP" ? 129 : 143;
+  }
+}
+export interface ForegroundTui {
+  readonly exited: Promise<number>;
+  kill(signal?: NodeJS.Signals): void;
+}
+class ManagerTuiExited extends Error {
+  constructor(readonly exitCode: number) {
+    super(`Manager TUI exited before readiness (exit ${exitCode})`);
+  }
+}
 export interface ManageResult {
+  readonly tuiExited?: Promise<number>;
   /** `reattaching`: another `olw manage` call owns the in-flight reattachment. */
   readonly action: "created" | "focused" | "reattached" | "reattaching";
   readonly binding: Binding;
@@ -263,6 +293,11 @@ export interface OrchestratorDependencies {
     env: Readonly<Record<string, string | undefined>>,
   ) => Promise<void>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
+  readonly launchHere?: (
+    argv: readonly string[],
+    cwd: string,
+    env: Readonly<Record<string, string>>,
+  ) => ForegroundTui;
   readonly gitTip: (repo: string, revision: string) => Promise<string>;
   /** Settings file read for the manager's default model; defaults to ~/.omo/agent/settings.json. */
   readonly managerSettingsPath?: string;
@@ -704,7 +739,76 @@ export class Orchestrator {
     }
   }
 
-  public async manage(): Promise<Result<ManageResult>> {
+  public async manage(options: { readonly here?: boolean } = {}): Promise<Result<ManageResult>> {
+    let here: ManagerHere | undefined;
+    if (options.here) {
+      const context = z
+        .object({
+          HERDR_ENV: z.literal("1"),
+          HERDR_PANE_ID: z.string().min(1),
+          HERDR_SOCKET_PATH: z.string().min(1),
+        })
+        .safeParse(process.env);
+      if (!context.success)
+        return failure("herdr_required", "The OLW manager needs Herdr. Type olw in a Herdr pane.");
+      if (resolve(this.#herdrSocket) !== resolve(context.data.HERDR_SOCKET_PATH))
+        return failure(
+          "herdr_context_mismatch",
+          "Here-mode must use the calling terminal's Herdr socket",
+        );
+      const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
+      try {
+        const snapshot = await herdr.snapshot();
+        const pane = snapshot.panes.find((pane) => pane.paneId === context.data.HERDR_PANE_ID);
+        if (!pane)
+          return failure("herdr_required", "The calling Herdr pane is not present on this server.");
+        if (!(await herdr.paneContainsProcess(pane.paneId, process.pid)))
+          return failure(
+            "herdr_context_mismatch",
+            "The requested pane does not contain this foreground entry process",
+          );
+        const interruption = Promise.withResolvers<never>();
+        here = {
+          paneId: pane.paneId,
+          workspaceId: pane.workspaceId,
+          cwd: process.cwd(),
+          interruption: interruption.promise,
+          interrupt: interruption.reject,
+        };
+      } catch (cause) {
+        return failure(
+          "runtime_unavailable",
+          "Could not resolve the calling Herdr pane",
+          messageOf(cause),
+        );
+      } finally {
+        herdr.close();
+      }
+    }
+    const stop = here === undefined ? () => {} : this.#watchManagerSignals(here);
+    try {
+      const result = await this.#manage(here);
+      if (result.ok && here?.failure !== undefined) throw here.failure;
+      if (
+        !result.ok &&
+        result.error.code !== "manager_interrupted" &&
+        here?.tui !== undefined &&
+        this.#ownsForeground(here)
+      )
+        here.tui.kill();
+      if (result.ok && here?.tui !== undefined)
+        return ok({ ...result.value, tuiExited: here.tui.exited.finally(stop) });
+      stop();
+      return result;
+    } catch (cause) {
+      stop();
+      if (cause instanceof ManagerInterrupted)
+        return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
+      throw cause;
+    }
+  }
+
+  async #manage(here?: ManagerHere): Promise<Result<ManageResult>> {
     let managerModel: ManagerModelResolution;
     try {
       managerModel = resolveManagerModel(
@@ -715,14 +819,32 @@ export class Orchestrator {
         return failure(cause.code, cause.message, { settingsPath: cause.settingsPath });
       throw cause;
     }
-    const updateCheck = await this.#runUpdateCheck();
+    const updateCheck = await this.#whileForeground(this.#runUpdateCheck(), here);
     this.#currentUpdateCheck = updateCheck;
     const listed = this.#withRegistry((registry) => registry.list());
     if (!listed.ok) return listed;
     const existing = listed.value.find(
       (binding) => binding.assignment.role === "manager" && binding.launchState !== "closed",
     );
-    if (existing !== undefined) return this.#reopenManager(existing, updateCheck);
+    if (existing !== undefined) {
+      // Pane/workspace IDs are local to a Herdr server; here-mode never migrates bindings.
+      if (here !== undefined && resolve(existing.herdrSocket) !== resolve(this.#herdrSocket))
+        return failure(
+          "herdr_server_mismatch",
+          `The manager belongs to Herdr socket ${existing.herdrSocket}, but this pane uses ${this.#herdrSocket}. Run olw in a pane of the manager's server, or run olw close --binding ${existing.id} first.`,
+          {
+            bindingId: existing.id,
+            managerSocket: existing.herdrSocket,
+            callerSocket: this.#herdrSocket,
+          },
+        );
+      if (here !== undefined && ["reserved", "provisioning"].includes(existing.launchState)) {
+        const recovered = await this.#recoverUnstartedManager(existing, here);
+        if (!recovered.ok) return recovered;
+        return this.#manage(here);
+      }
+      return this.#reopenManager(existing, updateCheck, here);
+    }
     const scope = this.#withRegistry((registry) => registry.importScope(managerSnapshot));
     if (!scope.ok) return scope;
     const previous = this.#withRegistry((registry) => registry.designation(MANAGER_DESIGNATION_ID));
@@ -744,9 +866,9 @@ export class Orchestrator {
       { role: "manager" },
       designation,
       managerSnapshot,
-      this.#root,
+      here?.cwd ?? this.#root,
       null,
-      { managerModel },
+      { managerModel, ...(here === undefined ? {} : { here }) },
     );
     return created.ok
       ? ok({
@@ -860,7 +982,11 @@ export class Orchestrator {
     }
   }
 
-  async #reopenManager(binding: Binding, updateCheck: UpdateCheck): Promise<Result<ManageResult>> {
+  async #reopenManager(
+    binding: Binding,
+    updateCheck: UpdateCheck,
+    here?: ManagerHere,
+  ): Promise<Result<ManageResult>> {
     const closeInstruction = `run olw close --binding ${binding.id} first`;
     if (binding.launchState === "uncertain")
       return failure(
@@ -878,17 +1004,23 @@ export class Orchestrator {
         `The recorded manager is ${binding.launchState}; ${closeInstruction}`,
         { bindingId: binding.id },
       );
-    const host = await this.#checkHostProtocol(binding);
+    const host = await this.#whileForeground(this.#checkHostProtocol(binding), here);
+    if (here?.failure !== undefined) throw here.failure;
     if (host !== undefined) return host;
     const workspaceId = binding.workspaceId;
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     let token: string | undefined;
     try {
-      const snapshot = await herdr.snapshot();
+      const snapshot = await this.#whileForeground(herdr.snapshot(), here);
+      if (here?.failure !== undefined) throw here.failure;
       const workspace = snapshot.workspaces.find(
         (candidate) => candidate.workspaceId === workspaceId,
       );
-      if (workspace === undefined || workspace.cwd !== binding.cwd)
+      const ownedWorkspaceChanged =
+        binding.workspaceOwned !== false &&
+        workspace !== undefined &&
+        workspace.cwd !== binding.cwd;
+      if ((here === undefined && workspace === undefined) || ownedWorkspaceChanged)
         return failure(
           "manager_unavailable",
           `The manager workspace is gone or changed; ${closeInstruction}`,
@@ -898,11 +1030,21 @@ export class Orchestrator {
       const recordedPane = snapshot.panes.find(
         (pane) => pane.paneId === binding.paneId && pane.workspaceId === workspaceId,
       );
-      const tuiRunning = recordedPane !== undefined && hasLiveTui(recordedPane);
+      // A pane reporting a session file must report this manager's session; `pi`/`omo` alone
+      // (reporters without a session path) stays accepted for official Herdr compatibility.
+      const tuiRunning =
+        recordedPane !== undefined &&
+        hasLiveTui(recordedPane) &&
+        (typeof recordedPane.sessionPath !== "string" ||
+          recordedPane.sessionPath === binding.sessionPath);
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
-        await herdr.focusWorkspace(workspaceId);
+        if (here?.failure !== undefined) throw here.failure;
+        if (here !== undefined && binding.paneId !== null)
+          await this.#whileForeground(herdr.focusPane(binding.paneId), here);
+        else await herdr.focusWorkspace(workspaceId);
+        if (here?.failure !== undefined) throw here.failure;
         return ok({
           action: "focused",
           binding,
@@ -923,10 +1065,17 @@ export class Orchestrator {
           binding.paneId,
           now,
           new Date(Date.parse(now) - LAUNCH_CLAIM_LEASE_MS).toISOString(),
+          here !== undefined,
         ),
       );
       if (!claim.ok) return claim;
       if (!claim.value.claimed) {
+        if (here !== undefined)
+          return failure(
+            "manager_busy",
+            "Another live entry owns manager reattachment; no TUI was launched",
+            { bindingId: binding.id },
+          );
         await herdr.focusWorkspace(workspaceId);
         return ok({
           action: "reattaching",
@@ -943,6 +1092,11 @@ export class Orchestrator {
       }
       const owner = claim.value.token;
       token = owner;
+      if (here !== undefined) {
+        here.bindingId = binding.id;
+        here.token = owner;
+        here.settled = false;
+      }
       // Every Herdr side effect and the final clear re-check the token, so a caller whose lease
       // expired while it was suspended can neither launch a second TUI nor clear the new owner.
       const leaseLost = () =>
@@ -957,13 +1111,19 @@ export class Orchestrator {
         this.#withRegistry((registry) => registry.finishReattach(binding.id, owner));
       if (tuiRunning) {
         // An interrupted attempt's TUI did come up in the recorded pane; adopt it, launch nothing.
-        const verified = await this.#verifyManagerSession(binding);
+        const verified = await this.#whileForeground(this.#verifyManagerSession(binding), here);
+        if (here?.failure !== undefined) throw here.failure;
         if (!verified.ok) return verified;
         const finished = finish();
         if (!finished.ok) return finished;
         token = undefined;
         if (!finished.value) return leaseLost();
-        await herdr.focusWorkspace(workspaceId);
+        if (here !== undefined) here.settled = true;
+        if (here?.failure !== undefined) throw here.failure;
+        if (here !== undefined && binding.paneId !== null)
+          await this.#whileForeground(herdr.focusPane(binding.paneId), here);
+        else await herdr.focusWorkspace(workspaceId);
+        if (here?.failure !== undefined) throw here.failure;
         return ok({
           action: "focused",
           binding,
@@ -984,13 +1144,14 @@ export class Orchestrator {
       if (!beforeTab.value) return leaseLost();
       // A pending attempt's pane that is still a plain shell is reused instead of adding a tab.
       const paneId =
-        pending.value && recordedPane !== undefined && recordedPane.agent === undefined
+        here?.paneId ??
+        (pending.value && recordedPane !== undefined && recordedPane.agent === undefined
           ? recordedPane.paneId
-          : (await herdr.createTab(workspaceId, binding.cwd, "manager")).rootPaneId;
+          : (await herdr.createTab(workspaceId, binding.cwd, "manager")).rootPaneId);
       // The TUI publishes readiness for the binding's recorded pane, so record it before launch;
       // the pending claim keeps later calls from reporting this pane as focused until verified.
       const moved = this.#withRegistry((registry) =>
-        registry.recordReattachPane(binding.id, owner, paneId),
+        registry.recordReattachPane(binding.id, owner, paneId, here?.workspaceId),
       );
       if (!moved.ok) return moved.error.code === "lease_lost" ? leaseLost() : moved;
       await removeReadiness(this.#root, binding.id);
@@ -999,11 +1160,9 @@ export class Orchestrator {
         const beforeRun = stillOwner();
         if (!beforeRun.ok) return beforeRun;
         if (!beforeRun.value) return leaseLost();
-        await herdr.run(
-          paneId,
-          this.#tuiArgv(moved.value, binding.sessionPath, "manager", null),
-          this.#tuiEnvironment(managedPath),
-        );
+        const argv = this.#tuiArgv(moved.value, binding.sessionPath, "manager", null);
+        if (here === undefined) await herdr.run(paneId, argv, this.#tuiEnvironment(managedPath));
+        else this.#launchHere(argv, binding.cwd, managedPath, here);
         const expired = Promise.withResolvers<never>();
         const timeout = setTimeout(
           () => expired.reject(new Error("Timed out awaiting manager TUI readiness")),
@@ -1012,7 +1171,11 @@ export class Orchestrator {
         timeout.unref();
         let receipt: Readiness;
         try {
-          receipt = await Promise.race([readiness.promise, expired.promise]);
+          receipt = await this.#foregroundReadiness(
+            Promise.race([readiness.promise, expired.promise]),
+            moved.value,
+            here,
+          );
         } finally {
           clearTimeout(timeout);
         }
@@ -1021,13 +1184,17 @@ export class Orchestrator {
       } finally {
         readiness.close();
       }
-      const verified = await this.#verifyManagerSession(moved.value);
+      const verified = await this.#whileForeground(this.#verifyManagerSession(moved.value), here);
+      if (here?.failure !== undefined) throw here.failure;
       if (!verified.ok) return verified;
       const finished = finish();
       if (!finished.ok) return finished;
       token = undefined;
       if (!finished.value) return leaseLost();
-      await herdr.focusWorkspace(workspaceId);
+      if (here !== undefined) here.settled = true;
+      if (here?.failure !== undefined) throw here.failure;
+      if (here === undefined) await herdr.focusWorkspace(workspaceId);
+      if (here?.failure !== undefined) throw here.failure;
       return ok({
         action: "reattached",
         binding: moved.value,
@@ -1041,6 +1208,12 @@ export class Orchestrator {
         modelSource: "existing",
       });
     } catch (cause) {
+      if (cause instanceof ManagerInterrupted) {
+        if (here !== undefined && this.#ownsForeground(here)) await here.tui?.exited;
+        return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
+      }
+      if (cause instanceof ManagerTuiExited)
+        return failure("manager_tui_exited", cause.message, { exitCode: cause.exitCode });
       return failure(
         "runtime_unavailable",
         "Manager workspace could not be focused or reattached",
@@ -1048,9 +1221,19 @@ export class Orchestrator {
       );
     } finally {
       const owner = token;
-      if (owner !== undefined)
-        this.#withRegistry((registry) => registry.releaseReattach(binding.id, owner));
-      herdr.close();
+      try {
+        if (owner !== undefined) {
+          const released = this.#withRegistry((registry) =>
+            registry.releaseReattach(binding.id, owner),
+          );
+          if (!released.ok)
+            console.error(
+              `Manager reattachment release failed: ${released.error.code}: ${released.error.message}`,
+            );
+        }
+      } finally {
+        herdr.close();
+      }
     }
   }
 
@@ -1072,6 +1255,165 @@ export class Orchestrator {
     } finally {
       await session?.close();
     }
+  }
+
+  #whileForeground<T>(work: Promise<T>, here?: ManagerHere): Promise<T> {
+    return here === undefined ? work : Promise.race([work, here.interruption]);
+  }
+
+  #ownsForeground(here: ManagerHere): boolean {
+    if (here.bindingId === undefined || here.token === undefined) return false;
+    const current = this.#withRegistry((r) => {
+      const binding = r.get(here.bindingId ?? "");
+      if (!binding.ok) return binding;
+      if (binding.value.paneId !== here.paneId || binding.value.workspaceId !== here.workspaceId)
+        return ok(false);
+      if (here.settled) {
+        const pending = r.reattachPending(binding.value.id);
+        return pending.ok ? ok(binding.value.launchState === "ready" && !pending.value) : pending;
+      }
+      return r.ownsReattach(binding.value.id, here.token ?? "");
+    });
+    if (!current.ok) throw new Error(`${current.error.code}: ${current.error.message}`);
+    return current.value;
+  }
+
+  #watchManagerSignals(here: ManagerHere): () => void {
+    const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
+      const handler = () => {
+        here.failure = new ManagerInterrupted(signal);
+        if (here.tui !== undefined && this.#ownsForeground(here)) here.tui.kill(signal);
+        here.interrupt(here.failure);
+      };
+      process.on(signal, handler);
+      return { signal, handler };
+    });
+    // The request may be interrupted between awaited startup operations.
+    void here.interruption.catch(() => undefined);
+    return () => {
+      for (const { signal, handler } of handlers) process.off(signal, handler);
+    };
+  }
+
+  async #recoverUnstartedManager(binding: Binding, here: ManagerHere): Promise<Result<true>> {
+    if (here.failure !== undefined) throw here.failure;
+    const now = this.#deps.now();
+    const claimed = this.#withRegistry((r) =>
+      r.beginReattach(
+        binding.id,
+        binding.paneId,
+        now,
+        new Date(Date.parse(now) - LAUNCH_CLAIM_LEASE_MS).toISOString(),
+        true,
+      ),
+    );
+    if (!claimed.ok) return claimed;
+    if (!claimed.value.claimed)
+      return failure("manager_busy", "Another live entry owns manager startup");
+    const token = claimed.value.token;
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    try {
+      const snapshot = await this.#whileForeground(herdr.snapshot(), here);
+      if (here.failure !== undefined) throw here.failure;
+      if (
+        snapshot.panes.some(
+          (pane) =>
+            pane.paneId === binding.paneId &&
+            pane.workspaceId === binding.workspaceId &&
+            hasLiveTui(pane),
+        )
+      )
+        return failure(
+          "manager_unavailable",
+          "An unfinished manager still has a live TUI; reconcile it before recovery",
+        );
+      if (binding.sessionPath !== null) {
+        try {
+          // Keep detach attached to the lookup promise: a session arriving after interruption
+          // must still be closed, without keeping the foreground entry or its claim blocked.
+          await this.#whileForeground(
+            this.#deps.attachBinding(binding).then(async (session) => {
+              try {
+                await session.close();
+              } catch (cause) {
+                if (here.failure !== undefined)
+                  console.error(`Interrupted recovery session detach failed: ${messageOf(cause)}`);
+                throw cause;
+              }
+            }),
+            here,
+          );
+          if (here.failure !== undefined) throw here.failure;
+          return failure(
+            "manager_unavailable",
+            "An unfinished manager has a live host session; reconcile it before recovery",
+          );
+        } catch (cause) {
+          if (!(cause instanceof NativeSessionAbsentError)) throw cause;
+        }
+      }
+      if (here.failure !== undefined) throw here.failure;
+      if (binding.workspaceId !== null && binding.workspaceOwned !== false) {
+        const owned = snapshot.workspaces.find(
+          (workspace) => workspace.workspaceId === binding.workspaceId,
+        );
+        const owner = this.#withRegistry((r) => r.ownsReattach(binding.id, token));
+        if (!owner.ok) return owner;
+        if (!owner.value) return failure("lease_lost", "Manager startup ownership changed");
+        if (owned !== undefined && owned.workspaceId !== here.workspaceId) {
+          if (owned.cwd !== binding.cwd)
+            return failure("identity_mismatch", "Unfinished manager workspace changed");
+          if (here.failure !== undefined) throw here.failure;
+          await this.#whileForeground(herdr.closeWorkspace(owned.workspaceId), here);
+        }
+      }
+      if (here.failure !== undefined) throw here.failure;
+      const closed = this.#withRegistry((r) => r.closeUnstartedManager(binding.id, token));
+      if (!closed.ok) return closed;
+      if (here.failure !== undefined) throw here.failure;
+      return ok(true);
+    } finally {
+      try {
+        const released = this.#withRegistry((r) => r.releaseReattach(binding.id, token));
+        if (!released.ok)
+          console.error(`Manager startup release failed: ${released.error.message}`);
+      } finally {
+        herdr.close();
+      }
+    }
+  }
+
+  async #foregroundReadiness<T>(
+    ready: Promise<T>,
+    binding: Binding,
+    here?: ManagerHere,
+  ): Promise<T> {
+    if (here?.tui === undefined) return ready;
+    return Promise.race([
+      ready,
+      here.interruption,
+      here.tui.exited.then(async (exitCode) => {
+        // An atomic receipt may precede the exit while its filesystem event is still queued.
+        if (await readReadiness(this.#root, binding)) return ready;
+        throw new ManagerTuiExited(exitCode);
+      }),
+    ]);
+  }
+
+  #launchHere(argv: readonly string[], cwd: string, managedPath: string, here: ManagerHere): void {
+    if (here.failure !== undefined) throw here.failure;
+    if (!this.#ownsForeground(here)) throw new Error("Manager launch ownership or pane changed");
+    const env = this.#tuiEnvironment(managedPath);
+    const tui =
+      this.#deps.launchHere?.(argv, cwd, env) ??
+      Bun.spawn([...argv], {
+        cwd,
+        env: { ...process.env, ...env },
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+    here.tui = tui;
   }
 
   #tuiEnvironment(managedPath: string): Readonly<Record<string, string>> {
@@ -2202,20 +2544,24 @@ export class Orchestrator {
     }
   }
 
-  public reports(filter: ScopeFilter = {}): Result<DeliveryRecord[]> {
-    return this.#readDeliveryRecords("reports", filter);
+  public reports(filter: ScopeFilter = {}, includeManager = false): Result<DeliveryRecord[]> {
+    return this.#readDeliveryRecords("reports", filter, includeManager);
   }
 
   public notices(filter: ScopeFilter = {}): Result<DeliveryRecord[]> {
     return this.#readDeliveryRecords("notices", filter);
   }
 
-  #readDeliveryRecords(view: "reports" | "notices", filter: ScopeFilter): Result<DeliveryRecord[]> {
+  #readDeliveryRecords(
+    view: "reports" | "notices",
+    filter: ScopeFilter,
+    includeManager = false,
+  ): Result<DeliveryRecord[]> {
     if (!existsSync(this.#dbPath)) return ok([]);
     const registry = this.#deps.openRegistry(this.#dbPath, { readonly: true });
     try {
       return view === "reports"
-        ? registry.postedReports(filter)
+        ? registry.postedReports(filter, includeManager)
         : registry.operationalNotices(filter);
     } finally {
       registry.close();
@@ -2394,7 +2740,10 @@ export class Orchestrator {
           "Inspect Herdr, then use --confirm-absent if no workspace was created",
         );
       }
-      if (workspace !== undefined) {
+      if (
+        workspace !== undefined &&
+        (binding.workspaceOwned !== false || workspace.workspaceId === binding.ownedWorkspaceId)
+      ) {
         if (
           workspace.cwd !== binding.cwd ||
           (binding.workspaceId === null &&
@@ -2406,6 +2755,22 @@ export class Orchestrator {
           );
         }
         await herdr.closeWorkspace(workspace.workspaceId);
+      }
+      if (
+        binding.ownedWorkspaceId !== undefined &&
+        binding.ownedWorkspaceId !== binding.workspaceId
+      ) {
+        const retained = snapshot.workspaces.find(
+          (workspace) => workspace.workspaceId === binding.ownedWorkspaceId,
+        );
+        if (retained !== undefined) {
+          if (retained.cwd !== binding.cwd)
+            return failure(
+              "identity_mismatch",
+              "Retained manager workspace identity changed; inspect it before closing",
+            );
+          await herdr.closeWorkspace(retained.workspaceId);
+        }
       }
       if (binding.sessionPath !== null) {
         const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
@@ -2595,7 +2960,7 @@ export class Orchestrator {
         );
         if (
           !workspace ||
-          workspace.cwd !== binding.cwd ||
+          (binding.workspaceOwned !== false && workspace.cwd !== binding.cwd) ||
           !snapshot.panes.some(
             (pane) => pane.paneId === binding.paneId && pane.workspaceId === binding.workspaceId,
           )
@@ -2757,6 +3122,7 @@ export class Orchestrator {
       readonly planPath?: string;
       readonly deliverable?: Deliverable | undefined;
       readonly managerModel?: ManagerModelResolution;
+      readonly here?: ManagerHere;
       readonly successor?: {
         readonly previousId: string;
         readonly workspaceId: string;
@@ -2805,8 +3171,14 @@ export class Orchestrator {
         completedAt: "",
       });
     }
+    const here = target?.here;
+    if (here?.failure !== undefined) throw here.failure;
+    const launchToken = assignment.role === "manager" ? this.#deps.uuid() : undefined;
     const reserved = this.#withRegistry((registry) =>
       registry.reserve({
+        ...(launchToken === undefined
+          ? {}
+          : { managerLaunch: { token: launchToken, claimedAt: this.#deps.now() } }),
         bindingId,
         durableSessionId: this.#deps.uuid(),
         designation,
@@ -2820,6 +3192,11 @@ export class Orchestrator {
       }),
     );
     if (!reserved.ok) return reserved;
+    if (here !== undefined && launchToken !== undefined) {
+      here.bindingId = bindingId;
+      here.token = launchToken;
+      here.settled = false;
+    }
     const launchStage = target?.stage;
     if (
       launchStage !== undefined &&
@@ -2842,10 +3219,27 @@ export class Orchestrator {
       }
     }
     try {
-      await this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment);
-      await this.#deps.ensureHost(this.#root, this.#omoSocket, environment);
+      await this.#whileForeground(
+        Promise.resolve(this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment)),
+        here,
+      );
+      if (here?.failure !== undefined) throw here.failure;
+      await this.#whileForeground(
+        this.#deps.ensureHost(this.#root, this.#omoSocket, environment),
+        here,
+      );
     } catch (cause) {
-      if (target?.successor === undefined)
+      if (here !== undefined && launchToken !== undefined) {
+        const closed = this.#withRegistry((r) => r.closeUnstartedManager(bindingId, launchToken));
+        if (!closed.ok) return closed;
+        const interrupted =
+          here.failure ?? (cause instanceof ManagerInterrupted ? cause : undefined);
+        if (interrupted !== undefined)
+          return failure("manager_interrupted", interrupted.message, {
+            exitCode: interrupted.exitCode,
+          });
+      }
+      if (here === undefined && target?.successor === undefined)
         this.#withRegistry((registry) => {
           const closing = registry.beginClose(bindingId);
           return closing.ok ? registry.finishClose(bindingId) : closing;
@@ -2878,14 +3272,27 @@ export class Orchestrator {
           return;
         }
       });
+      if (here?.failure !== undefined) throw here.failure;
       const label = roleLabel(assignment, snapshot, bindingId);
       if (checkout?.kind === "owned-clone") await cloneCheckout(this.#root, checkout);
       const workspace =
-        checkout === null || checkout.kind === "owned-clone"
-          ? await herdr.createWorkspace(cwd, label)
-          : await herdr.createWorktree(checkout, label);
+        target?.here === undefined
+          ? checkout === null || checkout.kind === "owned-clone"
+            ? await herdr.createWorkspace(cwd, label)
+            : await herdr.createWorktree(checkout, label)
+          : {
+              workspaceId: target.here.workspaceId,
+              rootPaneId: target.here.paneId,
+              rootTabId: undefined,
+            };
+      if (here?.failure !== undefined) throw here.failure;
       const provisioned = this.#withRegistry((registry) =>
-        registry.provision(bindingId, workspace.workspaceId, workspace.rootPaneId),
+        registry.provision(
+          bindingId,
+          workspace.workspaceId,
+          workspace.rootPaneId,
+          target?.here === undefined,
+        ),
       );
       if (!provisioned.ok) return provisioned;
       if (target?.mode === "planned") {
@@ -2924,6 +3331,7 @@ export class Orchestrator {
       }
       const entries = [header, ...manager.getEntries()].map((entry) => JSON.stringify(entry));
       await writeFile(seedPath, `${entries.join("\n")}\n`, { mode: 0o600, flag: "wx" });
+      if (here?.failure !== undefined) throw here.failure;
       const allocated = this.#withRegistry((registry) =>
         registry.observeSession(bindingId, seedPath),
       );
@@ -2934,11 +3342,10 @@ export class Orchestrator {
         (receipt) => readySignal.resolve(receipt.sessionPath),
         (cause: unknown) => readySignal.reject(cause),
       );
-      await herdr.run(
-        workspace.rootPaneId,
-        this.#tuiArgv(reserved.value, seedPath, label, model),
-        this.#tuiEnvironment(managedPath),
-      );
+      const argv = this.#tuiArgv(reserved.value, seedPath, label, model);
+      if (target?.here === undefined)
+        await herdr.run(workspace.rootPaneId, argv, this.#tuiEnvironment(managedPath));
+      else this.#launchHere(argv, cwd, managedPath, target.here);
       const timeout = setTimeout(
         () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),
         15_000,
@@ -2946,7 +3353,11 @@ export class Orchestrator {
       timeout.unref();
       let sessionPath: string;
       try {
-        const outcome = await readinessOutcome;
+        const outcome = await this.#foregroundReadiness(
+          readinessOutcome,
+          provisioned.value,
+          target?.here,
+        );
         if (!outcome.ok) throw outcome.reason;
         sessionPath = outcome.value;
       } finally {
@@ -2956,15 +3367,27 @@ export class Orchestrator {
         registry.observeSession(bindingId, sessionPath),
       );
       if (!observed.ok) return observed;
-      const activated = await this.#verifyAndActivate(observed.value);
+      const activated = await this.#whileForeground(
+        this.#verifyAndActivate(observed.value),
+        target?.here,
+      );
       if (!activated.ok) {
         if (activated.error.code === "runtime_unavailable") {
           this.#withRegistry((registry) => registry.setLaunchState(bindingId, "uncertain"));
         }
         return activated;
       }
-      const initialized = await this.#initialize(activated.value, snapshot, target?.successor);
+      const initialized = await this.#whileForeground(
+        this.#initialize(activated.value, snapshot, target?.successor),
+        target?.here,
+      );
       if (!initialized.ok) return initialized;
+      if (launchToken !== undefined) {
+        const finished = this.#withRegistry((r) => r.finishReattach(bindingId, launchToken));
+        if (!finished.ok) return finished;
+        if (!finished.value) return failure("lease_lost", "Manager startup ownership changed");
+        if (here !== undefined) here.settled = true;
+      }
       return ok({
         binding: initialized.value,
         expectedModel: model,
@@ -2983,6 +3406,48 @@ export class Orchestrator {
               },
       });
     } catch (cause) {
+      // A rejected pre-launch await can mask the signal that already interrupted this entry.
+      // No foreground child was spawned: settle the owned reservation, never mark it uncertain.
+      // The finally block below still releases any subscription/readiness resources.
+      if (here !== undefined && here.tui === undefined && launchToken !== undefined) {
+        const closed = this.#withRegistry((registry) =>
+          registry.closeUnstartedManager(bindingId, launchToken),
+        );
+        if (!closed.ok) return closed;
+        const interrupted =
+          here.failure ?? (cause instanceof ManagerInterrupted ? cause : undefined);
+        return interrupted === undefined
+          ? failure(
+              "runtime_unavailable",
+              "Manager failed before TUI launch; its reservation was released",
+              messageOf(cause),
+            )
+          : failure("manager_interrupted", interrupted.message, { exitCode: interrupted.exitCode });
+      }
+      if (cause instanceof ManagerTuiExited || cause instanceof ManagerInterrupted) {
+        if (here !== undefined && here.tui !== undefined && this.#ownsForeground(here))
+          await here.tui.exited;
+        const allocated = this.#binding(bindingId);
+        if (!allocated.ok) return allocated;
+        if (here !== undefined && !this.#ownsForeground(here) && allocated.value.paneId !== null)
+          return failure("lease_lost", "Manager startup ownership changed; nothing was terminated");
+        if (here?.tui !== undefined) await this.#deps.terminateBinding(allocated.value);
+        const closed = this.#withRegistry((registry) => {
+          if (here?.tui === undefined && launchToken !== undefined)
+            return registry.closeUnstartedManager(bindingId, launchToken);
+          const closing = registry.beginClose(bindingId);
+          const result = closing.ok ? registry.finishClose(bindingId) : closing;
+          if (result.ok && launchToken !== undefined)
+            registry.finishReattach(bindingId, launchToken);
+          return result;
+        });
+        if (!closed.ok) return closed;
+        return failure(
+          cause instanceof ManagerInterrupted ? "manager_interrupted" : "manager_tui_exited",
+          cause.message,
+          { exitCode: cause.exitCode },
+        );
+      }
       this.#withRegistry((registry) => registry.setLaunchState(bindingId, "uncertain"));
       return failure(
         "runtime_unavailable",

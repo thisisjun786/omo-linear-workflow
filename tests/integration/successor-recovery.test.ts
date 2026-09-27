@@ -194,6 +194,8 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     },
     renameTab: async () => {},
     focusWorkspace: async () => {},
+    focusPane: async () => {},
+    paneContainsProcess: async () => true,
     sendKeys: async () => {},
     closeWorkspace: async () => {},
     removeWorktree: async () => {},

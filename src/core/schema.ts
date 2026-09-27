@@ -83,6 +83,8 @@ export const bindingSchema = z.strictObject({
   herdrSocket: text,
   omoSocket: text,
   workspaceId: text.nullable(),
+  workspaceOwned: z.boolean().optional(),
+  ownedWorkspaceId: text.optional(),
   paneId: text.nullable(),
   sessionPath: text.nullable(),
   launchState: z.enum([
@@ -261,9 +263,11 @@ export const claimResultSchema = z.strictObject({
   disposition: z.enum(["new", "replay", "in_progress"]),
   record: deliveryRecordSchema,
   target: bindingSchema.nullable(),
+  noticeSender: bindingSchema.optional(),
   nativeKey: text.optional(),
 });
 export const reserveInputSchema = z.strictObject({
+  managerLaunch: z.strictObject({ token: text, claimedAt: text }).optional(),
   bindingId: text,
   durableSessionId: text,
   deliverable: deliverableSchema.optional(),

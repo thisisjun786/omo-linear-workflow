@@ -63,6 +63,8 @@ const booleanFlags = new Set([
   "to-user",
   "as-user",
   "no-manager",
+  "here",
+  "all",
   "draft",
   "discard",
 ]);
@@ -151,9 +153,12 @@ async function text(path: string | undefined): Promise<Result<string>> {
 }
 function exitCode(result: Result<unknown>): number {
   if (result.ok) return 0;
+  if (result.error.code === "manager_tui_exited" || result.error.code === "manager_interrupted")
+    return z.object({ exitCode: z.number().int().min(0).max(255) }).parse(result.error.details)
+      .exitCode;
   if (result.error.code.includes("uncertain") || result.error.code === "delivery_in_progress")
     return 4;
-  if (result.error.code === "runtime_unavailable") return 3;
+  if (result.error.code === "runtime_unavailable" || result.error.code === "manager_busy") return 3;
   if (result.error.code === "interrupted") return 130;
   return 2;
 }
@@ -359,7 +364,7 @@ export async function runCli(
           ],
           deprecatedOptions: { "parent create": ["--repo"] },
           options: {
-            manage: "[--json]",
+            manage: "[--here] [--json] (bare olw runs here; requires Herdr)",
             "update check": "[--tag omo-ai=beta] [--tag @code-yeongyu/senpi=latest] [--json]",
             "update prepare":
               "[--remote NAME|URL] [--json] (PR to dev for the latest check's versions; OLW_GH_BIN overrides gh)",
@@ -385,7 +390,7 @@ export async function runCli(
             report:
               "--from BINDING --id ID --outcome completed|blocked|failed --text-file PATH [--evidence REF] [--pr URL --head SHA | --deliverable-path PATH_OR_URL] [--to-user]",
             reports:
-              "[--initiative ID | --project ID] (read-only user inbox; posted is not native acceptance)",
+              "[--initiative ID | --project ID] [--all] (posted user inbox by default; --all also includes manager reports in every state)",
             ask: "--from BINDING --id ID --text-file PATH [--questions-file JSON] [--to-user]",
             answer:
               "(--from BINDING | --as-user) --question QUESTION_ID --text-file PATH [--answers-file JSON]",
@@ -448,8 +453,10 @@ export async function runCli(
       result = values.ok
         ? { ok: true, value: await fetchMirror(root, values.value["remote"] ?? "") }
         : values;
-    } else if (command === "manage") {
-      result = await orchestrator.manage();
+    } else if (command === "manage" || command === "") {
+      const managed = await orchestrator.manage({ here: command === "" || has(options, "here") });
+      if (managed.ok && managed.value.tuiExited !== undefined) return await managed.value.tuiExited;
+      result = managed;
     } else if (command === "scope import") {
       const values = requireOptions(options, ["file"]);
       result = values.ok
@@ -712,7 +719,7 @@ export async function runCli(
       const filter = scopeFilter(options, false);
       result = filter.ok
         ? command === "reports"
-          ? orchestrator.reports(filter.value)
+          ? orchestrator.reports(filter.value, has(options, "all"))
           : command === "notices"
             ? orchestrator.notices(filter.value)
             : command === "questions"

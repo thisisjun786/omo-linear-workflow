@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { z } from "zod";
 import type {
   Assignment,
   Binding,
@@ -59,6 +61,37 @@ function error<T>(code: string, message: string, details?: unknown): Result<T> {
 }
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+const processStarttimeSchema = z.string().regex(/^\d+$/);
+function processStarttime(pid: number): string | null {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (cause) {
+    if (
+      cause instanceof Error &&
+      "code" in cause &&
+      (cause.code === "ENOENT" || cause.code === "ESRCH")
+    )
+      return null;
+    throw cause;
+  }
+  // comm (field 2) may contain spaces or ')'; the suffix starts at field 3.
+  const fields = stat
+    .slice(stat.lastIndexOf(")") + 2)
+    .trim()
+    .split(/\s+/);
+  return processStarttimeSchema.parse(fields[19]);
+}
+function processAlive(pid: number, starttime: string | null): boolean {
+  if (starttime !== null) return processStarttime(pid) === starttime;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ESRCH") return false;
+    throw cause;
+  }
 }
 function encoded(value: unknown): string {
   return JSON.stringify(value);
@@ -167,6 +200,13 @@ export function openRegistry(
     claimed_at TEXT NOT NULL,
     owner TEXT NOT NULL
   )`);
+    const reattachColumns = db
+      .query<{ readonly name: string }, []>("PRAGMA table_info(manager_reattach)")
+      .all();
+    if (!reattachColumns.some((column) => column.name === "owner_pid"))
+      db.run("ALTER TABLE manager_reattach ADD COLUMN owner_pid INTEGER");
+    if (!reattachColumns.some((column) => column.name === "owner_starttime"))
+      db.run("ALTER TABLE manager_reattach ADD COLUMN owner_starttime TEXT");
     db.run(`CREATE TABLE IF NOT EXISTS successor_launch (
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
     state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
@@ -402,6 +442,11 @@ export function openRegistry(
       binding.launchState,
       encoded(binding),
     );
+    if (input.managerLaunch !== undefined) {
+      if (binding.assignment.role !== "manager")
+        return error("invalid_input", "Only a manager can hold a foreground launch claim");
+      saveManagerClaim(binding.id, input.managerLaunch.token, input.managerLaunch.claimedAt);
+    }
     return ok(binding);
   }
 
@@ -602,7 +647,12 @@ export function openRegistry(
     }
   }
 
-  function provision(id: string, workspaceId: string, paneId: string): Result<Binding> {
+  function provision(
+    id: string,
+    workspaceId: string,
+    paneId: string,
+    workspaceOwned = true,
+  ): Result<Binding> {
     if (workspaceId.length === 0 || paneId.length === 0)
       return error("invalid_input", "Workspace and pane IDs are required");
     return transaction(() => {
@@ -610,7 +660,13 @@ export function openRegistry(
       if (!binding.ok) return binding;
       if (binding.value.launchState !== "reserved")
         return error("invalid_transition", "Only a reserved binding can be provisioned");
-      return saveBinding({ ...binding.value, workspaceId, paneId, launchState: "provisioning" });
+      return saveBinding({
+        ...binding.value,
+        workspaceId,
+        paneId,
+        ...(workspaceOwned ? {} : { workspaceOwned }),
+        launchState: "provisioning",
+      });
     });
   }
 
@@ -635,12 +691,23 @@ export function openRegistry(
       : error("invalid_transition", "Only a ready manager can move to a new TUI pane");
   }
 
-  function reattachClaim(
-    id: string,
-  ): { readonly claimed_at: string; readonly owner: string } | null {
+  function reattachClaim(id: string): {
+    readonly claimed_at: string;
+    readonly owner: string;
+    readonly owner_pid: number | null;
+    readonly owner_starttime: string | null;
+  } | null {
     return db
-      .query<{ readonly claimed_at: string; readonly owner: string }, [string]>(
-        "SELECT claimed_at, owner FROM manager_reattach WHERE binding_id = ?",
+      .query<
+        {
+          readonly claimed_at: string;
+          readonly owner: string;
+          readonly owner_pid: number | null;
+          readonly owner_starttime: string | null;
+        },
+        [string]
+      >(
+        "SELECT claimed_at, owner, owner_pid, owner_starttime FROM manager_reattach WHERE binding_id = ?",
       )
       .get(id);
   }
@@ -658,33 +725,93 @@ export function openRegistry(
     expectedPaneId: string | null,
     claimedAt: string,
     staleBefore: string,
+    reclaimDeadOwner = false,
   ): Result<ReattachClaim> {
     return transaction<ReattachClaim>(() => {
-      const binding = readyManager(id);
+      const binding = get(id);
       if (!binding.ok) return binding;
+      if (
+        binding.value.assignment.role !== "manager" ||
+        !["ready", "reserved", "provisioning"].includes(binding.value.launchState)
+      )
+        return error("invalid_transition", "Manager is not available for a launch claim");
       const held = reattachClaim(id);
       // Compare-and-set: a changed pane or a live claim means another caller owns reattachment.
       if (
         binding.value.paneId !== expectedPaneId ||
-        (held !== null && held.claimed_at >= staleBefore)
+        (held !== null &&
+          held.claimed_at !== "" &&
+          ((held.owner_pid !== null && processAlive(held.owner_pid, held.owner_starttime)) ||
+            (held.claimed_at >= staleBefore && !(reclaimDeadOwner && held.owner_pid !== null))))
       )
         return ok({ claimed: false, binding: binding.value });
       const token = randomUUID();
-      db.query(
-        "INSERT INTO manager_reattach (binding_id, claimed_at, owner) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner",
-      ).run(id, claimedAt, token);
+      saveManagerClaim(id, token, claimedAt);
       return ok({ claimed: true, binding: binding.value, token });
     });
   }
 
-  function recordReattachPane(id: string, token: string, paneId: string): Result<Binding> {
+  function saveManagerClaim(id: string, token: string, claimedAt: string): void {
+    db.query(
+      "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid, owner_starttime) VALUES (?, ?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid, owner_starttime = excluded.owner_starttime",
+    ).run(
+      id,
+      claimedAt,
+      token,
+      process.pid,
+      processStarttimeSchema.parse(processStarttime(process.pid)),
+    );
+  }
+
+  function closeUnstartedManager(id: string, token: string): Result<Binding> {
+    return transaction(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (reattachClaim(id)?.owner !== token)
+        return error("lease_lost", "Manager launch belongs to another entry");
+      if (
+        binding.value.assignment.role !== "manager" ||
+        !["reserved", "provisioning"].includes(binding.value.launchState) ||
+        binding.value.initialization.state !== "pending"
+      )
+        return error("invalid_transition", "Only an uninitialized manager launch can be released");
+      const closing = beginCloseInTransaction(id);
+      if (!closing.ok) return closing;
+      const closed = finishCloseInTransaction(id);
+      if (closed.ok)
+        db.query("DELETE FROM manager_reattach WHERE binding_id = ? AND owner = ?").run(id, token);
+      return closed;
+    });
+  }
+
+  function recordReattachPane(
+    id: string,
+    token: string,
+    paneId: string,
+    workspaceId?: string,
+  ): Result<Binding> {
     if (paneId.length === 0) return error("invalid_input", "Pane ID is required");
     return transaction(() => {
       const binding = readyManager(id);
       if (!binding.ok) return binding;
       if (reattachClaim(id)?.owner !== token)
         return error("lease_lost", "Manager reattachment is owned by another caller");
-      return saveBinding({ ...binding.value, paneId });
+      return saveBinding({
+        ...binding.value,
+        paneId,
+        ...(workspaceId === undefined
+          ? {}
+          : {
+              ...(binding.value.workspaceOwned !== false && binding.value.workspaceId !== null
+                ? { ownedWorkspaceId: binding.value.ownedWorkspaceId ?? binding.value.workspaceId }
+                : {}),
+              workspaceId,
+              workspaceOwned:
+                workspaceId ===
+                (binding.value.ownedWorkspaceId ??
+                  (binding.value.workspaceOwned !== false ? binding.value.workspaceId : null)),
+            }),
+      });
     });
   }
 
@@ -1524,6 +1651,15 @@ export function openRegistry(
       const target = authorize(senderSessionId, envelopeValue);
       if (!target.ok) return target;
       const parsed = envelopeSchema.parse(envelopeValue);
+      let notice: Pick<ClaimResult, "noticeSender"> = {};
+      if (
+        target.value.assignment.role === "manager" &&
+        (parsed.kind === "report" || parsed.kind === "question")
+      ) {
+        const sender = bySession(senderSessionId);
+        if (!sender.ok) return sender;
+        notice = { noticeSender: sender.value };
+      }
       const existingRow = deliveryById.get(parsed.id);
       if (existingRow !== null) {
         const existing = parseDelivery(existingRow);
@@ -1567,6 +1703,7 @@ export function openRegistry(
               attempts: [...history, next],
             },
             target: target.value,
+            ...notice,
             nativeKey,
           });
         }
@@ -1574,7 +1711,7 @@ export function openRegistry(
           existing.value.state === "accepted" || existing.value.state === "rejected"
             ? "replay"
             : "in_progress";
-        return ok({ disposition, record: existing.value, target: target.value });
+        return ok({ disposition, record: existing.value, target: target.value, ...notice });
       }
       const first: DeliveryAttempt = {
         number: 1,
@@ -1593,7 +1730,7 @@ export function openRegistry(
         "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, ?, NULL)",
       ).run(parsed.id, encoded(parsed), record.state);
       attempts.append(parsed.id, first);
-      return ok({ disposition: "new", record, target: target.value });
+      return ok({ disposition: "new", record, target: target.value, ...notice });
     });
   }
 
@@ -1923,17 +2060,25 @@ export function openRegistry(
     });
   }
 
-  function inboxRecords(filter: ScopeFilter, operational: boolean): Result<DeliveryRecord[]> {
+  function inboxRecords(
+    filter: ScopeFilter,
+    operational: boolean,
+    includeManager = false,
+  ): Result<DeliveryRecord[]> {
     try {
       const rows = db
         .query<
           DeliveryRow,
-          [number, number, string | null, string | null, string | null, string | null]
+          [number, number, number, string | null, string | null, string | null, string | null]
         >(`
         SELECT d.envelope_json, d.state, d.receipt_json FROM deliveries d
         JOIN bindings b ON b.id = json_extract(d.envelope_json, '$.fromBindingId')
         WHERE ((? = 1 AND json_extract(d.envelope_json, '$.kind') = 'operational_notice')
-          OR (? = 0 AND d.state = 'posted' AND json_extract(d.envelope_json, '$.kind') = 'report'))
+          OR (? = 0 AND json_extract(d.envelope_json, '$.kind') = 'report'
+            AND ((d.state = 'posted' AND json_extract(d.envelope_json, '$.toBindingId') IS NULL) OR (? = 1 AND EXISTS (
+              SELECT 1 FROM bindings recipient
+              WHERE recipient.id = json_extract(d.envelope_json, '$.toBindingId')
+                AND json_extract(recipient.json, '$.assignment.role') = 'manager')))))
           AND (? IS NULL OR json_extract(b.json, '$.assignment.projectId') = ?)
           AND (? IS NULL OR json_extract(b.json, '$.assignment.initiativeId') = ?)
         ORDER BY d.rowid
@@ -1941,6 +2086,7 @@ export function openRegistry(
         .all(
           Number(operational),
           Number(operational),
+          Number(includeManager),
           filter.projectId ?? null,
           filter.projectId ?? null,
           filter.initiativeId ?? null,
@@ -1993,6 +2139,7 @@ export function openRegistry(
     observeSession,
     beginReattach,
     ownsReattach,
+    closeUnstartedManager,
     recordReattachPane,
     reattachPending,
     releaseReattach,
@@ -2013,7 +2160,7 @@ export function openRegistry(
     setContactState,
     setOwner,
     post,
-    postedReports: (filter) => inboxRecords(filter, false),
+    postedReports: (filter, includeManager) => inboxRecords(filter, false, includeManager),
     postedQuestions,
     questions,
     answerFromUser,

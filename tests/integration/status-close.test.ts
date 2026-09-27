@@ -112,6 +112,8 @@ async function world() {
     createTab: unused,
     renameTab: unused,
     focusWorkspace: unused,
+    focusPane: unused,
+    paneContainsProcess: unused,
     run: unused,
     removeWorktree: unused,
     subscribe: async (cb) => {

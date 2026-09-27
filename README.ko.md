@@ -45,8 +45,11 @@ olw doctor --json
 
 ## 빠른 시작
 
+Herdr의 아무 pane에서 `olw`를 입력하세요. 현재 pane에서 매니저를 열거나, 이미 실행 중인 매니저 pane으로 이동합니다. TUI를 종료한 뒤 다시 `olw`를 입력하면 같은 대화를 현재 pane에 다시 연결합니다. 일반 작업에서는 평소처럼 어시스턴트로 동작하며, OLW 메시지를 처리할 때만 OLW 지침을 적용합니다.
+
 ```sh
-olw manage --json
+olw
+# 다른 pane에서 프로젝트 작업을 승인하고 시작합니다:
 olw scope import --file approved-scope.json --json
 olw parent create --scope-digest DIGEST --designation ID --execute --project ID --json
 olw child create --parent BINDING --issue ID --mode planned --json
@@ -60,7 +63,8 @@ olw status --project ID --json
 | 명령 | 하는 일 |
 | --- | --- |
 | `doctor` | 로컬 런타임, 저장소 mirror, 기존 부모를 점검 |
-| `manage` | OLW host에서 매니저 세션을 열거나 다시 붙음 |
+| `olw` / `manage --here` | 현재 Herdr pane에서 매니저를 열거나 다시 연결. 이미 실행 중이면 해당 pane으로 이동 |
+| `manage` | 별도 workspace에서 매니저를 열거나, 기존 매니저로 이동·재연결 |
 | `update check` | 고정된 OMO와 Senpi 버전을 npm과 비교. 설치하지 않음 |
 | `update prepare` | 버전 갱신을 별도 worktree에서 검증하고 `dev`로 PR을 올림 |
 | `scope import` | 승인된 Linear snapshot을 가져오고 digest를 반환 |
@@ -74,7 +78,7 @@ olw status --project ID --json
 | `stage start` | 같은 worktree에서 execute 단계를 시작 |
 | `send` | 역할 사이에 `instruction` 또는 `coordination` 메시지를 전송 |
 | `report` | `completed`, `blocked`, `failed` 결과를 부모, 매니저 또는 사용자 inbox(`--to-user`)에 보고 |
-| `reports` | 사용자 inbox를 읽음 (읽기 전용) |
+| `reports` | 게시된 사용자 inbox를 읽음. `--all`은 매니저에게 보낸 보고도 포함 (읽기 전용) |
 | `ask` | 막힌 질문을 위로 올림 (부모 전용; 자식은 `olw_ask` 도구 사용) |
 | `answer` | 질문 ID 하나에 역할(`--from`) 또는 사용자(`--as-user`)로서 답함 |
 | `questions` / `notices` | 열린 질문 또는 운영 알림 목록 (읽기 전용) |

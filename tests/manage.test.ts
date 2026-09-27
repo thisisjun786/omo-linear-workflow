@@ -1,5 +1,6 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@code-yeongyu/senpi";
@@ -21,7 +22,14 @@ import type { NativeSession } from "../src/transport";
 import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
+let previousSocket: string | undefined;
+beforeEach(() => {
+  previousSocket = process.env["HERDR_SOCKET_PATH"];
+  process.env["HERDR_SOCKET_PATH"] = "/fixture/herdr.sock";
+});
 afterEach(async () => {
+  if (previousSocket === undefined) delete process.env["HERDR_SOCKET_PATH"];
+  else process.env["HERDR_SOCKET_PATH"] = previousSocket;
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 function value<T>(result: Result<T>): T {
@@ -49,7 +57,7 @@ async function world(agent = "omo") {
     }),
   );
   const workspaces = new Map<string, Workspace>();
-  const panes = new Map<string, { workspaceId: string; agent?: string }>();
+  const panes = new Map<string, { workspaceId: string; agent?: string; sessionPath?: string }>();
   const hooks: {
     failRun: boolean;
     hostCheck: (() => void) | undefined;
@@ -124,6 +132,12 @@ async function world(agent = "omo") {
     async focusWorkspace(workspaceId) {
       focused.push(workspaceId);
     },
+    async paneContainsProcess() {
+      return true;
+    },
+    async focusPane(paneId) {
+      focused.push(paneId);
+    },
     async run(paneId, argv, env) {
       if (hooks.failRun) throw new Error("injected send_input failure before launching TUI");
       runs.push({ paneId, argv, env });
@@ -177,6 +191,10 @@ async function world(agent = "omo") {
     createHerdrClient: () => herdr,
     resolveHerdrArtifact: async () => ({ artifactDir: join(root, ".managed-herdr") }),
     ensureHost: async () => {},
+    launchHere: (argv, _cwd, env) => ({
+      exited: herdr.run(process.env["HERDR_PANE_ID"] ?? "", argv, env).then(() => 0),
+      kill() {},
+    }),
     checkHostProfile: async () => hooks.hostCheck?.(),
     gitTip: (cwd, ref) => fixtureTip(root, "base-commit", cwd, ref),
     now: () => hooks.now,
@@ -280,6 +298,7 @@ async function world(agent = "omo") {
     created,
     tabs,
     focused,
+    deps,
     prompts,
     hooks,
   };
@@ -288,6 +307,1210 @@ async function world(agent = "omo") {
 function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
+
+test("bare entry cannot displace a live reattachment owner after its lease expires", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const claim = w.readRegistry((r) =>
+    value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+  );
+  if (!claim.claimed) throw new Error("No claim");
+  const afterLease = "2026-09-26T00:03:00.000Z";
+  expect(
+    w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, afterLease, "2026-09-26T00:01:00.000Z", true)),
+    ),
+  ).toMatchObject({ claimed: false });
+  expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(true);
+});
+
+test("plain manage cannot displace a live bare-entry owner beyond the lease", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+  const atVerification = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const exit = Promise.withResolvers<number>();
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => deadline.reject(new Error("Mixed-entry verification deadline")),
+    3000,
+  );
+  let kills = 0;
+  w.hooks.beforeAttach = async () => {
+    w.hooks.beforeAttach = undefined;
+    atVerification.resolve();
+    await release.promise;
+  };
+  const owner = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      const launch = w.deps.launchHere?.(argv, cwd, env);
+      if (!launch) throw new Error("Missing fixture launcher");
+      return {
+        exited: launch.exited.then(() => exit.promise),
+        kill() {
+          kills++;
+          exit.resolve(143);
+        },
+      };
+    },
+  });
+  const attaching = owner.manage({ here: true });
+  try {
+    await Promise.race([atVerification.promise, deadline.promise]);
+    w.hooks.now = "2026-09-26T00:03:00.000Z";
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "manager_busy" },
+    });
+    expect(value(await w.orchestrator.manage()).action).toBe("reattaching");
+    expect(w.readRegistry((r) => value(r.reattachPending(first.id)))).toBe(true);
+    release.resolve();
+    expect(value(await Promise.race([attaching, deadline.promise])).action).toBe("reattached");
+    expect(kills).toBe(0);
+    expect(w.runs).toHaveLength(2);
+  } finally {
+    clearTimeout(timer);
+    release.resolve();
+    exit.resolve(0);
+    await attaching;
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("displaced foreground entry never kills the manager TUI after verification", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+  const exit = Promise.withResolvers<number>();
+  let kills = 0;
+  w.hooks.beforeAttach = async () => {
+    const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+    try {
+      db.query("UPDATE manager_reattach SET owner = 'successor-token'").run();
+    } finally {
+      db.close();
+    }
+  };
+  const entry = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      void w.deps.launchHere?.(argv, cwd, env);
+      return {
+        exited: exit.promise,
+        kill() {
+          kills++;
+          exit.resolve(143);
+        },
+      };
+    },
+  });
+  try {
+    expect(await entry.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { details: { reason: "lease_lost" } },
+    });
+    expect(kills).toBe(0);
+  } finally {
+    exit.resolve(0);
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+  "%s during ensureHost settles the unstarted reservation before retry",
+  async (signal) => {
+    const w = await world();
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+    w.panes.set("caller:p1", { workspaceId: "caller" });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const noop = () => {};
+    process.on(signal, noop);
+    const interrupted = new Orchestrator(w.root, "/fixture/herdr.sock", {
+      ...w.deps,
+      ensureHost: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const entry = interrupted.manage({ here: true });
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => deadline.reject(new Error("Startup interruption not settled")),
+      2000,
+    );
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      expect(managers(value(w.orchestrator.status()))[0]?.launchState).toBe("reserved");
+      process.emit(signal, signal);
+      expect(await Promise.race([entry, deadline.promise])).toMatchObject({
+        ok: false,
+        error: { code: "manager_interrupted" },
+      });
+      expect(managers(value(w.orchestrator.status()))[0]?.launchState).toBe("closed");
+      expect(w.runs).toHaveLength(0);
+      release.resolve();
+      await entry;
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("created");
+      expect(w.runs).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      release.resolve();
+      await entry;
+      process.off(signal, noop);
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test.each(["SIGINT", "SIGTERM", "SIGHUP", "none"] as const)(
+  "%s followed by rejecting a pre-launch subscription closes the never-launched manager",
+  async (signal) => {
+    const w = await world();
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+    w.panes.set("caller:p1", { workspaceId: "caller" });
+    const entered = Promise.withResolvers<void>();
+    const subscription = Promise.withResolvers<() => void>();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => deadline.reject(new Error("Rejected startup settlement deadline")),
+      3000,
+    );
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const subscribe = herdr.subscribe;
+    herdr.subscribe = () => {
+      entered.resolve();
+      return subscription.promise;
+    };
+    const pending = w.orchestrator.manage({ here: true });
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      const reserved = managers(value(w.orchestrator.status()))[0];
+      if (!reserved) throw new Error("No startup reservation");
+      if (signal !== "none") process.emit(signal, signal);
+      subscription.reject(new Error("Herdr connection closed during subscription"));
+      expect(await Promise.race([pending, deadline.promise])).toMatchObject({
+        ok: false,
+        error: { code: signal === "none" ? "runtime_unavailable" : "manager_interrupted" },
+      });
+      expect(w.runs).toHaveLength(0);
+      expect(w.readRegistry((r) => value(r.get(reserved.id)))).toMatchObject({
+        launchState: "closed",
+        paneId: null,
+        initialization: { state: "pending" },
+      });
+      expect(w.readRegistry((r) => value(r.reattachPending(reserved.id)))).toBe(false);
+      herdr.subscribe = subscribe;
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("created");
+      expect(w.runs).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      subscription.resolve(() => {});
+      await pending;
+      herdr.subscribe = subscribe;
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test.each(["reserved", "provisioning"] as const)(
+  "bare entry reclaims a dead %s launch owner through a new fenced token",
+  async (state) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+    const child = Bun.spawn([process.execPath, "--eval", "process.exit(0)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await child.exited;
+    const claim = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+    );
+    if (!claim.claimed) throw new Error("No claim");
+    const unstarted = {
+      ...first,
+      launchState: state,
+      sessionPath: null,
+      initialization: { state: "pending", text: null },
+    };
+    db.query("UPDATE bindings SET launch_state = ?, json = ? WHERE id = ?").run(
+      state,
+      JSON.stringify(unstarted),
+      first.id,
+    );
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(child.pid);
+    db.close();
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+    w.workspaces.set("recovery", {
+      workspaceId: "recovery",
+      rootPaneId: "recovery:p1",
+      cwd: w.root,
+    });
+    w.panes.set("recovery:p1", { workspaceId: "recovery" });
+    process.env["HERDR_PANE_ID"] = "recovery:p1";
+    try {
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("created");
+      expect(w.readRegistry((r) => value(r.get(first.id))).launchState).toBe("closed");
+      expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test.each(["snapshot", "attach", "detach", "workspace-close"] as const)(
+  "SIGTERM interrupts dead-owner recovery during %s and releases its token before the operation settles",
+  async (phase) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    const dead = Bun.spawn([process.execPath, "--eval", "process.exit(0)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await dead.exited;
+    const claim = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+    );
+    if (!claim.claimed) throw new Error("Missing abandoned claim");
+    const abandoned: Binding = {
+      ...first,
+      launchState: "provisioning",
+      sessionPath: phase === "attach" || phase === "detach" ? first.sessionPath : null,
+      initialization: { state: "pending", text: null },
+    };
+    const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+    db.query("UPDATE bindings SET launch_state = 'provisioning', json = ? WHERE id = ?").run(
+      JSON.stringify(abandoned),
+      first.id,
+    );
+    db.query("UPDATE manager_reattach SET owner_pid = ? WHERE binding_id = ?").run(
+      dead.pid,
+      first.id,
+    );
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    w.workspaces.set("recovery", {
+      workspaceId: "recovery",
+      rootPaneId: "recovery:p1",
+      cwd: w.root,
+    });
+    w.panes.set("recovery:p1", { workspaceId: "recovery" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "recovery:p1";
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const completed = Promise.withResolvers<void>();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(() => deadline.reject(new Error(`Recovery ${phase} deadline`)), 2000);
+    const hold = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const snapshot = herdr.snapshot.bind(herdr);
+    const closeWorkspace = herdr.closeWorkspace.bind(herdr);
+    let snapshots = 0;
+    let workspaceCloses = 0;
+    let nativeCloses = 0;
+    herdr.snapshot = async () => {
+      if (phase === "snapshot" && ++snapshots === 2) {
+        await hold();
+        completed.resolve();
+      }
+      return snapshot();
+    };
+    herdr.closeWorkspace = async (id) => {
+      workspaceCloses++;
+      if (phase === "workspace-close") await hold();
+      await closeWorkspace(id);
+      if (phase === "workspace-close") completed.resolve();
+    };
+    const deps: OrchestratorDependencies = {
+      ...w.deps,
+      attachBinding: async (binding) => {
+        if (phase === "attach") await hold();
+        const session = await w.deps.attachBinding(binding);
+        return {
+          ...session,
+          close: async () => {
+            if (phase === "detach") await hold();
+            nativeCloses++;
+            await session.close();
+            completed.resolve();
+          },
+        };
+      },
+    };
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    const pending = runCli(["--root", w.root], deps);
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      process.kill(process.pid, "SIGTERM");
+      expect(await Promise.race([pending, deadline.promise])).toBe(143);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: { code: "manager_interrupted" },
+      });
+      expect(w.readRegistry((r) => value(r.get(first.id)))).toEqual(abandoned);
+      expect(
+        db
+          .query<{ claimed_at: string }, [string]>(
+            "SELECT claimed_at FROM manager_reattach WHERE binding_id = ?",
+          )
+          .get(first.id)?.claimed_at,
+      ).toBe("");
+      expect(w.runs).toHaveLength(1);
+      expect(workspaceCloses).toBe(phase === "workspace-close" ? 1 : 0);
+      release.resolve();
+      await Promise.race([completed.promise, deadline.promise]);
+      expect(nativeCloses).toBe(phase === "attach" || phase === "detach" ? 1 : 0);
+      expect(w.readRegistry((r) => value(r.get(first.id)))).toEqual(abandoned);
+      expect(w.workspaces.has("recovery")).toBe(true);
+    } finally {
+      release.resolve();
+      try {
+        await pending;
+        await Promise.race([completed.promise, deadline.promise]);
+      } finally {
+        clearTimeout(timer);
+        herdr.snapshot = snapshot;
+        herdr.closeWorkspace = closeWorkspace;
+        stdout.mockRestore();
+        db.close();
+        for (const [key, value] of Object.entries(old)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    }
+  },
+);
+
+test("moving an owned manager to a user pane retains its owned workspace for close", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  w.workspaces.set("user", { workspaceId: "user", rootPaneId: "user:p1", cwd: "/user" });
+  w.panes.set("user:p1", { workspaceId: "user" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "user:p1";
+  try {
+    const moved = value(await w.orchestrator.manage({ here: true })).binding;
+    expect(moved).toMatchObject({
+      workspaceId: "user",
+      workspaceOwned: false,
+      ownedWorkspaceId: first.workspaceId,
+    });
+    value(await w.orchestrator.close(first.id));
+    expect(w.workspaces.has(first.workspaceId ?? "")).toBe(false);
+    expect(w.workspaces.has("user")).toBe(true);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test.each([false, true])(
+  "round-trip owned workspace cleanup closes M exactly once and preserves U (stored legacy flag=%s)",
+  async (legacyFlag) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    if (!first.paneId || !first.workspaceId) throw new Error("Manager workspace missing");
+    w.panes.set(first.paneId, { workspaceId: first.workspaceId });
+    w.workspaces.set("user", { workspaceId: "user", rootPaneId: "user:p1", cwd: "/user" });
+    w.panes.set("user:p1", { workspaceId: "user" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "user:p1";
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const closed = spyOn(herdr, "closeWorkspace");
+    try {
+      value(await w.orchestrator.manage({ here: true }));
+      w.panes.set("user:p1", { workspaceId: "user" });
+      process.env["HERDR_PANE_ID"] = first.paneId;
+      const returned = value(await w.orchestrator.manage({ here: true })).binding;
+      if (legacyFlag) {
+        const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+        try {
+          db.query("UPDATE bindings SET json = ? WHERE id = ?").run(
+            JSON.stringify({ ...returned, workspaceOwned: false }),
+            first.id,
+          );
+        } finally {
+          db.close();
+        }
+      } else
+        expect(returned).toMatchObject({
+          workspaceId: first.workspaceId,
+          ownedWorkspaceId: first.workspaceId,
+          workspaceOwned: true,
+        });
+      value(await w.orchestrator.close(first.id));
+      value(await w.orchestrator.close(first.id));
+      expect(closed.mock.calls).toEqual([[first.workspaceId]]);
+      expect(w.workspaces.has(first.workspaceId)).toBe(false);
+      expect(w.workspaces.has("user")).toBe(true);
+      expect(w.panes.has("user:p1")).toBe(true);
+    } finally {
+      closed.mockRestore();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test("here entry rejects an owned manager workspace whose cwd changed", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const owned = w.workspaces.get(first.workspaceId ?? "");
+  if (owned === undefined) throw new Error("missing owned workspace");
+  w.workspaces.set(owned.workspaceId, { ...owned, cwd: "/elsewhere" });
+  w.panes.set(first.paneId ?? "", { workspaceId: owned.workspaceId, agent: "pi" });
+  w.workspaces.set("user", { workspaceId: "user", rootPaneId: "user:p1", cwd: "/user" });
+  w.panes.set("user:p1", { workspaceId: "user" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "user:p1";
+  try {
+    const focusedBefore = w.focused.length;
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "manager_unavailable" },
+    });
+    expect(w.focused.length).toBe(focusedBefore);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("a live pane reporting another session is not focused as the manager", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", {
+    workspaceId: first.workspaceId ?? "",
+    agent: "pi",
+    sessionPath: "/other/session.jsonl",
+  });
+  const result = await w.orchestrator.manage();
+  if (result.ok) expect(result.value.action).not.toBe("focused");
+  expect(w.focused).not.toContain(first.paneId);
+});
+
+test("here entry rejects a different server even when its pane ID matches", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  try {
+    const other = new Orchestrator(w.root, "/other/herdr.sock", w.deps);
+    expect(await other.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "herdr_context_mismatch" },
+    });
+    expect(w.runs).toHaveLength(0);
+    expect(managers(value(w.orchestrator.status()))).toHaveLength(0);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test.each(["live", "exited"] as const)(
+  "here entry on server B leaves a %s manager on server A unchanged, then focus and close stay on A",
+  async (tui) => {
+    const a = await world();
+    const b = await world();
+    const manager = value(await a.orchestrator.manage()).binding;
+    if (!manager.paneId || !manager.workspaceId) throw new Error("Missing manager location");
+    if (tui === "exited") a.panes.set(manager.paneId, { workspaceId: manager.workspaceId });
+    // Public pane/workspace IDs can collide on independent servers.
+    b.workspaces.set(manager.workspaceId, {
+      workspaceId: manager.workspaceId,
+      rootPaneId: manager.paneId,
+      cwd: a.root,
+    });
+    b.panes.set(manager.paneId, { workspaceId: manager.workspaceId });
+    const serverA = a.deps.createHerdrClient("/fixture/herdr.sock");
+    const serverB = b.deps.createHerdrClient("/server-b/herdr.sock");
+    const deps: OrchestratorDependencies = {
+      ...a.deps,
+      createHerdrClient: (socket) => {
+        if (socket === "/fixture/herdr.sock") return serverA;
+        if (socket === "/server-b/herdr.sock") return serverB;
+        throw new Error(`Unexpected server ${socket}`);
+      },
+      launchHere: () => {
+        throw new Error("Cross-server foreground launch attempted");
+      },
+    };
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+      HERDR_SOCKET_PATH: process.env["HERDR_SOCKET_PATH"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = manager.paneId;
+    process.env["HERDR_SOCKET_PATH"] = "/server-b/herdr.sock";
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    const closeA = spyOn(serverA, "closeWorkspace");
+    const closeB = spyOn(serverB, "closeWorkspace");
+    const db = new Database(join(a.root, ".omo/state/registry.sqlite"));
+    db.run("CREATE TABLE binding_writes (id TEXT)");
+    db.run(
+      "CREATE TRIGGER record_binding_write AFTER UPDATE ON bindings BEGIN INSERT INTO binding_writes VALUES (NEW.id); END",
+    );
+    try {
+      expect(await runCli(["--root", a.root], deps)).toBe(2);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: {
+          code: "herdr_server_mismatch",
+          details: { managerSocket: "/fixture/herdr.sock", callerSocket: "/server-b/herdr.sock" },
+        },
+      });
+      expect(
+        db.query<{ count: number }, []>("SELECT count(*) AS count FROM binding_writes").get()
+          ?.count,
+      ).toBe(0);
+      expect(a.readRegistry((r) => value(r.get(manager.id)))).toEqual(manager);
+      expect(a.readRegistry((r) => value(r.reattachPending(manager.id)))).toBe(false);
+      expect(a.focused).toEqual([]);
+      expect(b.focused).toEqual([]);
+      expect(a.runs).toHaveLength(1);
+      expect(b.runs).toHaveLength(0);
+      // The supported original-server entry and explicit close still resolve A, never B.
+      process.env["HERDR_SOCKET_PATH"] = "/fixture/herdr.sock";
+      expect(value(await a.orchestrator.manage({ here: true })).action).toBe(
+        tui === "live" ? "focused" : "reattached",
+      );
+      expect(value(await a.orchestrator.manage({ here: true })).action).toBe("focused");
+      const fromB = new Orchestrator(a.root, "/server-b/herdr.sock", deps);
+      value(await fromB.close(manager.id));
+      expect(closeA.mock.calls).toEqual([[manager.workspaceId]]);
+      expect(closeB).not.toHaveBeenCalled();
+      expect(b.workspaces.has(manager.workspaceId)).toBe(true);
+      expect(b.panes.has(manager.paneId)).toBe(true);
+    } finally {
+      db.close();
+      stdout.mockRestore();
+      closeA.mockRestore();
+      closeB.mockRestore();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test.each(["host", "snapshot", "verification"] as const)(
+  "SIGTERM during existing-manager %s returns 143 without focus or launching a child",
+  async (phase) => {
+    const w = await world();
+    const manager = value(await w.orchestrator.manage()).binding;
+    if (phase === "verification") {
+      const pending = w.readRegistry((r) =>
+        value(r.beginReattach(manager.id, manager.paneId, w.hooks.now, "2020-01-01")),
+      );
+      if (!pending.claimed) throw new Error("Missing fixture reattachment claim");
+      w.readRegistry((r) => value(r.releaseReattach(manager.id, pending.token)));
+    }
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = manager.paneId ?? "";
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => deadline.reject(new Error(`Interrupted ${phase} deadline`)),
+      2000,
+    );
+    const hold = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const snapshot = herdr.snapshot.bind(herdr);
+    let snapshots = 0;
+    herdr.snapshot = async () => {
+      snapshots++;
+      // First snapshot validates the caller; the second inspects the existing manager.
+      if (phase === "snapshot" && snapshots === 2) await hold();
+      return snapshot();
+    };
+    if (phase === "verification") w.hooks.beforeAttach = hold;
+    let launches = 0;
+    const deps: OrchestratorDependencies = {
+      ...w.deps,
+      ...(phase === "host" ? { checkHostProfile: hold } : {}),
+      launchHere: () => {
+        launches++;
+        throw new Error("Focus-only entry launched a child");
+      },
+    };
+    const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+    const entry = runCli(["--root", w.root], deps);
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      process.kill(process.pid, "SIGTERM");
+      expect(await Promise.race([entry, deadline.promise])).toBe(143);
+      expect(JSON.parse(String(stdout.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: { code: "manager_interrupted", details: { exitCode: 143 } },
+      });
+      expect(w.focused).toEqual([]);
+      expect(launches).toBe(0);
+      expect(w.runs).toHaveLength(1);
+      expect(w.readRegistry((r) => value(r.get(manager.id)))).toEqual(manager);
+      release.resolve();
+      w.hooks.beforeAttach = undefined;
+      herdr.snapshot = snapshot;
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("focused");
+    } finally {
+      clearTimeout(timer);
+      release.resolve();
+      await entry;
+      herdr.snapshot = snapshot;
+      w.hooks.beforeAttach = undefined;
+      stdout.mockRestore();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test("focus completion cannot report success after SIGTERM", async () => {
+  const w = await world();
+  const manager = value(await w.orchestrator.manage()).binding;
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = manager.paneId ?? "";
+  const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+  const focus = herdr.focusPane;
+  herdr.focusPane = async () => {
+    process.emit("SIGTERM", "SIGTERM");
+  };
+  const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+  try {
+    expect(await runCli(["--root", w.root], w.deps)).toBe(143);
+  } finally {
+    herdr.focusPane = focus;
+    stdout.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("here entry rejects a pane whose terminal does not contain the caller process", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+  Object.assign(herdr, { paneContainsProcess: async () => false });
+  try {
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "herdr_context_mismatch" },
+    });
+    expect(w.runs).toHaveLength(0);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("bare olw outside Herdr fails before creating state; help remains available", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-entry-cli-"));
+  roots.push(root);
+  const child = Bun.spawn(
+    [process.execPath, join(import.meta.dir, "../src/cli.ts"), "--root", root],
+    {
+      env: { ...process.env, HERDR_ENV: undefined, HERDR_PANE_ID: undefined },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+  expect(code).toBe(2);
+  expect(JSON.parse(stdout)).toMatchObject({ ok: false, error: { code: "herdr_required" } });
+  expect(await Bun.file(join(root, ".omo/state/registry.sqlite")).exists()).toBe(false);
+});
+
+test("bare olw launches in the caller pane, focuses it, then reattaches there without owning the workspace", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+  w.workspaces.set("caller", {
+    workspaceId: "caller",
+    rootPaneId: "caller:p1",
+    cwd: process.cwd(),
+  });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  w.workspaces.set("second", { workspaceId: "second", rootPaneId: "second:p1", cwd: "/other" });
+  w.panes.set("second:p1", { workspaceId: "second" });
+  try {
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    const first = managers(value(w.orchestrator.status()))[0];
+    if (!first) throw new Error("No manager");
+    expect(first).toMatchObject({
+      paneId: "caller:p1",
+      workspaceId: "caller",
+      cwd: process.cwd(),
+      workspaceOwned: false,
+    });
+    expect(w.created).toHaveLength(0);
+    expect(w.tabs).toHaveLength(0);
+    process.env["HERDR_PANE_ID"] = "second:p1";
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(w.runs).toHaveLength(1);
+    expect(w.focused.at(-1)).toBe("caller:p1");
+    w.panes.delete("caller:p1");
+    w.workspaces.delete("caller");
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(managers(value(w.orchestrator.status()))[0]).toMatchObject({
+      id: first.id,
+      durableSessionId: first.durableSessionId,
+      sessionPath: first.sessionPath,
+      workspaceId: "second",
+      paneId: "second:p1",
+      workspaceOwned: false,
+    });
+    expect(w.runs).toHaveLength(2);
+    expect(w.created).toHaveLength(0);
+    expect(w.tabs).toHaveLength(0);
+    value(await w.orchestrator.close(first.id));
+    expect(w.workspaces.has("second")).toBe(true);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    stdout.mockRestore();
+  }
+});
+
+test("foreground exit before readiness returns its code and releases the singleton immediately", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => deadline.reject(new Error("Foreground exit was not observed")),
+    3000,
+  );
+  try {
+    const code = await Promise.race([
+      runCli(["--root", w.root], {
+        ...w.deps,
+        launchHere: () => {
+          child = Bun.spawn([process.execPath, "--eval", "process.exit(37)"], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          });
+          return child;
+        },
+      }),
+      deadline.promise,
+    ]);
+    expect(code).toBe(37);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      ok: false,
+      error: { code: "manager_tui_exited", details: { exitCode: 37 } },
+    });
+    expect(managers(value(w.orchestrator.status()))[0]?.launchState).toBe("closed");
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(
+      managers(value(w.orchestrator.status())).filter((b) => b.launchState === "ready"),
+    ).toHaveLength(1);
+  } finally {
+    clearTimeout(timer);
+    child?.kill();
+    if (child) await child.exited;
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    output.mockRestore();
+  }
+});
+
+test("foreground exit after readiness preserves the child status", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  const exit = Promise.withResolvers<number>();
+  const initialized = Promise.withResolvers<void>();
+  const running = runCli(["--root", w.root], {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      void w.deps.launchHere?.(argv, cwd, env);
+      return { exited: exit.promise, kill() {} };
+    },
+    prompt: async (binding, text) => {
+      await w.deps.prompt(binding, text);
+      initialized.resolve();
+    },
+  });
+  const timer = setTimeout(() => initialized.reject(new Error("Initialization deadline")), 3000);
+  try {
+    await initialized.promise;
+    exit.resolve(37);
+    expect(await running).toBe(37);
+  } finally {
+    clearTimeout(timer);
+    exit.resolve(37);
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("bare entry takes over a dead reattach owner and reports a live owner as manager_busy", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+  const dead = Bun.spawn([process.execPath, "--eval", "process.exit(0)"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await dead.exited;
+  w.readRegistry((r) => value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")));
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    // Old registries have no PID column; the regression also covers the migration.
+    const columns = db.query<{ name: string }, []>("PRAGMA table_info(manager_reattach)").all();
+    if (!columns.some((c) => c.name === "owner_pid"))
+      db.run("ALTER TABLE manager_reattach ADD COLUMN owner_pid INTEGER");
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(process.pid);
+    expect(await runCli(["--root", w.root], w.deps)).toBe(3);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      ok: false,
+      error: { code: "manager_busy" },
+    });
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(dead.pid);
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(w.runs).toHaveLength(2);
+    expect(w.readRegistry((r) => value(r.reattachPending(first.id)))).toBe(false);
+  } finally {
+    db.close();
+    output.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("bare entry takes over a recycled PID while the unrelated process stays alive and fences its old token", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  const child = Bun.spawn([process.execPath, "--eval", "process.stdin.resume();"], {
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    const claim = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+    );
+    if (!claim.claimed) throw new Error("Manager reattachment not claimed");
+    const columns = db.query<{ name: string }, []>("PRAGMA table_info(manager_reattach)").all();
+    expect(columns.some((column) => column.name === "owner_starttime")).toBe(true);
+    const stat = await readFile(`/proc/${process.pid}/stat`, "utf8");
+    const starttime = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19];
+    if (starttime === undefined) throw new Error("Missing current process start time");
+    expect(
+      db
+        .query<{ owner_pid: number; owner_starttime: string }, []>(
+          "SELECT owner_pid, owner_starttime FROM manager_reattach",
+        )
+        .get(),
+    ).toEqual({ owner_pid: process.pid, owner_starttime: starttime });
+    const unrelatedStat = await readFile(`/proc/${child.pid}/stat`, "utf8");
+    const unrelatedStart = unrelatedStat.slice(unrelatedStat.lastIndexOf(")") + 2).split(/\s+/)[19];
+    if (unrelatedStart === undefined) throw new Error("Missing fixture process start time");
+    db.query("UPDATE manager_reattach SET owner_pid = ?, owner_starttime = ?").run(
+      child.pid,
+      unrelatedStart,
+    );
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+    // A matching generation remains a live owner, even before an agent appears.
+    expect(await runCli(["--root", w.root], w.deps)).toBe(3);
+    expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+      ok: false,
+      error: { code: "manager_busy" },
+    });
+    // Model the persisted identity of an older process at this now-recycled PID.
+    db.query("UPDATE manager_reattach SET owner_starttime = ?").run(
+      (BigInt(unrelatedStart) + 1n).toString(),
+    );
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(child.exitCode).toBeNull();
+    expect(w.runs).toHaveLength(2);
+    expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(false);
+    expect(
+      w.readRegistry((r) => r.recordReattachPane(first.id, claim.token, "stale:pane")),
+    ).toMatchObject({ ok: false, error: { code: "lease_lost" } });
+    expect(w.readRegistry((r) => value(r.finishReattach(first.id, claim.token)))).toBe(false);
+  } finally {
+    child.kill();
+    await child.exited;
+    db.close();
+    output.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("legacy reattachment rows migrate with unknown start time and retain PID-only liveness", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const held = w.readRegistry((r) =>
+    value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+  );
+  if (!held.claimed) throw new Error("No fixture reattachment claim");
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  const child = Bun.spawn([process.execPath, "--eval", "process.stdin.resume();"], {
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    // Recreate the actual prior schema, rather than adding the new column in the test.
+    db.run("ALTER TABLE manager_reattach RENAME TO saved_reattach");
+    db.run(
+      "CREATE TABLE manager_reattach (binding_id TEXT PRIMARY KEY REFERENCES bindings(id), claimed_at TEXT NOT NULL, owner TEXT NOT NULL, owner_pid INTEGER)",
+    );
+    db.run(
+      "INSERT INTO manager_reattach SELECT binding_id, claimed_at, owner, owner_pid FROM saved_reattach",
+    );
+    db.run("DROP TABLE saved_reattach");
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(child.pid);
+    // Read-only inspection must not migrate a legacy registry.
+    const readonly = openRegistry(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
+    readonly.close();
+    expect(
+      db
+        .query<{ name: string }, []>("PRAGMA table_info(manager_reattach)")
+        .all()
+        .some((c) => c.name === "owner_starttime"),
+    ).toBe(false);
+    const live = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01", true)),
+    );
+    expect(live.claimed).toBe(false);
+    expect(
+      db
+        .query<{ owner_starttime: string | null }, []>(
+          "SELECT owner_starttime FROM manager_reattach",
+        )
+        .get()?.owner_starttime,
+    ).toBeNull();
+    child.kill();
+    await child.exited;
+    const reclaimed = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01", true)),
+    );
+    expect(reclaimed.claimed).toBe(true);
+    expect(w.readRegistry((r) => value(r.ownsReattach(first.id, held.token)))).toBe(false);
+    expect(
+      db
+        .query<{ owner_pid: number; owner_starttime: string }, []>(
+          "SELECT owner_pid, owner_starttime FROM manager_reattach",
+        )
+        .get(),
+    ).toMatchObject({ owner_pid: process.pid, owner_starttime: expect.stringMatching(/^\d+$/) });
+  } finally {
+    child.kill();
+    await child.exited;
+    db.close();
+  }
+});
+
+test.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+  "foreground %s releases unfinished reattachment and forwards to the child",
+  async (signal) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+    const attached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    w.hooks.beforeAttach = async () => {
+      attached.resolve();
+      await release.promise;
+    };
+    let child: ReturnType<typeof Bun.spawn<"pipe", "pipe", "pipe">> | undefined;
+    const forwarded: NodeJS.Signals[] = [];
+    // Keep the RED probe from terminating Bun when no production handler exists yet.
+    const observeOnly = () => {};
+    process.on(signal, observeOnly);
+    let signalDeadline: ReturnType<typeof setTimeout> | undefined;
+    const orchestrator = new Orchestrator(w.root, "/fixture/herdr.sock", {
+      ...w.deps,
+      launchHere: (argv, cwd, env) => {
+        void w.deps.launchHere?.(argv, cwd, env);
+        child = Bun.spawn(
+          [
+            process.execPath,
+            "--eval",
+            `process.on(${JSON.stringify(signal)}, () => process.exit(143)); process.stdout.write('ready'); process.stdin.resume();`,
+          ],
+          { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+        );
+        const launched = child;
+        return {
+          exited: launched.exited,
+          kill: (sig) => {
+            if (sig) forwarded.push(sig);
+            launched.kill(sig);
+          },
+        };
+      },
+    });
+    const pending = orchestrator.manage({ here: true });
+    const timer = setTimeout(
+      () => attached.reject(new Error("Reattachment verification deadline")),
+      3000,
+    );
+    try {
+      await attached.promise;
+      if (!child) throw new Error("Foreground child missing");
+      const reader = child.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready");
+      reader.releaseLock();
+      expect(w.readRegistry((r) => value(r.reattachPending(first.id)))).toBe(true);
+      process.emit(signal, signal);
+      // Do not await held native verification: interruption must settle independently.
+      const result = await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          signalDeadline = setTimeout(
+            () => reject(new Error("Signal did not settle the entry")),
+            1000,
+          );
+        }),
+      ]);
+      expect(result).toMatchObject({ ok: false, error: { code: "manager_interrupted" } });
+      expect(forwarded).toEqual([signal]);
+      w.hooks.beforeAttach = undefined;
+      release.resolve();
+      w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+      expect(value(await w.orchestrator.manage()).action).toBe("reattached");
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(signalDeadline);
+      process.off(signal, observeOnly);
+      child?.kill();
+      if (child) await child.exited;
+      release.resolve();
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
 
 test("a hanging injected update check cannot delay manager creation or focus", async () => {
   const w = await world();
@@ -573,6 +1796,15 @@ test("an expired reattach owner resumes without launching or clearing the new ow
   const a = w.orchestrator.manage();
   await aAtTab.promise;
 
+  // Model a legacy unknown owner: known live processes no longer expire for any caller.
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    db.query(
+      "UPDATE manager_reattach SET owner_pid = NULL, owner_starttime = NULL WHERE binding_id = ?",
+    ).run(first.binding.id);
+  } finally {
+    db.close();
+  }
   // Past the 120 s lease, B reclaims, launches, sees readiness and is held at verification.
   w.hooks.now = "2026-09-26T00:02:00.001Z";
   const bAtVerify = Promise.withResolvers<void>();
@@ -775,7 +2007,7 @@ test("CLI manage and parent create --no-manager reach the orchestrator", async (
       value: {
         commands: expect.arrayContaining(["manage"]),
         options: {
-          manage: "[--json]",
+          manage: expect.stringContaining("--here"),
           "parent create": expect.stringContaining("--no-manager"),
         },
       },

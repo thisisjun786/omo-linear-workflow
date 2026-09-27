@@ -280,6 +280,9 @@ export class Harness implements RuntimePort {
     this.resumeCalls++;
     if (this.goal && (await this.ownsGoalPause(ctx, pause))) this.goal.status = "active";
   }
+  isIdle(): boolean {
+    return true;
+  }
   async waitForIdle(): Promise<void> {
     this.idleWaits++;
   }

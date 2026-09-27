@@ -246,6 +246,24 @@ describe("HerdrClient", () => {
     ]);
   });
 
+  test("verifies the exact caller PID in the requested pane's foreground processes", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, {
+        type: "pane_process_info",
+        process_info: { pane_id: "ws:p1", foreground_processes: [{ pid: 1234, name: "bun" }] },
+      }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    expect(await client.paneContainsProcess("ws:p1", 1234)).toBe(true);
+    expect(await client.paneContainsProcess("ws:p1", 4321)).toBe(false);
+    expect(await client.paneContainsProcess("ws:p2", 1234)).toBe(false);
+    expect(server.requests[0]).toMatchObject({
+      method: "pane.process_info",
+      params: { pane_id: "ws:p1" },
+    });
+  });
+
   test("focuses a workspace only on explicit request", async () => {
     const server = await fixture((socket, request) =>
       ok(socket, request.id, { type: "workspace_info", workspace: workspace("ws", "ws:t1") }),

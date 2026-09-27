@@ -34,6 +34,7 @@ function roleBehavior(role: Binding["assignment"]["role"]): string {
   const lines: string[] = [];
   lines.push("behavior:");
   if (role === "manager") {
+    lines.push("  applies_when: handling an OLW message; otherwise act as a normal assistant");
     lines.push("  scope: unbound");
     lines.push("  ask_user_directly: true");
     lines.push("  manage_linked_parents: true");
@@ -152,9 +153,12 @@ export function buildRoleBrief(
     );
   } else if (binding.assignment.role === "manager" && options.includeManagerGuidance === true) {
     parts.push(
-      "role: manager",
       "scope: unbound",
       "ask_user_directly: true",
+      "olw_messages: Read details with olw reports --all or olw questions --project ID; use the envelope ID for correlation.",
+      "olw_answers: Answer a parent with olw answer --from BINDING --question ID --text-file PATH.",
+      "olw_approval: Review evidence against approved scope before accepting work; a management link never grants execution approval.",
+      "olw_escalation: Ask the user directly when a decision exceeds existing approval; do not expand scope on their behalf.",
       ...(options.updateCheckLine === undefined ? [] : [options.updateCheckLine]),
       ...(options.routingAdviceLine === undefined ? [] : [options.routingAdviceLine]),
     );

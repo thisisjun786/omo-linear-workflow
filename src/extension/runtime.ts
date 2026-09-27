@@ -62,7 +62,8 @@ export interface RuntimePort {
   ): Promise<void>;
   onUserInterrupt(handler: (ctx: SessionContextPort) => Promise<void>): void;
   onGoalCheck(handler: (ctx: SessionContextPort) => Promise<void>): void;
-  waitForIdle(target: Binding): Promise<void>;
+  waitForIdle(target: Binding, timeoutMs?: number): Promise<void>;
+  isIdle(target: Binding): boolean;
   onTurnEnd(handler: (message: unknown, ctx: SessionContextPort) => Promise<void>): void;
   notifyOperational(message: string, ctx: SessionContextPort): void;
   onResourcesDiscover(handler: () => { readonly skillPaths: string[] }): void;
@@ -164,6 +165,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly messageId: string;
     readonly input: z.infer<typeof nativeSendInputSchema>;
     readonly userAnswer: boolean;
+    readonly managerTarget?: Binding;
+    readonly noticeSender?: Binding;
+    readonly admissionDeadline?: number;
+    admissionFailure?: string;
     used: boolean;
   }>();
 
@@ -610,6 +615,14 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     return deliver(released.value, ctx, true);
   });
 
+  async function admitManager(target: Binding, deadline: number): Promise<void> {
+    do {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Manager idle admission deadline exceeded");
+      await port.waitForIdle(target, remaining);
+    } while (!port.isIdle(target));
+  }
+
   async function deliver(
     claim: ClaimResult,
     ctx: SessionContextPort,
@@ -622,9 +635,22 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     active.add("thread_send");
     port.setActiveTools([...active]);
     let details: unknown;
-    if (envelope.kind === "answer") {
+    // The claim transaction supplies sender data only for authorized manager notices.
+    const sender = claim.noticeSender;
+    const managerNotice = sender !== undefined;
+    let message = JSON.stringify(envelope);
+    if (sender !== undefined) {
+      const project = sender.assignment.role === "parent" ? sender.assignment.projectId : sender.id;
+      const summary =
+        envelope.text.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim().slice(0, 100) ?? "";
+      const command = envelope.kind === "report" ? "reports --all" : "questions";
+      message = `[OLW] ${project} ${envelope.kind}: ${summary} - details: olw ${command} --project ${project}\n${message}`;
+    }
+    const admissionDeadline = Date.now() + 25_000;
+    if (envelope.kind === "answer" || managerNotice) {
       try {
-        await port.waitForIdle(claim.target);
+        if (managerNotice) await admitManager(claim.target, admissionDeadline);
+        else await port.waitForIdle(claim.target);
       } catch (cause) {
         return worker(
           "finish",
@@ -647,9 +673,11 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       }
     }
     try {
+      // Accepted manager-notice limitation: a turn that starts in the instant between the idle
+      // check and native acceptance may receive the one-line notice mid-turn; delivery is still exactly once.
       const input = nativeSendInputSchema.parse({
         thread: claim.target.durableSessionId,
-        message: JSON.stringify(envelope),
+        message,
         delivery: "auto",
         all_scope: true,
         idempotency_key: nativeKey,
@@ -660,9 +688,38 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           messageId: envelope.id,
           input,
           userAnswer,
+          ...(sender === undefined
+            ? {}
+            : { managerTarget: claim.target, admissionDeadline, noticeSender: sender }),
           used: false,
         },
-        () => port.executeTool("thread_send", input),
+        async () => {
+          let result: { readonly details: unknown } | undefined;
+          try {
+            result = await port.executeTool("thread_send", input);
+          } catch (cause) {
+            if (dispatch.getStore()?.admissionFailure === undefined) throw cause;
+            // The tool-call guard recorded proof that the native implementation never ran.
+          }
+          const failed = dispatch.getStore()?.admissionFailure;
+          if (failed === undefined) {
+            if (result === undefined) throw new Error("Native tool returned no result");
+            return result;
+          }
+          return {
+            details: {
+              result: {
+                kind: "error",
+                error: {
+                  code: "turn_conflict_before_delivery",
+                  details: "idle_admission_failed",
+                  message: failed,
+                  next_action: "Retry this same ID after the manager is idle.",
+                },
+              },
+            },
+          };
+        },
       );
       details = executed.details;
     } catch (cause) {
@@ -730,7 +787,15 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       toolName !== "request_user_input"
     )
       return undefined;
-    const sender = await lookup(ctx.sessionManager.getSessionId());
+    const permit = dispatch.getStore();
+    const claimedSender =
+      toolName === "thread_send" && permit?.senderSessionId === ctx.sessionManager.getSessionId()
+        ? permit.noticeSender
+        : undefined;
+    const sender =
+      claimedSender === undefined
+        ? await lookup(ctx.sessionManager.getSessionId())
+        : { ok: true as const, value: claimedSender };
     if (!sender.ok && sender.error.code === "not_found") return undefined;
     if (!sender.ok) return { block: true, reason: sender.error.message };
     if (toolName === "ask_user_question" || toolName === "request_user_input") {
@@ -745,7 +810,6 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     if (toolName === "thread_create") {
       return { block: true, reason: "Bound initiative roles cannot create native threads" };
     }
-    const permit = dispatch.getStore();
     if (
       permit === undefined ||
       permit.used ||
@@ -761,7 +825,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     }
     let decoded: unknown;
     try {
-      decoded = JSON.parse(nativeInput.data.message);
+      const message = nativeInput.data.message;
+      decoded = JSON.parse(
+        message.startsWith("[OLW] ") ? message.slice(message.indexOf("\n") + 1) : message,
+      );
     } catch {
       return { block: true, reason: "Direct thread_send message is not an envelope" };
     }
@@ -805,6 +872,17 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         block: true,
         reason: "Direct thread_send target does not match the authorized route",
       };
+    }
+    if (permit.managerTarget !== undefined && permit.admissionDeadline !== undefined) {
+      try {
+        // All worker/preflight awaits are over. Read the live target context synchronously
+        // immediately before releasing thread_send; a raced turn returns to event admission.
+        while (!port.isIdle(permit.managerTarget))
+          await admitManager(permit.managerTarget, permit.admissionDeadline);
+      } catch (cause) {
+        permit.admissionFailure = messageOf(cause);
+        return { block: true, reason: permit.admissionFailure };
+      }
     }
     permit.used = true;
     return undefined;

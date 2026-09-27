@@ -224,8 +224,11 @@ export function mergePr(
         b.checkout?.branch === pr.headRefName &&
         (b.deliverable ?? "pr") === "pr",
     );
-    const report = value(registry.childReports(parent.id)).find((r) =>
-      children.some((b) => b.id === r.envelope.fromBindingId),
+    const report = value(registry.childReports(parent.id)).find(
+      (record) =>
+        children.some((child) => child.id === record.envelope.fromBindingId) &&
+        record.envelope.delivery?.kind === "pr" &&
+        record.envelope.delivery.url === pr.url,
     );
     const delivery = report?.envelope.delivery;
     if (

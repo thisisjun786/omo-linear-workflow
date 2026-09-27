@@ -284,8 +284,7 @@ describe("OLW role Herdr reporter", () => {
       createClient: (_socket, pane) => ({
         send: async (method) => {
           sent.push([pane, method]);
-          if (method === "pane.release_agent" && releaseFailures-- > 0)
-            throw new Error("offline");
+          if (method === "pane.release_agent" && releaseFailures-- > 0) throw new Error("offline");
         },
       }),
       debug: () => undefined,

@@ -2,33 +2,33 @@
   "inputs": {
     "format": "olw-downstream-bundle-v1",
     "package": "omo-ai",
-    "version": "5.0.0",
+    "version": "5.0.1",
     "path": "plugin/extensions/omo.js",
-    "upstreamSha256": "98475846d576f48c2ea3a25551a8c8ad01e1e7cef6a1bfe041f8161a63820553",
-    "upstreamMarker": "// omo:8cbwii0NO981NWNgKRgm_WzxkpLKVWWD0LALjbC4GbU:FqOeV-w3zeEIZD6GxEREEmwE-XknnWqYSKPoj3IHous",
+    "upstreamSha256": "8e7929bc4b1b521107e111ea02811f8fc15d105bd9aab6139ed6d50bd06a92f8",
+    "upstreamMarker": "// omo:heT1lyeAOOXhoOmE1fgnnT-1X8HyIPPzpAPLnFIU0OA:9mRuv9B99ZGC8d0ue7adhHAu2hT3msZB3CWQMyNGzxc",
     "edits": [
       {
-        "offset": 1221342,
+        "offset": 1221207,
         "old": "\"no_active_turn\",\"turn_conflict\",\"not_steerable\"",
         "new": "\"no_active_turn\",\"turn_conflict\",\"turn_conflict_before_delivery\",\"not_steerable\""
       },
       {
-        "offset": 1227797,
+        "offset": 1227662,
         "old": "if(void 0===e||r.turn_id!==e){h(i,ane(\"turn_conflict\",",
         "new": "if(void 0===e||r.turn_id!==e){h(i,ane(\"turn_conflict_before_delivery\","
       },
       {
-        "offset": 1228154,
+        "offset": 1228019,
         "old": "catch(e){if(one(e))return h(i,ine(i,n.length)),void p(t);h(i,ane(\"turn_conflict\",`The active turn for ${t} changed before delivery.`,\"Read the target again and retry with the current turn id.\"))",
         "new": "catch(e){if(one(e))return h(i,ine(i,n.length)),void p(t);h(i,ane(\"idempotency_uncertain\",`Delivery to ${t} may have been accepted before its acknowledgement failed.`,\"Inspect the original delivery; do not retry with a fresh key without proof of non-delivery.\"))"
       },
       {
-        "offset": 1228658,
+        "offset": 1228523,
         "old": "h(i,ane(\"internal_error\",`Delivery to ${t} could not start a turn.`,\"Retry the message after checking the target status.\"))",
         "new": "h(i,ane(\"idempotency_uncertain\",`Delivery to ${t} may have been accepted before its acknowledgement failed.`,\"Inspect the original delivery; do not retry with a fresh key without proof of non-delivery.\"))"
       },
       {
-        "offset": 1301844,
+        "offset": 1301709,
         "old": "",
         "new": "\n"
       }
@@ -36,7 +36,7 @@
   },
   "sourceDigestAlgorithm": "sha256-base64url(JSON.stringify(inputs))",
   "output": {
-    "marker": "// omo:H6nVibfPhJl61Vf5oQZbIWGl5VS5ytM6rjCy6d8JOGk:SCnidj0QLaWiL8P9VG1P4HWO8WwXRsxOt8tbCweQlqc",
-    "bodySha256": "4829e2763d102da5a22fc3fd546d4fe0758ef16c1746cc4eb7cb5b0b079096a7"
+    "marker": "// omo:FtsWSXCJzAWW7_D6XWxxn568pGRi5H_Ahr22EwiZFiw:iSz5R1WM_0eSzgRv01Z5zJhHjSv5Vj5J0KdxR1VMFow",
+    "bodySha256": "892cf947558cff4792ce046fd35679cc98478d2bf9563e49d0a77147554c168c"
   }
 }

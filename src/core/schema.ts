@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 const text = z.string().min(1);
+const repositoryRemote = z
+  .string()
+  .min(1)
+  .refine((remote) => !remote.startsWith("-"), "Repository remote must not start with '-'")
+  .pipe(z.url({ protocol: /^(https|ssh|file)$/ }));
 export const deliverableSchema = z.enum(["pr", "report", "document"]);
 export const issueDeliverySchema = z.union([
   z.strictObject({
@@ -22,7 +27,7 @@ export const scopeSnapshotSchema = z.strictObject({
       issues: z.array(refSchema),
       repository: z
         .strictObject({
-          remote: z.url({ protocol: /^(https|ssh|file)$/ }),
+          remote: repositoryRemote,
           defaultBranch: text,
           base: text.optional(),
         })
@@ -59,7 +64,7 @@ export const assignmentSchema = z.discriminatedUnion("role", [
 ]);
 export const checkoutSchema = z.strictObject({
   kind: z.enum(["linked-worktree", "owned-clone"]).default("linked-worktree"),
-  remote: z.url({ protocol: /^(https|ssh|file)$/ }).optional(),
+  remote: repositoryRemote.optional(),
   receiptPath: text.optional(),
   originalRepoRoot: text,
   path: text,

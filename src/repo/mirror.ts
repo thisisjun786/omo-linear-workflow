@@ -45,6 +45,8 @@ interface RemoteIdentity {
 }
 
 function remoteIdentity(remote: string): RemoteIdentity {
+  if (remote.startsWith("-"))
+    throw new MirrorError("invalid_remote", "Remote must not start with '-'");
   let parsed: URL;
   try {
     parsed = new URL(remote);
@@ -328,7 +330,7 @@ async function ensureMirrorLocked(
     `${basename(path)}-${process.pid}-${randomBytes(6).toString("hex")}`,
   );
   try {
-    const result = await runGit(["clone", "--mirror", identity.normalized, temporary], lock);
+    const result = await runGit(["clone", "--mirror", "--", identity.normalized, temporary], lock);
     if (result.code !== 0)
       throw new MirrorError(
         "mirror_clone_failed",

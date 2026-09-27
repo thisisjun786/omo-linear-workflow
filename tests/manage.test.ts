@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,14 @@ import type { NativeSession } from "../src/transport";
 import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
+let previousSocket: string | undefined;
+beforeEach(() => {
+  previousSocket = process.env["HERDR_SOCKET_PATH"];
+  process.env["HERDR_SOCKET_PATH"] = "/fixture/herdr.sock";
+});
 afterEach(async () => {
+  if (previousSocket === undefined) delete process.env["HERDR_SOCKET_PATH"];
+  else process.env["HERDR_SOCKET_PATH"] = previousSocket;
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 function value<T>(result: Result<T>): T {
@@ -124,6 +131,9 @@ async function world(agent = "omo") {
     async sendKeys() {},
     async focusWorkspace(workspaceId) {
       focused.push(workspaceId);
+    },
+    async paneContainsProcess() {
+      return true;
     },
     async focusPane(paneId) {
       focused.push(paneId);
@@ -298,6 +308,178 @@ function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
 
+test("bare entry cannot displace a live reattachment owner after its lease expires", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  const claim = w.readRegistry((r) =>
+    value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+  );
+  if (!claim.claimed) throw new Error("No claim");
+  const afterLease = "2026-09-26T00:03:00.000Z";
+  expect(
+    w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, afterLease, "2026-09-26T00:01:00.000Z", true)),
+    ),
+  ).toMatchObject({ claimed: false });
+  expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(true);
+});
+
+test("displaced foreground entry never kills the manager TUI after verification", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+  const exit = Promise.withResolvers<number>();
+  let kills = 0;
+  w.hooks.beforeAttach = async () => {
+    const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+    try {
+      db.query("UPDATE manager_reattach SET owner = 'successor-token'").run();
+    } finally {
+      db.close();
+    }
+  };
+  const entry = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    launchHere: (argv, cwd, env) => {
+      void w.deps.launchHere?.(argv, cwd, env);
+      return {
+        exited: exit.promise,
+        kill() {
+          kills++;
+          exit.resolve(143);
+        },
+      };
+    },
+  });
+  try {
+    expect(await entry.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { details: { reason: "lease_lost" } },
+    });
+    expect(kills).toBe(0);
+  } finally {
+    exit.resolve(0);
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+  "%s during ensureHost settles the unstarted reservation before retry",
+  async (signal) => {
+    const w = await world();
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+    w.panes.set("caller:p1", { workspaceId: "caller" });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const noop = () => {};
+    process.on(signal, noop);
+    const interrupted = new Orchestrator(w.root, "/fixture/herdr.sock", {
+      ...w.deps,
+      ensureHost: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const entry = interrupted.manage({ here: true });
+    const deadline = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => deadline.reject(new Error("Startup interruption not settled")),
+      2000,
+    );
+    try {
+      await Promise.race([entered.promise, deadline.promise]);
+      expect(managers(value(w.orchestrator.status()))[0]?.launchState).toBe("reserved");
+      process.emit(signal, signal);
+      expect(await Promise.race([entry, deadline.promise])).toMatchObject({
+        ok: false,
+        error: { code: "manager_interrupted" },
+      });
+      expect(managers(value(w.orchestrator.status()))[0]?.launchState).toBe("closed");
+      expect(w.runs).toHaveLength(0);
+      release.resolve();
+      await entry;
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("created");
+      expect(w.runs).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      release.resolve();
+      await entry;
+      process.off(signal, noop);
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test.each(["reserved", "provisioning"] as const)(
+  "bare entry reclaims a dead %s launch owner through a new fenced token",
+  async (state) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+    const child = Bun.spawn([process.execPath, "--eval", "process.exit(0)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await child.exited;
+    const claim = w.readRegistry((r) =>
+      value(r.beginReattach(first.id, first.paneId, w.hooks.now, "2020-01-01")),
+    );
+    if (!claim.claimed) throw new Error("No claim");
+    const unstarted = {
+      ...first,
+      launchState: state,
+      sessionPath: null,
+      initialization: { state: "pending", text: null },
+    };
+    db.query("UPDATE bindings SET launch_state = ?, json = ? WHERE id = ?").run(
+      state,
+      JSON.stringify(unstarted),
+      first.id,
+    );
+    db.query("UPDATE manager_reattach SET owner_pid = ?").run(child.pid);
+    db.close();
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = first.paneId ?? "";
+    w.workspaces.set("recovery", {
+      workspaceId: "recovery",
+      rootPaneId: "recovery:p1",
+      cwd: w.root,
+    });
+    w.panes.set("recovery:p1", { workspaceId: "recovery" });
+    process.env["HERDR_PANE_ID"] = "recovery:p1";
+    try {
+      expect(value(await w.orchestrator.manage({ here: true })).action).toBe("created");
+      expect(w.readRegistry((r) => value(r.get(first.id))).launchState).toBe("closed");
+      expect(w.readRegistry((r) => value(r.ownsReattach(first.id, claim.token)))).toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
 test("moving an owned manager to a user pane retains its owned workspace for close", async () => {
   const w = await world();
   const first = value(await w.orchestrator.manage()).binding;
@@ -317,6 +499,52 @@ test("moving an owned manager to a user pane retains its owned workspace for clo
     value(await w.orchestrator.close(first.id));
     expect(w.workspaces.has(first.workspaceId ?? "")).toBe(false);
     expect(w.workspaces.has("user")).toBe(true);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("here entry rejects a different server even when its pane ID matches", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  try {
+    const other = new Orchestrator(w.root, "/other/herdr.sock", w.deps);
+    expect(await other.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "herdr_context_mismatch" },
+    });
+    expect(w.runs).toHaveLength(0);
+    expect(managers(value(w.orchestrator.status()))).toHaveLength(0);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("here entry rejects a pane whose terminal does not contain the caller process", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+  Object.assign(herdr, { paneContainsProcess: async () => false });
+  try {
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "herdr_context_mismatch" },
+    });
+    expect(w.runs).toHaveLength(0);
   } finally {
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key];

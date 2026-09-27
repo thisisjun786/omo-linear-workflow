@@ -155,6 +155,10 @@ interface ManagerHere {
   readonly workspaceId: string;
   readonly cwd: string;
   tui?: ForegroundTui;
+  failure?: ManagerInterrupted;
+  bindingId?: string;
+  token?: string;
+  settled?: boolean;
   readonly interruption: Promise<never>;
   readonly interrupt: (cause: ManagerInterrupted) => void;
 }
@@ -739,16 +743,30 @@ export class Orchestrator {
     let here: ManagerHere | undefined;
     if (options.here) {
       const context = z
-        .object({ HERDR_ENV: z.literal("1"), HERDR_PANE_ID: z.string().min(1) })
+        .object({
+          HERDR_ENV: z.literal("1"),
+          HERDR_PANE_ID: z.string().min(1),
+          HERDR_SOCKET_PATH: z.string().min(1),
+        })
         .safeParse(process.env);
       if (!context.success)
         return failure("herdr_required", "The OLW manager needs Herdr. Type olw in a Herdr pane.");
+      if (resolve(this.#herdrSocket) !== resolve(context.data.HERDR_SOCKET_PATH))
+        return failure(
+          "herdr_context_mismatch",
+          "Here-mode must use the calling terminal's Herdr socket",
+        );
       const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
       try {
         const snapshot = await herdr.snapshot();
         const pane = snapshot.panes.find((pane) => pane.paneId === context.data.HERDR_PANE_ID);
         if (!pane)
           return failure("herdr_required", "The calling Herdr pane is not present on this server.");
+        if (!(await herdr.paneContainsProcess(pane.paneId, process.pid)))
+          return failure(
+            "herdr_context_mismatch",
+            "The requested pane does not contain this foreground entry process",
+          );
         const interruption = Promise.withResolvers<never>();
         here = {
           paneId: pane.paneId,
@@ -767,11 +785,26 @@ export class Orchestrator {
         herdr.close();
       }
     }
-    const result = await this.#manage(here);
-    if (!result.ok && result.error.code !== "manager_interrupted") here?.tui?.kill();
-    return result.ok && here?.tui !== undefined
-      ? ok({ ...result.value, tuiExited: here.tui.exited })
-      : result;
+    const stop = here === undefined ? () => {} : this.#watchManagerSignals(here);
+    try {
+      const result = await this.#manage(here);
+      if (
+        !result.ok &&
+        result.error.code !== "manager_interrupted" &&
+        here?.tui !== undefined &&
+        this.#ownsForeground(here)
+      )
+        here.tui.kill();
+      if (result.ok && here?.tui !== undefined)
+        return ok({ ...result.value, tuiExited: here.tui.exited.finally(stop) });
+      stop();
+      return result;
+    } catch (cause) {
+      stop();
+      if (cause instanceof ManagerInterrupted)
+        return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
+      throw cause;
+    }
   }
 
   async #manage(here?: ManagerHere): Promise<Result<ManageResult>> {
@@ -785,14 +818,21 @@ export class Orchestrator {
         return failure(cause.code, cause.message, { settingsPath: cause.settingsPath });
       throw cause;
     }
-    const updateCheck = await this.#runUpdateCheck();
+    const updateCheck = await this.#whileForeground(this.#runUpdateCheck(), here);
     this.#currentUpdateCheck = updateCheck;
     const listed = this.#withRegistry((registry) => registry.list());
     if (!listed.ok) return listed;
     const existing = listed.value.find(
       (binding) => binding.assignment.role === "manager" && binding.launchState !== "closed",
     );
-    if (existing !== undefined) return this.#reopenManager(existing, updateCheck, here);
+    if (existing !== undefined) {
+      if (here !== undefined && ["reserved", "provisioning"].includes(existing.launchState)) {
+        const recovered = await this.#recoverUnstartedManager(existing, here);
+        if (!recovered.ok) return recovered;
+        return this.#manage(here);
+      }
+      return this.#reopenManager(existing, updateCheck, here);
+    }
     const scope = this.#withRegistry((registry) => registry.importScope(managerSnapshot));
     if (!scope.ok) return scope;
     const previous = this.#withRegistry((registry) => registry.designation(MANAGER_DESIGNATION_ID));
@@ -1029,6 +1069,11 @@ export class Orchestrator {
       }
       const owner = claim.value.token;
       token = owner;
+      if (here !== undefined) {
+        here.bindingId = binding.id;
+        here.token = owner;
+        here.settled = false;
+      }
       // Every Herdr side effect and the final clear re-check the token, so a caller whose lease
       // expired while it was suspended can neither launch a second TUI nor clear the new owner.
       const leaseLost = () =>
@@ -1049,6 +1094,7 @@ export class Orchestrator {
         if (!finished.ok) return finished;
         token = undefined;
         if (!finished.value) return leaseLost();
+        if (here !== undefined) here.settled = true;
         if (here !== undefined && binding.paneId !== null) await herdr.focusPane(binding.paneId);
         else await herdr.focusWorkspace(workspaceId);
         return ok({
@@ -1117,6 +1163,7 @@ export class Orchestrator {
       if (!finished.ok) return finished;
       token = undefined;
       if (!finished.value) return leaseLost();
+      if (here !== undefined) here.settled = true;
       if (here === undefined) await herdr.focusWorkspace(workspaceId);
       return ok({
         action: "reattached",
@@ -1132,7 +1179,7 @@ export class Orchestrator {
       });
     } catch (cause) {
       if (cause instanceof ManagerInterrupted) {
-        await here?.tui?.exited;
+        if (here !== undefined && this.#ownsForeground(here)) await here.tui?.exited;
         return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
       }
       if (cause instanceof ManagerTuiExited)
@@ -1184,6 +1231,106 @@ export class Orchestrator {
     return here === undefined ? work : Promise.race([work, here.interruption]);
   }
 
+  #ownsForeground(here: ManagerHere): boolean {
+    if (here.bindingId === undefined || here.token === undefined) return false;
+    const current = this.#withRegistry((r) => {
+      const binding = r.get(here.bindingId ?? "");
+      if (!binding.ok) return binding;
+      if (binding.value.paneId !== here.paneId || binding.value.workspaceId !== here.workspaceId)
+        return ok(false);
+      if (here.settled) {
+        const pending = r.reattachPending(binding.value.id);
+        return pending.ok ? ok(binding.value.launchState === "ready" && !pending.value) : pending;
+      }
+      return r.ownsReattach(binding.value.id, here.token ?? "");
+    });
+    if (!current.ok) throw new Error(`${current.error.code}: ${current.error.message}`);
+    return current.value;
+  }
+
+  #watchManagerSignals(here: ManagerHere): () => void {
+    const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
+      const handler = () => {
+        here.failure = new ManagerInterrupted(signal);
+        if (here.tui !== undefined && this.#ownsForeground(here)) here.tui.kill(signal);
+        here.interrupt(here.failure);
+      };
+      process.on(signal, handler);
+      return { signal, handler };
+    });
+    // The request may be interrupted between awaited startup operations.
+    void here.interruption.catch(() => undefined);
+    return () => {
+      for (const { signal, handler } of handlers) process.off(signal, handler);
+    };
+  }
+
+  async #recoverUnstartedManager(binding: Binding, here: ManagerHere): Promise<Result<true>> {
+    const now = this.#deps.now();
+    const claimed = this.#withRegistry((r) =>
+      r.beginReattach(
+        binding.id,
+        binding.paneId,
+        now,
+        new Date(Date.parse(now) - LAUNCH_CLAIM_LEASE_MS).toISOString(),
+        true,
+      ),
+    );
+    if (!claimed.ok) return claimed;
+    if (!claimed.value.claimed)
+      return failure("manager_busy", "Another live entry owns manager startup");
+    const token = claimed.value.token;
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    try {
+      const snapshot = await herdr.snapshot();
+      if (
+        snapshot.panes.some(
+          (pane) =>
+            pane.paneId === binding.paneId &&
+            pane.workspaceId === binding.workspaceId &&
+            hasLiveTui(pane),
+        )
+      )
+        return failure(
+          "manager_unavailable",
+          "An unfinished manager still has a live TUI; reconcile it before recovery",
+        );
+      if (binding.sessionPath !== null) {
+        try {
+          const session = await this.#deps.attachBinding(binding);
+          await session.close();
+          return failure(
+            "manager_unavailable",
+            "An unfinished manager has a live host session; reconcile it before recovery",
+          );
+        } catch (cause) {
+          if (!(cause instanceof NativeSessionAbsentError)) throw cause;
+        }
+      }
+      if (binding.workspaceId !== null && binding.workspaceOwned !== false) {
+        const owned = snapshot.workspaces.find(
+          (workspace) => workspace.workspaceId === binding.workspaceId,
+        );
+        const owner = this.#withRegistry((r) => r.ownsReattach(binding.id, token));
+        if (!owner.ok) return owner;
+        if (!owner.value) return failure("lease_lost", "Manager startup ownership changed");
+        if (owned !== undefined && owned.workspaceId !== here.workspaceId) {
+          if (owned.cwd !== binding.cwd)
+            return failure("identity_mismatch", "Unfinished manager workspace changed");
+          await herdr.closeWorkspace(owned.workspaceId);
+        }
+      }
+      const closed = this.#withRegistry((r) => r.closeUnstartedManager(binding.id, token));
+      if (!closed.ok) return closed;
+      if (here.failure !== undefined) throw here.failure;
+      return ok(true);
+    } finally {
+      const released = this.#withRegistry((r) => r.releaseReattach(binding.id, token));
+      if (!released.ok) console.error(`Manager startup release failed: ${released.error.message}`);
+      herdr.close();
+    }
+  }
+
   async #foregroundReadiness<T>(
     ready: Promise<T>,
     binding: Binding,
@@ -1202,6 +1349,8 @@ export class Orchestrator {
   }
 
   #launchHere(argv: readonly string[], cwd: string, managedPath: string, here: ManagerHere): void {
+    if (here.failure !== undefined) throw here.failure;
+    if (!this.#ownsForeground(here)) throw new Error("Manager launch ownership or pane changed");
     const env = this.#tuiEnvironment(managedPath);
     const tui =
       this.#deps.launchHere?.(argv, cwd, env) ??
@@ -1212,21 +1361,7 @@ export class Orchestrator {
         stdout: "inherit",
         stderr: "inherit",
       });
-    const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
-      const handler = () => {
-        tui.kill(signal);
-        here.interrupt(new ManagerInterrupted(signal));
-      };
-      process.on(signal, handler);
-      return { signal, handler };
-    });
-    const stop = () => {
-      for (const { signal, handler } of handlers) process.off(signal, handler);
-    };
-    // Keep handlers through the full TUI lifetime, not just startup verification.
-    here.tui = { exited: tui.exited.finally(stop), kill: (signal) => tui.kill(signal) };
-    // After readiness this still observes signals while the CLI awaits TUI exit.
-    void here.interruption.catch(() => undefined);
+    here.tui = tui;
   }
 
   #tuiEnvironment(managedPath: string): Readonly<Record<string, string>> {
@@ -2981,8 +3116,14 @@ export class Orchestrator {
         completedAt: "",
       });
     }
+    const here = target?.here;
+    if (here?.failure !== undefined) throw here.failure;
+    const launchToken = assignment.role === "manager" ? this.#deps.uuid() : undefined;
     const reserved = this.#withRegistry((registry) =>
       registry.reserve({
+        ...(launchToken === undefined
+          ? {}
+          : { managerLaunch: { token: launchToken, claimedAt: this.#deps.now() } }),
         bindingId,
         durableSessionId: this.#deps.uuid(),
         designation,
@@ -2996,6 +3137,11 @@ export class Orchestrator {
       }),
     );
     if (!reserved.ok) return reserved;
+    if (here !== undefined && launchToken !== undefined) {
+      here.bindingId = bindingId;
+      here.token = launchToken;
+      here.settled = false;
+    }
     const launchStage = target?.stage;
     if (
       launchStage !== undefined &&
@@ -3018,10 +3164,23 @@ export class Orchestrator {
       }
     }
     try {
-      await this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment);
-      await this.#deps.ensureHost(this.#root, this.#omoSocket, environment);
+      await this.#whileForeground(
+        Promise.resolve(this.#deps.checkHostProfile?.(this.#root, this.#omoSocket, environment)),
+        here,
+      );
+      if (here?.failure !== undefined) throw here.failure;
+      await this.#whileForeground(
+        this.#deps.ensureHost(this.#root, this.#omoSocket, environment),
+        here,
+      );
     } catch (cause) {
-      if (target?.successor === undefined)
+      if (here !== undefined && launchToken !== undefined) {
+        const closed = this.#withRegistry((r) => r.closeUnstartedManager(bindingId, launchToken));
+        if (!closed.ok) return closed;
+        if (cause instanceof ManagerInterrupted)
+          return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
+      }
+      if (here === undefined && target?.successor === undefined)
         this.#withRegistry((registry) => {
           const closing = registry.beginClose(bindingId);
           return closing.ok ? registry.finishClose(bindingId) : closing;
@@ -3054,6 +3213,7 @@ export class Orchestrator {
           return;
         }
       });
+      if (here?.failure !== undefined) throw here.failure;
       const label = roleLabel(assignment, snapshot, bindingId);
       if (checkout?.kind === "owned-clone") await cloneCheckout(this.#root, checkout);
       const workspace =
@@ -3066,6 +3226,7 @@ export class Orchestrator {
               rootPaneId: target.here.paneId,
               rootTabId: undefined,
             };
+      if (here?.failure !== undefined) throw here.failure;
       const provisioned = this.#withRegistry((registry) =>
         registry.provision(
           bindingId,
@@ -3111,6 +3272,7 @@ export class Orchestrator {
       }
       const entries = [header, ...manager.getEntries()].map((entry) => JSON.stringify(entry));
       await writeFile(seedPath, `${entries.join("\n")}\n`, { mode: 0o600, flag: "wx" });
+      if (here?.failure !== undefined) throw here.failure;
       const allocated = this.#withRegistry((registry) =>
         registry.observeSession(bindingId, seedPath),
       );
@@ -3161,6 +3323,12 @@ export class Orchestrator {
         target?.here,
       );
       if (!initialized.ok) return initialized;
+      if (launchToken !== undefined) {
+        const finished = this.#withRegistry((r) => r.finishReattach(bindingId, launchToken));
+        if (!finished.ok) return finished;
+        if (!finished.value) return failure("lease_lost", "Manager startup ownership changed");
+        if (here !== undefined) here.settled = true;
+      }
       return ok({
         binding: initialized.value,
         expectedModel: model,
@@ -3180,13 +3348,21 @@ export class Orchestrator {
       });
     } catch (cause) {
       if (cause instanceof ManagerTuiExited || cause instanceof ManagerInterrupted) {
-        await target?.here?.tui?.exited;
+        if (here !== undefined && here.tui !== undefined && this.#ownsForeground(here))
+          await here.tui.exited;
         const allocated = this.#binding(bindingId);
         if (!allocated.ok) return allocated;
-        await this.#deps.terminateBinding(allocated.value);
+        if (here !== undefined && !this.#ownsForeground(here) && allocated.value.paneId !== null)
+          return failure("lease_lost", "Manager startup ownership changed; nothing was terminated");
+        if (here?.tui !== undefined) await this.#deps.terminateBinding(allocated.value);
         const closed = this.#withRegistry((registry) => {
+          if (here?.tui === undefined && launchToken !== undefined)
+            return registry.closeUnstartedManager(bindingId, launchToken);
           const closing = registry.beginClose(bindingId);
-          return closing.ok ? registry.finishClose(bindingId) : closing;
+          const result = closing.ok ? registry.finishClose(bindingId) : closing;
+          if (result.ok && launchToken !== undefined)
+            registry.finishReattach(bindingId, launchToken);
+          return result;
         });
         if (!closed.ok) return closed;
         return failure(

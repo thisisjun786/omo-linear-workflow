@@ -15,8 +15,10 @@ published.
 
 ### Fixed
 
+- Keep bare-manager live ownership beyond lease expiry, fence termination, and handle interruption from before reservation; safely recover abandoned unstarted claims.
 - Retain the manager's original OLW-owned workspace after moving to a user pane, and remove only that owned workspace at close.
 - Restore `reports` to posted user-inbox records by default; use `reports --all` for manager-addressed records, including pending or failed delivery states.
+- Reject here-mode socket or foreground-process mismatches rather than binding to a same-named pane on another server.
 - Identify manager reattachment owners by PID and process start time, so recycled PIDs do not block recovery. Legacy claims with unknown start time keep PID-only liveness.
 - Preserve foreground manager exit codes before readiness and release failed startup reservations immediately.
 - Forward foreground entry signals and recover dead-owner reattachment claims without a lease wait; live owners return `manager_busy` instead of an empty-pane success.

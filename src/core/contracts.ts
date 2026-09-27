@@ -273,6 +273,7 @@ export interface ClaimResult {
   readonly nativeKey?: string | undefined;
 }
 export interface ReserveInput {
+  readonly managerLaunch?: { readonly token: string; readonly claimedAt: string } | undefined;
   readonly bindingId: string;
   readonly durableSessionId: string;
   readonly deliverable?: Deliverable | undefined;
@@ -329,6 +330,7 @@ export interface Registry {
   ): Result<ReattachClaim>;
   /** True only while `token` still owns the binding's reattachment claim. */
   ownsReattach(id: string, token: string): Result<boolean>;
+  closeUnstartedManager(id: string, token: string): Result<Binding>;
   /** Point the claimed manager at the pane its TUI is launched into; a retry reuses it. */
   recordReattachPane(
     id: string,

@@ -266,6 +266,7 @@ export const claimResultSchema = z.strictObject({
   nativeKey: text.optional(),
 });
 export const reserveInputSchema = z.strictObject({
+  managerLaunch: z.strictObject({ token: text, claimedAt: text }).optional(),
   bindingId: text,
   durableSessionId: text,
   deliverable: deliverableSchema.optional(),

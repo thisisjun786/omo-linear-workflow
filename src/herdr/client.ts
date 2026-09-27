@@ -82,6 +82,7 @@ export interface HerdrClient {
   renameTab(tabId: string, label: string): Promise<void>;
   focusWorkspace(workspaceId: string): Promise<void>;
   focusPane(paneId: string): Promise<void>;
+  paneContainsProcess(paneId: string, pid: number): Promise<boolean>;
   sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void>;
   run(
     paneId: string,
@@ -194,6 +195,24 @@ class SocketHerdrClient implements HerdrClient {
   public async focusPane(paneId: string): Promise<void> {
     z.object({ type: z.literal("pane_info") }).parse(
       await this.#request("pane.focus", { pane_id: nonEmptyStringSchema.parse(paneId) }),
+    );
+  }
+
+  public async paneContainsProcess(paneId: string, pid: number): Promise<boolean> {
+    const result = z
+      .object({
+        type: z.literal("pane_process_info"),
+        process_info: z.object({
+          pane_id: nonEmptyStringSchema,
+          foreground_processes: z.array(z.object({ pid: z.number().int().positive() })).default([]),
+        }),
+      })
+      .parse(
+        await this.#request("pane.process_info", { pane_id: nonEmptyStringSchema.parse(paneId) }),
+      );
+    return (
+      result.process_info.pane_id === paneId &&
+      result.process_info.foreground_processes.some((process) => process.pid === pid)
     );
   }
 

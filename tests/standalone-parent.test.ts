@@ -426,6 +426,9 @@ async function world() {
     },
     async focusWorkspace() {},
     async focusPane() {},
+    async paneContainsProcess() {
+      return true;
+    },
     async run(paneId, argv) {
       launches.push(paneId);
       const path = argv[argv.indexOf("--session") + 1];

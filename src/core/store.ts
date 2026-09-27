@@ -442,6 +442,11 @@ export function openRegistry(
       binding.launchState,
       encoded(binding),
     );
+    if (input.managerLaunch !== undefined) {
+      if (binding.assignment.role !== "manager")
+        return error("invalid_input", "Only a manager can hold a foreground launch claim");
+      saveManagerClaim(binding.id, input.managerLaunch.token, input.managerLaunch.claimedAt);
+    }
     return ok(binding);
   }
 
@@ -723,32 +728,60 @@ export function openRegistry(
     reclaimDeadOwner = false,
   ): Result<ReattachClaim> {
     return transaction<ReattachClaim>(() => {
-      const binding = readyManager(id);
+      const binding = get(id);
       if (!binding.ok) return binding;
+      if (
+        binding.value.assignment.role !== "manager" ||
+        !["ready", "reserved", "provisioning"].includes(binding.value.launchState)
+      )
+        return error("invalid_transition", "Manager is not available for a launch claim");
       const held = reattachClaim(id);
       // Compare-and-set: a changed pane or a live claim means another caller owns reattachment.
       if (
         binding.value.paneId !== expectedPaneId ||
         (held !== null &&
-          held.claimed_at >= staleBefore &&
-          !(
-            reclaimDeadOwner &&
-            held.owner_pid !== null &&
-            !processAlive(held.owner_pid, held.owner_starttime)
-          ))
+          held.claimed_at !== "" &&
+          (reclaimDeadOwner && held.owner_pid !== null
+            ? processAlive(held.owner_pid, held.owner_starttime)
+            : held.claimed_at >= staleBefore))
       )
         return ok({ claimed: false, binding: binding.value });
       const token = randomUUID();
-      db.query(
-        "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid, owner_starttime) VALUES (?, ?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid, owner_starttime = excluded.owner_starttime",
-      ).run(
-        id,
-        claimedAt,
-        token,
-        process.pid,
-        processStarttimeSchema.parse(processStarttime(process.pid)),
-      );
+      saveManagerClaim(id, token, claimedAt);
       return ok({ claimed: true, binding: binding.value, token });
+    });
+  }
+
+  function saveManagerClaim(id: string, token: string, claimedAt: string): void {
+    db.query(
+      "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid, owner_starttime) VALUES (?, ?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid, owner_starttime = excluded.owner_starttime",
+    ).run(
+      id,
+      claimedAt,
+      token,
+      process.pid,
+      processStarttimeSchema.parse(processStarttime(process.pid)),
+    );
+  }
+
+  function closeUnstartedManager(id: string, token: string): Result<Binding> {
+    return transaction(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (reattachClaim(id)?.owner !== token)
+        return error("lease_lost", "Manager launch belongs to another entry");
+      if (
+        binding.value.assignment.role !== "manager" ||
+        !["reserved", "provisioning"].includes(binding.value.launchState) ||
+        binding.value.initialization.state !== "pending"
+      )
+        return error("invalid_transition", "Only an uninitialized manager launch can be released");
+      const closing = beginCloseInTransaction(id);
+      if (!closing.ok) return closing;
+      const closed = finishCloseInTransaction(id);
+      if (closed.ok)
+        db.query("DELETE FROM manager_reattach WHERE binding_id = ? AND owner = ?").run(id, token);
+      return closed;
     });
   }
 
@@ -2094,6 +2127,7 @@ export function openRegistry(
     observeSession,
     beginReattach,
     ownsReattach,
+    closeUnstartedManager,
     recordReattachPane,
     reattachPending,
     releaseReattach,

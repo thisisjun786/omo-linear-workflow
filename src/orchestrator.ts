@@ -1975,10 +1975,15 @@ export class Orchestrator {
   public async ask(input: AskInput): Promise<Result<unknown>> {
     const sender = this.#binding(input.fromId);
     if (!sender.ok) return sender;
+    if (sender.value.assignment.role === "child")
+      return failure(
+        "child_cli_ask_unsupported",
+        "Child sessions must ask through the olw_ask tool so their active goal is paused",
+      );
     const host = await this.#checkHostProtocol(sender.value);
     if (host !== undefined) return host;
-    if (sender.value.assignment.role !== "child" && sender.value.assignment.role !== "parent")
-      return failure("route_denied", "Only children and parents ask questions");
+    if (sender.value.assignment.role !== "parent")
+      return failure("route_denied", "Only parents ask questions through the CLI");
     const context = await this.#context(sender.value);
     if (!context.ok) return context;
     if (input.toUser && sender.value.assignment.role !== "parent")

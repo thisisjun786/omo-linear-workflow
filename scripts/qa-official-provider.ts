@@ -4,6 +4,17 @@ import { createAssistantMessageEventStream } from "../node_modules/@code-yeongyu
 // Offline QA replaces only inference. Native TUI, shared host, extension delivery,
 // question persistence and Herdr integration are unchanged and can fail normally.
 export default function offlineProvider(pi: ExtensionAPI): void {
+  pi.rpc.handle("oi.qa.olw-ask", async (input: unknown) => {
+    const result = await pi.executeTool("olw_ask", input);
+    if (result.isError)
+      throw new Error(
+        result.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n"),
+      );
+    return result.details;
+  });
   const stream: NonNullable<ProviderConfig["streamSimple"]> = (model) => {
     const events = createAssistantMessageEventStream();
     queueMicrotask(() => {

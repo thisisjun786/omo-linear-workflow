@@ -286,9 +286,35 @@ export async function runOfficialHerdrQa(
     const planClient = await connected(plan);
     const body = join(world.scratch, "question.txt");
     await writeFile(body, "QA format decision");
-    const q = deliveryRecordSchema.parse(
-      await invoke(["ask", "--from", plan.id, "--id", "qa-child-question", "--text-file", body]),
+    const asked = z
+      .object({ ok: z.literal(true), id: z.string(), state: z.literal("accepted") })
+      .parse(
+        await planClient.requestExtension("oi.qa.olw-ask", {
+          questions: [
+            {
+              id: "format",
+              question: "QA format decision",
+              options: [{ label: "text" }],
+              multiSelect: false,
+            },
+          ],
+        }),
+      );
+    const registryForQuestion = openRegistry(
+      join(world.controlRoot, ".omo/state/registry.sqlite"),
+      {
+        readonly: true,
+      },
     );
+    const q = (() => {
+      try {
+        const record = registryForQuestion.delivery(asked.id);
+        assert.ok(record.ok);
+        return deliveryRecordSchema.parse(record.value);
+      } finally {
+        registryForQuestion.close();
+      }
+    })();
     const escalation = join(world.scratch, "escalation.json");
     await writeFile(escalation, JSON.stringify({ questions: [], escalates: q.envelope.id }));
     const pq = deliveryRecordSchema.parse(

@@ -1,5 +1,7 @@
+import { dlopen, FFIType, read } from "bun:ffi";
 import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { z } from "zod";
 
@@ -9,13 +11,6 @@ const mirrorStateSchema = z.strictObject({
   lastFetchTime: z.string().nullable(),
   lastError: z.string().nullable(),
 });
-const lockSchema = z.strictObject({
-  pid: z.number().int().positive(),
-  timestamp: z.number().nonnegative(),
-  token: z.string().regex(/^[a-f0-9]{24}$/),
-});
-const legacyLockSchema = lockSchema.omit({ token: true });
-
 type MirrorState = z.infer<typeof mirrorStateSchema>;
 export interface MirrorStatus extends MirrorState {
   readonly path: string;
@@ -31,7 +26,11 @@ export class MirrorError extends Error {
       | "invalid_remote"
       | "mirror_clone_failed"
       | "mirror_fetch_failed"
-      | "mirror_locked",
+      | "mirror_locked"
+      | "mirror_lock_unreadable"
+      | "mirror_legacy_lock"
+      | "mirror_metadata_invalid"
+      | "mirror_metadata_unreadable",
     message: string,
     public readonly details?: unknown,
   ) {
@@ -80,11 +79,27 @@ function statePath(path: string): string {
   return join(path, "olw-mirror.json");
 }
 
-async function runGit(args: readonly string[]): Promise<{ code: number; stderr: string }> {
-  const child = Bun.spawn(["git", ...args], {
+interface HeldLock {
+  readonly fd: number;
+  readonly path: string;
+  readonly release: () => Promise<void>;
+}
+
+// Git inherits fd 3 so the kernel lock survives worker/launcher death. Disable detached
+// maintenance so no background Git descendant extends the lock beyond this operation.
+const gitWrapperSource =
+  'trap "" TERM HUP INT; git -c gc.autoDetach=false -c maintenance.autoDetach=false "$@"; code=$?; exec 3>&-; printf x >> "$OLW_MIRROR_RELEASE_MARKER"; exit "$code"';
+
+async function runGit(
+  args: readonly string[],
+  lock: HeldLock,
+): Promise<{ code: number; stderr: string }> {
+  const child = Bun.spawn(["setsid", "/bin/sh", "-c", gitWrapperSource, "olw-git", ...args], {
+    env: { ...process.env, OLW_MIRROR_RELEASE_MARKER: `${lock.path}.released-git` },
     stdin: "ignore",
     stdout: "ignore",
     stderr: "pipe",
+    stdio: ["ignore", "ignore", "pipe", lock.fd],
   });
   const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   return { code, stderr: stderr.trim() };
@@ -109,105 +124,155 @@ function processAlive(pid: number): boolean {
   }
 }
 
-interface LockOwner {
-  readonly pid: number;
-  readonly timestamp: number;
-  readonly token: string;
+function errorCode(cause: unknown): string | undefined {
+  return cause instanceof Error && "code" in cause && typeof cause.code === "string"
+    ? cause.code
+    : undefined;
 }
 
-function isAlreadyExists(cause: unknown): boolean {
-  return (
-    cause instanceof Error &&
-    "code" in cause &&
-    (cause.code === "EEXIST" || cause.code === "ENOTEMPTY" || cause.code === "ENOTDIR")
-  );
+const O_RDWR = 2;
+const O_CREAT = 64;
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+const EWOULDBLOCK = 11;
+
+interface LockFunctions {
+  readonly open: (path: Uint8Array, flags: number, mode: number) => number;
+  readonly flock: (fd: number, operation: number) => number;
+  readonly close: (fd: number) => number;
+  readonly errno: () => number;
 }
 
-async function readLock(path: string): Promise<LockOwner | undefined> {
+function lockFunctions(): LockFunctions {
   try {
-    const stats = await lstat(path);
-    const text = await readFile(stats.isDirectory() ? join(path, "owner.json") : path, "utf8");
-    const value: unknown = JSON.parse(text);
-    const current = lockSchema.safeParse(value);
-    if (current.success) return current.data;
-    const legacy = legacyLockSchema.safeParse(value);
-    if (!legacy.success) return undefined;
+    const libc = dlopen(process.env["OLW_LIBC_PATH"] ?? "libc.so.6", {
+      open: { args: [FFIType.cstring, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      close: { args: [FFIType.i32], returns: FFIType.i32 },
+      __errno_location: { args: [], returns: FFIType.ptr },
+    });
     return {
-      ...legacy.data,
-      token: createHash("sha256").update(text).digest("hex").slice(0, 24),
+      open: libc.symbols.open,
+      flock: libc.symbols.flock,
+      close: libc.symbols.close,
+      errno: () => {
+        const pointer = libc.symbols.__errno_location();
+        if (pointer === null)
+          throw new MirrorError("mirror_lock_unreadable", "Could not read libc errno");
+        return read.i32(pointer, 0);
+      },
     };
   } catch (cause) {
-    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return undefined;
-    return undefined;
+    throw new MirrorError("mirror_lock_unreadable", "Kernel advisory locking is unavailable", {
+      cause: cause instanceof Error ? cause.message : String(cause),
+    });
   }
 }
 
-async function publishLock(path: string, owner: LockOwner): Promise<boolean> {
-  const candidate = `${path}.acquire-${owner.token}`;
-  await mkdir(candidate);
+async function legacyLockDirectory(path: string): Promise<boolean> {
   try {
-    await writeFile(join(candidate, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
-    try {
-      await rename(candidate, path);
-      return true;
-    } catch (cause) {
-      if (!isAlreadyExists(cause)) throw cause;
-      return false;
-    }
-  } finally {
-    await rm(candidate, { recursive: true, force: true });
-  }
-}
-
-async function releaseLock(path: string, token: string): Promise<void> {
-  if ((await readLock(path))?.token !== token) return;
-  const released = `${path}.released-${token}`;
-  try {
-    await rename(path, released);
-    await rm(released, { recursive: true, force: true });
+    return (await lstat(path)).isDirectory();
   } catch (cause) {
-    if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) throw cause;
+    if (errorCode(cause) === "ENOENT") return false;
+    throw new MirrorError("mirror_lock_unreadable", `Could not inspect mirror lock at ${path}`, {
+      cause: cause instanceof Error ? cause.message : String(cause),
+    });
   }
+}
+
+const blockingFlockWorker = `
+import { dlopen, FFIType } from "bun:ffi";
+self.onmessage = async (event) => {
+  try {
+    const libc = dlopen(event.data.libcPath, {
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    });
+    const result = libc.symbols.flock(event.data.fd, 2);
+    postMessage({ ok: result === 0 });
+    await new Promise(() => {});
+  } catch (cause) {
+    postMessage({ ok: false, error: cause instanceof Error ? cause.message : String(cause) });
+  }
+};
+`;
+
+async function waitForLockRelease(path: string, fd: number, deadline: number): Promise<boolean> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return false;
+  const worker = new Worker(URL.createObjectURL(new Blob([blockingFlockWorker])), {
+    smol: true,
+  });
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (value: boolean, cause?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.terminate();
+      if (cause === undefined) resolve(value);
+      else reject(cause);
+    };
+    const timer = setTimeout(() => finish(false), remaining);
+    worker.onmessage = (event: MessageEvent<{ ok: boolean; error?: string }>) => {
+      if (event.data.ok) finish(true);
+      else
+        finish(
+          false,
+          new MirrorError("mirror_lock_unreadable", `Could not lock ${path}`, event.data),
+        );
+    };
+    worker.onerror = (event) => finish(false, event.error ?? new Error(event.message));
+    worker.postMessage({
+      fd,
+      libcPath: process.env["OLW_LIBC_PATH"] ?? "libc.so.6",
+    });
+  });
 }
 
 async function acquireLock(
   path: string,
   timeoutMs: number,
   onWait?: (() => void) | undefined,
-): Promise<() => Promise<void>> {
-  const started = Date.now();
-  const owner: LockOwner = {
-    pid: process.pid,
-    timestamp: Date.now(),
-    token: randomBytes(12).toString("hex"),
-  };
-  let waiting = false;
-  while (true) {
-    if (await publishLock(path, owner)) return async () => releaseLock(path, owner.token);
-    if (!waiting) {
-      waiting = true;
+): Promise<HeldLock> {
+  const lockPath = (await legacyLockDirectory(path)) ? `${path}.advisory` : path;
+  const flock = lockFunctions();
+  const fd = flock.open(new TextEncoder().encode(`${lockPath}\0`), O_RDWR | O_CREAT, 0o600);
+  if (fd < 0)
+    throw new MirrorError("mirror_lock_unreadable", `Could not open mirror lock at ${lockPath}`, {
+      errno: flock.errno(),
+    });
+  let acquired = false;
+  try {
+    acquired = flock.flock(fd, LOCK_EX | LOCK_NB) === 0;
+    if (!acquired && flock.errno() !== EWOULDBLOCK)
+      throw new MirrorError("mirror_lock_unreadable", `Could not lock ${lockPath}`, {
+        errno: flock.errno(),
+      });
+    if (!acquired) {
       onWait?.();
+      if (timeoutMs <= 0) throw new MirrorError("mirror_locked", "Repository mirror is locked");
+      acquired = await waitForLockRelease(lockPath, fd, Date.now() + timeoutMs);
+      if (!acquired) throw new MirrorError("mirror_locked", "Repository mirror is locked");
     }
-    const lock = await readLock(path);
-    if (lock !== undefined && !processAlive(lock.pid)) {
-      const stale = `${path}.stale-${lock.token}`;
-      try {
-        await rename(path, stale);
-      } catch (cause) {
-        if (
-          !isAlreadyExists(cause) &&
-          !(cause instanceof Error && "code" in cause && cause.code === "ENOENT")
-        )
-          throw cause;
-      }
-      continue;
-    }
-    if (Date.now() - started >= timeoutMs)
-      throw new MirrorError(
-        "mirror_locked",
-        `Repository mirror is locked by pid ${lock?.pid ?? "unknown"}`,
-      );
-    await Bun.sleep(Math.min(50, Math.max(1, timeoutMs - (Date.now() - started))));
+    await writeFile(
+      `/proc/self/fd/${fd}`,
+      `${JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: new Date().toISOString() })}\n`,
+    );
+    return {
+      fd,
+      path: lockPath,
+      release: async () => {
+        if (flock.flock(fd, LOCK_UN) !== 0 || flock.close(fd) !== 0)
+          throw new MirrorError("mirror_lock_unreadable", `Could not release ${lockPath}`, {
+            errno: flock.errno(),
+          });
+      },
+    };
+  } catch (cause) {
+    if (acquired) flock.flock(fd, LOCK_UN);
+    flock.close(fd);
+    throw cause;
   }
 }
 
@@ -243,7 +308,11 @@ async function removeDeadTemporaryMirrors(path: string): Promise<void> {
   }
 }
 
-async function ensureMirrorLocked(path: string, identity: RemoteIdentity): Promise<MirrorStatus> {
+async function ensureMirrorLocked(
+  path: string,
+  identity: RemoteIdentity,
+  lock: HeldLock,
+): Promise<MirrorStatus> {
   await removeDeadTemporaryMirrors(path);
   const existing = Bun.file(statePath(path));
   if (await existing.exists()) {
@@ -259,7 +328,7 @@ async function ensureMirrorLocked(path: string, identity: RemoteIdentity): Promi
     `${basename(path)}-${process.pid}-${randomBytes(6).toString("hex")}`,
   );
   try {
-    const result = await runGit(["clone", "--mirror", identity.normalized, temporary]);
+    const result = await runGit(["clone", "--mirror", identity.normalized, temporary], lock);
     if (result.code !== 0)
       throw new MirrorError(
         "mirror_clone_failed",
@@ -283,17 +352,17 @@ async function withMirrorLock<T>(
   root: string,
   remote: string,
   timeoutMs: number,
-  action: (mirror: MirrorStatus) => Promise<T>,
+  action: (mirror: MirrorStatus, lock: HeldLock) => Promise<T>,
   onLockWait?: (() => void) | undefined,
 ): Promise<T> {
   const identity = remoteIdentity(remote);
   const path = mirrorPath(root, remote);
   await mkdir(join(root, ".omo", "repos"), { recursive: true });
-  const release = await acquireLock(`${path}.lock`, timeoutMs, onLockWait);
+  const lock = await acquireLock(`${path}.lock`, timeoutMs, onLockWait);
   try {
-    return await action(await ensureMirrorLocked(path, identity));
+    return await action(await ensureMirrorLocked(path, identity, lock), lock);
   } finally {
-    await release();
+    await lock.release();
   }
 }
 
@@ -310,8 +379,8 @@ export async function fetchMirror(
     root,
     remote,
     options.lockTimeoutMs ?? 5_000,
-    async (mirror) => {
-      const result = await runGit(["--git-dir", mirror.path, "fetch", "--prune"]);
+    async (mirror, lock) => {
+      const result = await runGit(["--git-dir", mirror.path, "fetch", "--prune"], lock);
       if (result.code !== 0) {
         const message = safeGitMessage(result.stderr) || `git exited ${result.code}`;
         await writeState(mirror.path, {
@@ -349,15 +418,36 @@ export async function listMirrors(root: string): Promise<MirrorStatus[]> {
   }
   const mirrors: MirrorStatus[] = [];
   for (const entry of entries.sort()) {
+    if (entry.endsWith(".git.lock")) {
+      const legacyPath = join(directory, basename(entry));
+      if (await legacyLockDirectory(legacyPath))
+        throw new MirrorError(
+          "mirror_legacy_lock",
+          `Legacy repository mirror lock directory requires manual removal: ${legacyPath}`,
+          { path: legacyPath },
+        );
+    }
     if (!entry.endsWith(".git")) continue;
     const path = join(directory, basename(entry));
+    let text: string;
     try {
-      mirrors.push({
-        path,
-        ...mirrorStateSchema.parse(JSON.parse(await readFile(statePath(path), "utf8"))),
-      });
-    } catch {
-      // Only OLW mirrors with valid metadata are known locally.
+      text = await readFile(statePath(path), "utf8");
+    } catch (cause) {
+      if (errorCode(cause) === "ENOENT") continue;
+      throw new MirrorError(
+        "mirror_metadata_unreadable",
+        `Could not read repository mirror metadata at ${statePath(path)}`,
+        { cause: cause instanceof Error ? cause.message : String(cause) },
+      );
+    }
+    try {
+      mirrors.push({ path, ...mirrorStateSchema.parse(JSON.parse(text)) });
+    } catch (cause) {
+      throw new MirrorError(
+        "mirror_metadata_invalid",
+        `Repository mirror metadata is corrupt at ${statePath(path)}`,
+        { cause: cause instanceof Error ? cause.message : String(cause) },
+      );
     }
   }
   return mirrors;

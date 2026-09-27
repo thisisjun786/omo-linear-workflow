@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +45,27 @@ async function deadPid(): Promise<number> {
   return child.pid;
 }
 
+async function holdFlock(path: string): Promise<Bun.Subprocess<"pipe", "pipe", "pipe">> {
+  const child = Bun.spawn(
+    [
+      "flock",
+      "--no-fork",
+      "--exclusive",
+      path,
+      process.execPath,
+      "-e",
+      `process.stdout.write("1"); await new Response(Bun.stdin.stream()).text(); const {dlopen,FFIType}=await import("bun:ffi"); dlopen("libc.so.6",{close:{args:[FFIType.i32],returns:FFIType.i32}}).symbols.close(3); await Bun.write(${JSON.stringify(`${path}.released`)}, "");`,
+    ],
+    { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+  );
+  const reader = child.stdout.getReader();
+  const ready = await reader.read();
+  reader.releaseLock();
+  if (ready.done || new TextDecoder().decode(ready.value) !== "1")
+    throw new Error(await new Response(child.stderr).text());
+  return child;
+}
+
 async function fixture(): Promise<{ root: string; remote: string; seed: string }> {
   const root = await mkdtemp(join(tmpdir(), "olw-mirror-"));
   roots.push(root);
@@ -81,34 +102,129 @@ describe("fetch-only repository mirrors", () => {
     });
   });
 
-  test("two concurrent first fetches serialize before clone and publish one valid mirror", async () => {
+  test("a real process waits for the advisory lock and acquires after release", async () => {
     const world = await fixture();
     const path = mirrorPath(world.root, world.remote);
     await mkdir(join(world.root, ".omo/repos"), { recursive: true });
-    await mkdir(`${path}.lock`);
-    await writeFile(
-      join(`${path}.lock`, "owner.json"),
-      JSON.stringify({ pid: process.pid, timestamp: Date.now(), token: "a".repeat(24) }),
-    );
-    let releaseWaiters = (): void => {};
-    const bothWaiting = new Promise<void>((resolve) => {
-      releaseWaiters = resolve;
-    });
-    let waits = 0;
-    const onLockWait = () => {
-      waits += 1;
-      if (waits === 2) releaseWaiters();
-    };
-    const first = fetchMirror(world.root, world.remote, { onLockWait });
-    const second = fetchMirror(world.root, world.remote, { onLockWait });
-    await bounded(bothWaiting, "concurrent fetches did not both wait for the lifecycle lock");
-    await rm(`${path}.lock`, { recursive: true });
-    const results = await Promise.all([first, second]);
-    expect(results.map((result) => result.path)).toEqual([path, path]);
+    const holder = await holdFlock(`${path}.lock`);
+    const waiting = Promise.withResolvers<void>();
+    const fetch = fetchMirror(world.root, world.remote, { onLockWait: waiting.resolve });
+    await bounded(waiting.promise, "fetch did not contend on the advisory lock");
+    holder.stdin.end();
+    expect(await holder.exited).toBe(0);
+    expect((await fetch).path).toBe(path);
     expect(await git(path, "fsck", "--full")).toBe("");
-    expect(
-      (await readdir(join(world.root, ".omo/repos"))).filter((entry) => entry.includes(".tmp-")),
-    ).toEqual([]);
+  });
+
+  test("two production fetches serialize their git children", async () => {
+    const world = await fixture();
+    const mirror = await fetchMirror(world.root, world.remote);
+    const harness = join(world.root, "fetch-serialization");
+    const socketPath = join(harness, "upload.sock");
+    await mkdir(harness);
+    await writeFile(
+      join(harness, "barrier.ts"),
+      `import {createConnection} from "node:net"; const socket=createConnection(process.env.BARRIER_SOCKET ?? ""); await new Promise<void>((resolve,reject)=>{socket.once("connect",resolve);socket.once("error",reject)}); socket.write("entered"); await new Promise<void>((resolve)=>socket.once("data",resolve));`,
+    );
+    await writeFile(
+      join(harness, "upload-pack"),
+      `#!/bin/sh\nBARRIER_SOCKET='${socketPath}' '${process.execPath}' '${join(harness, "barrier.ts")}'\nexec /usr/bin/git-upload-pack "$@"\n`,
+      { mode: 0o700 },
+    );
+    await git(mirror.path, "config", "remote.origin.uploadpack", join(harness, "upload-pack"));
+    const sockets: import("node:net").Socket[] = [];
+    const firstEntry = Promise.withResolvers<void>();
+    const secondEntry = Promise.withResolvers<void>();
+    const server = createServer((socket) => {
+      sockets.push(socket);
+      if (sockets.length === 1) firstEntry.resolve();
+      if (sockets.length === 2) secondEntry.resolve();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    const waiting = Promise.withResolvers<void>();
+    const first = fetchMirror(world.root, world.remote);
+    await bounded(firstEntry.promise, "first fetch did not enter git");
+    const second = fetchMirror(world.root, world.remote, { onLockWait: waiting.resolve });
+    await bounded(waiting.promise, "second production fetch did not wait");
+    expect(sockets).toHaveLength(1);
+    sockets[0]?.end("release");
+    await bounded(secondEntry.promise, "second fetch did not enter after first completed");
+    sockets[1]?.end("release");
+    await Promise.all([first, second]);
+    server.close();
+  });
+
+  test("two production first-clone contenders publish one valid mirror", async () => {
+    const world = await fixture();
+    const path = mirrorPath(world.root, world.remote);
+    const harness = join(world.root, "clone-serialization");
+    const bin = join(harness, "bin");
+    const socketPath = join(harness, "upload.sock");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(harness, "barrier.ts"),
+      `import { createConnection } from "node:net";\nconst socket = createConnection(process.env.BARRIER_SOCKET ?? "");\nawait new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });\nsocket.write("upload");\nawait new Promise<void>((resolve) => socket.once("data", () => resolve()));\n`,
+    );
+    await writeFile(
+      join(harness, "upload-pack"),
+      `#!/bin/sh\nBARRIER_SOCKET='${socketPath}' '${process.execPath}' '${join(harness, "barrier.ts")}'\nexec /usr/bin/git-upload-pack "$@"\n`,
+      { mode: 0o700 },
+    );
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\nif [ "$1" = -c ]; then shift 4; fi\nif [ "$1" = clone ]; then shift; exec /usr/bin/git clone --upload-pack='${join(harness, "upload-pack")}' "$@"; fi\nexec /usr/bin/git "$@"\n`,
+      { mode: 0o700 },
+    );
+    const sockets: import("node:net").Socket[] = [];
+    const firstEntry = Promise.withResolvers<void>();
+    const server = createServer((socket) => {
+      sockets.push(socket);
+      if (sockets.length === 1) firstEntry.resolve();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      BUN_EXE: process.execPath,
+      BARRIER_SCRIPT: join(harness, "barrier.ts"),
+      BARRIER_SOCKET: socketPath,
+    };
+    const first = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "fetch-process.ts"), world.root, world.remote],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    await bounded(firstEntry.promise, "first clone did not enter git");
+    const second = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "fetch-process.ts"), world.root, world.remote],
+      { env: { ...env, REPORT_WAIT: "1" }, stdout: "pipe", stderr: "pipe" },
+    );
+    const waiting = await second.stderr.getReader().read();
+    expect(new TextDecoder().decode(waiting.value)).toContain("WAITING");
+    expect(sockets).toHaveLength(1);
+    sockets[0]?.end("release");
+    const [firstCode, secondCode, firstOut, secondOut] = await Promise.all([
+      first.exited,
+      second.exited,
+      new Response(first.stdout).text(),
+      new Response(second.stdout).text(),
+    ]);
+    expect({ firstCode, secondCode, firstOut, secondOut }).toMatchObject({
+      firstCode: 0,
+      secondCode: 0,
+    });
+    expect([JSON.parse(firstOut), JSON.parse(secondOut)]).toEqual([
+      expect.objectContaining({ ok: true }),
+      expect.objectContaining({ ok: true }),
+    ]);
+    expect(sockets).toHaveLength(1);
+    expect(await git(path, "fsck", "--full")).toBe("");
+    server.close();
   });
 
   test("a clone killed with its process group leaves no final mirror and one retry recovers", async () => {
@@ -124,14 +240,16 @@ describe("fetch-only repository mirrors", () => {
     );
     await writeFile(
       join(bin, "git"),
-      `#!/bin/sh\nif [ "$1" = clone ]; then\n  shift\n  exec /usr/bin/git clone --upload-pack="$BUN_EXE $BARRIER_SCRIPT" "$@"\nfi\nexec /usr/bin/git "$@"\n`,
+      `#!/bin/sh\nif [ "$1" = -c ]; then shift 4; fi\nif [ "$1" = clone ]; then\n  shift\n  exec /usr/bin/git clone --upload-pack="$BUN_EXE $BARRIER_SCRIPT" "$@"\nfi\nexec /usr/bin/git "$@"\n`,
     );
     await chmod(join(bin, "git"), 0o700);
     let signalUpload = (): void => {};
     const uploadStarted = new Promise<void>((resolve) => {
       signalUpload = resolve;
     });
+    let uploadSocket: import("node:net").Socket | undefined;
     const server = createServer((socket) => {
+      uploadSocket = socket;
       socket.once("data", () => signalUpload());
     });
     await new Promise<void>((resolve, reject) => {
@@ -159,6 +277,7 @@ describe("fetch-only repository mirrors", () => {
       expect(await readdir(join(world.root, ".omo/repos", ".tmp"))).not.toEqual([]);
       process.kill(-child.pid, "SIGKILL");
       await child.exited;
+      uploadSocket?.end("release");
     } finally {
       server.close();
     }
@@ -185,107 +304,147 @@ describe("fetch-only repository mirrors", () => {
     expect((await listMirrors(world.root)).map((mirror) => mirror.path)).toContain(crafted.path);
   });
 
-  test("concurrent stale-lock reclaimers never overlap or release a successor's lock", async () => {
+  test("a held advisory lock times out immediately when timeout is zero", async () => {
+    const world = await fixture();
+    const lockPath = `${mirrorPath(world.root, world.remote)}.lock`;
+    await mkdir(join(world.root, ".omo/repos"), { recursive: true });
+    const holder = await holdFlock(lockPath);
+    try {
+      await expect(
+        bounded(
+          fetchMirror(world.root, world.remote, { lockTimeoutMs: 0 }),
+          "zero-timeout advisory lock did not return promptly",
+        ),
+      ).rejects.toMatchObject({ name: "MirrorError", code: "mirror_locked" });
+    } finally {
+      holder.stdin.end();
+      await holder.exited;
+    }
+  });
+
+  test("a held advisory lock respects a positive timeout", async () => {
+    const world = await fixture();
+    const lockPath = `${mirrorPath(world.root, world.remote)}.lock`;
+    await mkdir(join(world.root, ".omo/repos"), { recursive: true });
+    const holder = await holdFlock(lockPath);
+    let waits = 0;
+    try {
+      await expect(
+        fetchMirror(world.root, world.remote, {
+          lockTimeoutMs: 20,
+          onLockWait: () => {
+            waits += 1;
+          },
+        }),
+      ).rejects.toMatchObject({ name: "MirrorError", code: "mirror_locked" });
+      expect(waits).toBe(1);
+    } finally {
+      holder.stdin.end();
+      await holder.exited;
+    }
+  });
+
+  test("SIGKILL releases the advisory lock and leaves no stale ownership", async () => {
+    const world = await fixture();
+    const path = mirrorPath(world.root, world.remote);
+    await mkdir(join(world.root, ".omo/repos"), { recursive: true });
+    const holder = await holdFlock(`${path}.lock`);
+    const waiting = Promise.withResolvers<void>();
+    const fetch = fetchMirror(world.root, world.remote, { onLockWait: waiting.resolve });
+    await bounded(waiting.promise, "fetch did not wait for killed advisory holder");
+    holder.kill("SIGKILL");
+    await holder.exited;
+    await writeFile(`${path}.lock.released`, "released\n");
+    expect((await fetch).path).toBe(path);
+    expect((await lstat(`${path}.lock`)).isFile()).toBe(true);
+  });
+
+  test("git retains the lock after worker and wrapper are killed", async () => {
     const world = await fixture();
     const mirror = await fetchMirror(world.root, world.remote);
-    const lockPath = `${mirror.path}.lock`;
-    const staleToken = "d".repeat(24);
-    await mkdir(lockPath);
-    await writeFile(
-      join(lockPath, "owner.json"),
-      JSON.stringify({ pid: await deadPid(), timestamp: 0, token: staleToken }),
-    );
-    await mkdir(`${lockPath}.stale-${staleToken}`);
-    await mkdir(`${lockPath}.released-${staleToken}`);
-
-    const harness = join(world.root, "reclaim-harness");
-    const socketPath = join(harness, "fetch.sock");
-    await mkdir(harness, { recursive: true });
+    const harness = join(world.root, "worker-death");
+    const socketPath = join(harness, "upload.sock");
+    await mkdir(harness);
     await writeFile(
       join(harness, "barrier.ts"),
-      `import { createConnection } from "node:net";\nconst socket = createConnection(process.env.BARRIER_SOCKET ?? "");\nawait new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });\nsocket.write(String(process.pid));\nawait new Promise<void>((resolve) => socket.once("data", () => resolve()));\n`,
+      `import {createConnection} from "node:net"; const socket=createConnection(process.env.BARRIER_SOCKET ?? ""); await new Promise<void>((resolve,reject)=>{socket.once("connect",resolve);socket.once("error",reject)}); socket.write("entered"); await new Promise<void>((resolve)=>socket.once("data",resolve));`,
     );
     await writeFile(
       join(harness, "upload-pack"),
       `#!/bin/sh\nBARRIER_SOCKET='${socketPath}' '${process.execPath}' '${join(harness, "barrier.ts")}'\nexec /usr/bin/git-upload-pack "$@"\n`,
+      { mode: 0o700 },
     );
-    await chmod(join(harness, "upload-pack"), 0o700);
     await git(mirror.path, "config", "remote.origin.uploadpack", join(harness, "upload-pack"));
     const sockets: import("node:net").Socket[] = [];
-    let signalFirstFetch = (): void => {};
-    const firstFetch = new Promise<void>((resolve) => {
-      signalFirstFetch = resolve;
-    });
-    let signalSecondFetch = (): void => {};
-    const secondFetch = new Promise<void>((resolve) => {
-      signalSecondFetch = resolve;
-    });
+    const firstEntry = Promise.withResolvers<void>();
+    const secondEntry = Promise.withResolvers<void>();
     const server = createServer((socket) => {
       sockets.push(socket);
-      if (sockets.length === 1) signalFirstFetch();
-      if (sockets.length === 2) signalSecondFetch();
+      if (sockets.length === 1) firstEntry.resolve();
+      if (sockets.length === 2) secondEntry.resolve();
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(socketPath, resolve);
     });
-    let waits = 0;
-    let signalBothWaiting = (): void => {};
-    const bothWaiting = new Promise<void>((resolve) => {
-      signalBothWaiting = resolve;
-    });
-    const onLockWait = () => {
-      waits += 1;
-      if (waits === 2) signalBothWaiting();
-    };
-    const first = fetchMirror(world.root, world.remote, { onLockWait });
-    const second = fetchMirror(world.root, world.remote, { onLockWait });
-    try {
-      await bounded(bothWaiting, "reclaimers did not both observe the stale generation");
-      await rm(`${lockPath}.stale-${staleToken}`, { recursive: true });
-      await rm(`${lockPath}.released-${staleToken}`, { recursive: true });
-      await bounded(firstFetch, "first reclaimer did not enter fetch");
-      expect(sockets).toHaveLength(1);
-      const firstOwner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")) as {
-        token: string;
-      };
-      sockets[0]?.end("continue");
-      await bounded(secondFetch, "successor did not enter fetch after the first released");
-      expect(JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"))).not.toMatchObject({
-        token: firstOwner.token,
-      });
-      sockets[1]?.end("continue");
-      await Promise.all([first, second]);
-      expect(await Bun.file(lockPath).exists()).toBe(false);
-    } finally {
-      for (const socket of sockets) socket.destroy();
-      server.close();
-    }
-  }, 15_000);
-
-  test("an existing live lock causes bounded contention", async () => {
-    const world = await fixture();
-    const mirror = await ensureMirror(world.root, world.remote);
-    await mkdir(`${mirror.path}.lock`);
-    await writeFile(
-      join(`${mirror.path}.lock`, "owner.json"),
-      JSON.stringify({ pid: process.pid, timestamp: Date.now(), token: "b".repeat(24) }),
+    const worker = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "fetch-process.ts"), world.root, world.remote],
+      {
+        env: { ...process.env, BARRIER_SOCKET: socketPath },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
     );
-    expect(fetchMirror(world.root, world.remote, { lockTimeoutMs: 0 })).rejects.toMatchObject({
-      code: "mirror_locked",
+    await bounded(firstEntry.promise, "worker git child did not enter fetch");
+    const children = await Bun.file(`/proc/${worker.pid}/task/${worker.pid}/children`).text();
+    const wrapperPid = children.trim().split(/\s+/u).filter(Boolean).map(Number)[0];
+    if (wrapperPid === undefined) throw new Error("Git wrapper process not found");
+    process.kill(worker.pid, "SIGKILL");
+    process.kill(wrapperPid, "SIGKILL");
+    await worker.exited;
+    const waiting = Promise.withResolvers<void>();
+    const second = fetchMirror(world.root, world.remote, { onLockWait: waiting.resolve });
+    await bounded(waiting.promise, "second contender did not observe inherited lock");
+    expect(sockets).toHaveLength(1);
+    sockets[0]?.end("release");
+    await bounded(secondEntry.promise, "second git did not enter after inherited holder exited");
+    sockets[1]?.end("release");
+    await bounded(second, "second contender did not complete");
+    server.close();
+    for (const socket of sockets) socket.destroy();
+  });
+
+  test("missing advisory-lock capability returns a typed error", async () => {
+    const world = await fixture();
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "fetch-process.ts"), world.root, world.remote],
+      {
+        env: { ...process.env, OLW_LIBC_PATH: join(world.root, "missing-libc.so") },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    expect(code).toBe(2);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      code: "mirror_lock_unreadable",
     });
   });
 
-  test("reclaims a dead-pid lock", async () => {
+  test("legacy lock directories are preserved, ignored for acquisition, and reported", async () => {
     const world = await fixture();
-    const mirror = await ensureMirror(world.root, world.remote);
-    await mkdir(`${mirror.path}.lock`);
-    await writeFile(
-      join(`${mirror.path}.lock`, "owner.json"),
-      JSON.stringify({ pid: 2_147_483_647, timestamp: 0, token: "c".repeat(24) }),
-    );
-    await fetchMirror(world.root, world.remote, { lockTimeoutMs: 0 });
-    expect(await Bun.file(`${mirror.path}.lock`).exists()).toBe(false);
+    const path = mirrorPath(world.root, world.remote);
+    const legacy = `${path}.lock`;
+    await mkdir(legacy, { recursive: true });
+    await writeFile(join(legacy, "owner.json"), "legacy\n");
+    expect((await fetchMirror(world.root, world.remote)).path).toBe(path);
+    expect(await readFile(join(legacy, "owner.json"), "utf8")).toBe("legacy\n");
+    await expect(listMirrors(world.root)).rejects.toMatchObject({
+      name: "MirrorError",
+      code: "mirror_legacy_lock",
+      details: { path: legacy },
+    });
   });
 
   test("rejects credentials without putting them in an error", async () => {

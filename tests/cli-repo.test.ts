@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "../src/cli";
@@ -35,6 +35,38 @@ test("repo list is read-only and help describes repository commands", async () =
     value: {
       commands: expect.arrayContaining(["repo list", "repo fetch"]),
       options: { "repo list": "[--json]", "repo fetch": "--remote URL [--json]" },
+    },
+  });
+});
+
+test("repo list surfaces corrupt OLW mirror metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-cli-repo-"));
+  roots.push(root);
+  const mirror = join(root, ".omo/repos/corrupt.git");
+  await mkdir(mirror, { recursive: true });
+  await writeFile(join(mirror, "olw-mirror.json"), "{broken\n");
+
+  expect(await invoke(root, ["repo", "list"])).toMatchObject({
+    code: 2,
+    output: {
+      ok: false,
+      error: { code: "mirror_metadata_invalid" },
+    },
+  });
+});
+
+test("doctor surfaces corrupt OLW mirror metadata before runtime checks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-cli-repo-"));
+  roots.push(root);
+  const mirror = join(root, ".omo/repos/corrupt.git");
+  await mkdir(mirror, { recursive: true });
+  await writeFile(join(mirror, "olw-mirror.json"), "{broken\n");
+
+  expect(await invoke(root, ["doctor"])).toMatchObject({
+    code: 2,
+    output: {
+      ok: false,
+      error: { code: "mirror_metadata_invalid" },
     },
   });
 });

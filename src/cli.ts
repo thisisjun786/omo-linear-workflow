@@ -286,10 +286,11 @@ async function doctor(
 }
 
 async function doctorWithChains(root: string, herdrSocket?: string): Promise<Result<unknown>> {
+  const repositories = await listMirrors(root);
   const result = await doctor(root, herdrSocket);
   if (!result.ok) return result;
   const home = process.env["HOME"] ?? homedir();
-  const value = { ...result.value, repositories: await listMirrors(root), chains: {} as unknown };
+  const value = { ...result.value, repositories, chains: {} as unknown };
   try {
     const chains = await readChainReport({
       configPath: join(home, ".omo/omo.jsonc"),

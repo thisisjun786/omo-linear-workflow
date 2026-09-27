@@ -134,8 +134,8 @@ const createParentInputSchema = z.union([
 ]);
 export type CreateParentInput = z.infer<typeof createParentInputSchema>;
 export const MANAGER_DESIGNATION_ID = "manager";
-/** A reattach claim older than this is presumed abandoned by a crashed `olw manage`. */
-const MANAGER_REATTACH_LEASE_MS = 120_000;
+/** A launch claim older than this is presumed abandoned by a crashed owner. */
+const LAUNCH_CLAIM_LEASE_MS = 120_000;
 const managerSnapshot: ScopeSnapshot = {
   version: 1,
   source: "linear-export",
@@ -232,7 +232,7 @@ export type StatusBinding = Binding & {
 export interface CreationResult {
   readonly binding: Binding;
   readonly expectedModel: RoleModel;
-  readonly readiness: "ready";
+  readonly readiness: "ready" | "launching";
   readonly execution: "not_started" | "brief_accepted";
   readonly stage?: ChildStage;
   readonly mode?: ChildCreateMode;
@@ -922,7 +922,7 @@ export class Orchestrator {
           binding.id,
           binding.paneId,
           now,
-          new Date(Date.parse(now) - MANAGER_REATTACH_LEASE_MS).toISOString(),
+          new Date(Date.parse(now) - LAUNCH_CLAIM_LEASE_MS).toISOString(),
         ),
       );
       if (!claim.ok) return claim;
@@ -1390,6 +1390,7 @@ export class Orchestrator {
         let sessionAbsent = false;
         try {
           session = await this.#deps.attachBinding(binding);
+          if (binding.launchState !== "ready") await session.configure(modelForBinding(binding));
           const identity = await session.describe();
           if (!identity.ok) return identity;
           if (binding.launchState === "ready" && !matchesRuntime(binding, identity.value))
@@ -1408,13 +1409,30 @@ export class Orchestrator {
         if (!sessionAbsent) {
           if (binding.launchState === "ready" && binding.initialization.state === "accepted")
             return ok(this.#creationResult(binding));
-          const provisioning = this.#withRegistry((registry) =>
-            registry.setLaunchState(binding.id, "provisioning"),
+          const identitySession = await this.#deps.attachBinding(binding);
+          let identity: Result<import("./core/contracts").RuntimeIdentity>;
+          try {
+            identity = await identitySession.describe();
+          } finally {
+            await identitySession.close();
+          }
+          if (!identity.ok) return identity;
+          const intent = this.#withRegistry((registry) =>
+            registry.successorLaunchIntent(binding.id),
           );
-          if (!provisioning.ok) return provisioning;
-          const activated = await this.#verifyAndActivate(provisioning.value);
-          if (!activated.ok) return activated;
-          const initialized = await this.#initialize(activated.value, snapshot);
+          if (!intent.ok) return intent;
+          if (intent.value === null || intent.value.state !== "uncertain")
+            return failure("invalid_transition", "Execute recovery is not reconcilable");
+          const recovered = this.#withRegistry((registry) =>
+            registry.reconcileSuccessorLaunch(
+              binding.id,
+              intent.value?.attemptId ?? "",
+              "uncertain",
+              identity.value,
+            ),
+          );
+          if (!recovered.ok) return recovered;
+          const initialized = await this.#initialize(recovered.value, snapshot);
           return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
         }
         if (hasLiveTui(pane))
@@ -1432,18 +1450,111 @@ export class Orchestrator {
     } finally {
       herdr.close();
     }
-    return this.#launchSuccessor(binding, snapshot, handoff);
+    const now = this.#deps.now();
+    const claim = this.#withRegistry((registry) =>
+      registry.beginSuccessorLaunch(
+        binding.id,
+        binding.paneId,
+        now,
+        new Date(Date.parse(now) - LAUNCH_CLAIM_LEASE_MS).toISOString(),
+      ),
+    );
+    if (!claim.ok) return claim;
+    if (!claim.value.claimed) {
+      if (claim.value.state === "uncertain")
+        return failure(
+          "recovery_uncertain",
+          "Execute launch was dispatched but its outcome is uncertain; inspect before retrying",
+          { bindingId: binding.id },
+        );
+      return ok({
+        ...this.#creationResult(claim.value.binding),
+        readiness: "launching",
+        execution: "not_started",
+      });
+    }
+    return this.#launchSuccessor(claim.value.binding, snapshot, handoff, claim.value.token);
   }
 
   async #launchSuccessor(
     binding: Binding,
     snapshot: ScopeSnapshot,
     handoff: StageHandoff,
+    owner: string,
+  ): Promise<Result<CreationResult>> {
+    const result = await this.#runSuccessorLaunch(binding, snapshot, handoff, owner);
+    if (!result.ok) {
+      const settled = this.#withRegistry((registry) =>
+        registry.failSuccessorLaunch(binding.id, owner),
+      );
+      if (!settled.ok && settled.error.code !== "lease_lost") return settled;
+    }
+    return result;
+  }
+
+  async #runSuccessorLaunch(
+    binding: Binding,
+    snapshot: ScopeSnapshot,
+    handoff: StageHandoff,
+    owner: string,
   ): Promise<Result<CreationResult>> {
     const checkout = binding.checkout;
     if (checkout === null) return failure("invalid_stage", "Successor has no checkout");
+    const stillOwner = (): Result<boolean> =>
+      this.#withRegistry((registry) => registry.ownsSuccessorLaunch(binding.id, owner));
+    const leaseLost = () =>
+      failure<never>(
+        "runtime_unavailable",
+        "Another stage start call took over execute recovery; nothing was launched",
+        { reason: "lease_lost", bindingId: binding.id },
+      );
+    let dispatched = false;
     let managedPath: string;
     try {
+      const ownership = stillOwner();
+      if (!ownership.ok) return ownership;
+      if (!ownership.value) return leaseLost();
+      if (binding.paneId !== null) {
+        const observer = this.#deps.createHerdrClient(binding.herdrSocket);
+        let native: NativeSession | undefined;
+        try {
+          const snapshot = await observer.snapshot();
+          const pane = snapshot.panes.find(
+            (candidate) =>
+              candidate.paneId === binding.paneId && candidate.workspaceId === binding.workspaceId,
+          );
+          if (pane === undefined)
+            return failure("runtime_unavailable", "Successor pane is missing");
+          try {
+            native = await this.#deps.attachBinding(binding);
+            await native.configure(modelForBinding(binding));
+            const identity = await native.describe();
+            if (!identity.ok) return identity;
+            const recovered = this.#withRegistry((registry) =>
+              registry.reconcileSuccessorLaunch(binding.id, owner, "claimed", identity.value),
+            );
+            if (!recovered.ok) return recovered;
+            return ok(this.#creationResult(recovered.value));
+          } catch (cause) {
+            if (!(cause instanceof NativeSessionAbsentError))
+              return failure(
+                "runtime_unavailable",
+                "Could not inspect execute session under launch ownership",
+                messageOf(cause),
+              );
+          } finally {
+            await native?.close();
+          }
+          if (hasLiveTui(pane))
+            return failure(
+              "recovery_uncertain",
+              "Execute pane has a live TUI without an observable native session",
+              { bindingId: binding.id },
+            );
+        } finally {
+          observer.close();
+        }
+      }
       const artifact = await this.#deps.resolveHerdrArtifact(this.#root);
       managedPath = managedHerdrPath(artifact.artifactDir);
       await this.#deps.checkHostProfile?.(
@@ -1482,6 +1593,9 @@ export class Orchestrator {
       let current = binding;
       let paneId = current.paneId;
       if (paneId === null) {
+        const ownership = stillOwner();
+        if (!ownership.ok) return ownership;
+        if (!ownership.value) return leaseLost();
         const predecessor = this.#withRegistry((registry) => registry.stageOf(current.id));
         if (
           !predecessor.ok ||
@@ -1496,14 +1610,14 @@ export class Orchestrator {
         if (workspaceId === null) throw new Error("Successor workspace is missing");
         paneId = (await herdr.createTab(workspaceId, checkout.path, "execute")).rootPaneId;
         const provisioned = this.#withRegistry((registry) =>
-          registry.provision(current.id, workspaceId, paneId ?? ""),
+          registry.provisionSuccessorLaunch(current.id, owner, workspaceId, paneId ?? ""),
         );
         if (!provisioned.ok) return provisioned;
         current = provisioned.value;
       }
       if (current.launchState !== "provisioning") {
         const resumed = this.#withRegistry((registry) =>
-          registry.setLaunchState(current.id, "provisioning"),
+          registry.prepareSuccessorLaunch(current.id, owner),
         );
         if (!resumed.ok) return resumed;
         current = resumed.value;
@@ -1528,7 +1642,7 @@ export class Orchestrator {
           { mode: 0o600, flag: "wx" },
         );
         const observed = this.#withRegistry((registry) =>
-          registry.observeSession(current.id, seedPath ?? ""),
+          registry.observeSuccessorSession(current.id, owner, seedPath ?? ""),
         );
         if (!observed.ok) return observed;
         current = observed.value;
@@ -1541,6 +1655,12 @@ export class Orchestrator {
         (cause: unknown) => readySignal.reject(cause),
       );
       const label = roleLabel(current.assignment, snapshot, current.id);
+      const dispatch = this.#withRegistry((registry) =>
+        registry.dispatchSuccessorLaunch(current.id, owner),
+      );
+      if (!dispatch.ok) return dispatch.error.code === "lease_lost" ? leaseLost() : dispatch;
+      current = dispatch.value;
+      dispatched = true;
       await herdr.run(
         paneId,
         [
@@ -1577,24 +1697,32 @@ export class Orchestrator {
         const received = await outcome;
         if (!received.ok) throw received.reason;
         const observed = this.#withRegistry((registry) =>
-          registry.observeSession(current.id, received.path),
+          registry.observeSuccessorSession(current.id, owner, received.path),
         );
         if (!observed.ok) return observed;
         current = observed.value;
       } finally {
         clearTimeout(timeout);
       }
-      const activated = await this.#verifyAndActivate(current);
+      const activated = await this.#verifyAndActivateSuccessor(current, owner);
       if (!activated.ok) return activated;
       const initialized = await this.#initialize(activated.value, snapshot);
-      return initialized.ok ? ok(this.#creationResult(initialized.value)) : initialized;
+      if (!initialized.ok) {
+        this.#withRegistry((registry) =>
+          registry.finishSuccessorLaunch(binding.id, owner, "uncertain"),
+        );
+        return initialized;
+      }
+      const finished = this.#withRegistry((registry) =>
+        registry.finishSuccessorLaunch(binding.id, owner, "ready"),
+      );
+      return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
     } catch (cause) {
-      const current = this.#binding(binding.id);
-      if (current.ok && current.value.launchState !== "reserved")
-        this.#withRegistry((registry) => registry.setLaunchState(binding.id, "uncertain"));
       return failure(
         "runtime_unavailable",
-        "Successor launch incomplete; retry stage start",
+        dispatched
+          ? "Execute launch outcome is uncertain; inspect before retrying"
+          : "Successor launch failed before dispatch; retry stage start",
         messageOf(cause),
       );
     } finally {
@@ -2394,6 +2522,55 @@ export class Orchestrator {
             );
             continue;
           }
+          const launchIntent = this.#withRegistry((registry) =>
+            registry.successorLaunchIntent(binding.id),
+          );
+          if (!launchIntent.ok) {
+            issues.push({ bindingId: binding.id, ...launchIntent.error });
+            continue;
+          }
+          if (launchIntent.value?.state === "uncertain") {
+            let session: NativeSession | undefined;
+            try {
+              session = await this.#deps.attachBinding(binding);
+              await session.configure(modelForBinding(binding));
+              const identity = await session.describe();
+              if (!identity.ok) {
+                issues.push({ bindingId: binding.id, ...identity.error });
+                continue;
+              }
+              const settled = this.#withRegistry((registry) =>
+                registry.reconcileSuccessorLaunch(
+                  binding.id,
+                  launchIntent.value?.attemptId ?? "",
+                  "uncertain",
+                  identity.value,
+                ),
+              );
+              if (!settled.ok) {
+                issues.push({ bindingId: binding.id, ...settled.error });
+                continue;
+              }
+              const context = await this.#context(settled.value);
+              if (!context.ok) {
+                issues.push({ bindingId: binding.id, ...context.error });
+                continue;
+              }
+              const initialized = await this.#initialize(settled.value, context.value.snapshot);
+              if (!initialized.ok) issues.push({ bindingId: binding.id, ...initialized.error });
+              else observed += 1;
+              continue;
+            } catch (cause) {
+              issues.push({
+                bindingId: binding.id,
+                code: "runtime_unavailable",
+                message: messageOf(cause),
+              });
+              continue;
+            } finally {
+              await session?.close();
+            }
+          }
           if (binding.launchState !== "provisioning") {
             const resumed = this.#withRegistry((registry) =>
               registry.setLaunchState(binding.id, "provisioning"),
@@ -2500,7 +2677,7 @@ export class Orchestrator {
         ),
       );
       if (!reserved.ok) return reserved;
-      return this.#launchSuccessor(reserved.value, snapshot, {
+      return this.#resumeSuccessor(reserved.value, snapshot, {
         planPath: target.successor.planPath,
         head: target.successor.head,
         planSha256: "",
@@ -2695,6 +2872,31 @@ export class Orchestrator {
       stopReadiness?.();
       stop?.();
       herdr.close();
+    }
+  }
+
+  async #verifyAndActivateSuccessor(binding: Binding, owner: string): Promise<Result<Binding>> {
+    let session: NativeSession | undefined;
+    try {
+      session = await this.#deps.attachBinding(binding);
+      await session.configure(modelForBinding(binding));
+      const identity = await session.describe();
+      if (!identity.ok) return identity;
+      if (identity.value.extensionProtocol !== 2)
+        return failure("runtime_unavailable", "Native host protocol is incompatible", {
+          reason: "host_profile_mismatch",
+        });
+      return this.#withRegistry((registry) =>
+        registry.activateSuccessorLaunch(binding.id, owner, identity.value),
+      );
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Could not verify native runtime identity",
+        messageOf(cause),
+      );
+    } finally {
+      await session?.close();
     }
   }
 

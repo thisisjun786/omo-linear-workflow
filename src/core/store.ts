@@ -22,6 +22,8 @@ import type {
   StageHandoff,
   StageLineage,
   StageRecord,
+  SuccessorLaunchClaim,
+  SuccessorLaunchIntent,
 } from "./contracts";
 import { createDeliveryAttempts } from "./delivery-attempts";
 import { canRetryDelivery, initializationMessageId, matchesRuntime } from "./policy";
@@ -165,6 +167,18 @@ export function openRegistry(
     claimed_at TEXT NOT NULL,
     owner TEXT NOT NULL
   )`);
+    db.run(`CREATE TABLE IF NOT EXISTS successor_launch (
+    binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+    state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
+    claimed_at TEXT NOT NULL,
+    owner TEXT NOT NULL
+  )`);
+    const successorColumns = db
+      .query<{ readonly name: string }, []>("PRAGMA table_info(successor_launch)")
+      .all();
+    if (!successorColumns.some((column) => column.name === "state")) {
+      db.run("ALTER TABLE successor_launch ADD COLUMN state TEXT NOT NULL DEFAULT 'claimed'");
+    }
     db.run(`CREATE TABLE IF NOT EXISTS deliveries (
     message_id TEXT PRIMARY KEY,
     envelope_json TEXT NOT NULL,
@@ -695,6 +709,272 @@ export function openRegistry(
     } catch (cause) {
       return error("storage_error", "Could not release manager reattachment", messageOf(cause));
     }
+  }
+
+  function successorLaunchClaim(id: string): {
+    readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
+    readonly claimed_at: string;
+    readonly owner: string;
+  } | null {
+    return db
+      .query<
+        {
+          readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
+          readonly claimed_at: string;
+          readonly owner: string;
+        },
+        [string]
+      >("SELECT state, claimed_at, owner FROM successor_launch WHERE binding_id = ?")
+      .get(id);
+  }
+
+  function beginSuccessorLaunch(
+    id: string,
+    expectedPaneId: string | null,
+    claimedAt: string,
+    staleBefore: string,
+  ): Result<SuccessorLaunchClaim> {
+    return transaction<SuccessorLaunchClaim>(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const stage = lineage.get(id);
+      if (binding.value.assignment.role !== "child" || stage?.stage !== "execute")
+        return error("invalid_stage", "Only an execute successor can be launched");
+      const held = successorLaunchClaim(id);
+      if (binding.value.paneId !== expectedPaneId)
+        return ok({
+          claimed: false,
+          binding: binding.value,
+          state: held?.state ?? "claimed",
+        });
+      if (
+        held !== null &&
+        held.state !== "ready" &&
+        (held.state !== "claimed" || held.claimed_at >= staleBefore)
+      )
+        return ok({ claimed: false, binding: binding.value, state: held.state });
+      const token = randomUUID();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES (?, 'claimed', ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state = 'claimed', claimed_at = excluded.claimed_at, owner = excluded.owner",
+      ).run(id, claimedAt, token);
+      return ok({ claimed: true, binding: binding.value, token });
+    });
+  }
+
+  function successorLaunchIntent(id: string): Result<SuccessorLaunchIntent | null> {
+    try {
+      const held = successorLaunchClaim(id);
+      return ok(held === null ? null : { attemptId: held.owner, state: held.state });
+    } catch (cause) {
+      return error("storage_error", "Could not read successor launch intent", messageOf(cause));
+    }
+  }
+
+  function ownsSuccessorLaunch(id: string, token: string): Result<boolean> {
+    try {
+      return ok(successorLaunchClaim(id)?.owner === token);
+    } catch (cause) {
+      return error("storage_error", "Could not read successor launch claim", messageOf(cause));
+    }
+  }
+
+  function successorOwner(id: string, token: string, state?: "claimed" | "dispatching") {
+    const held = successorLaunchClaim(id);
+    return held !== null && held.owner === token && (state === undefined || held.state === state);
+  }
+
+  function successorMutation(
+    id: string,
+    token: string,
+    operation: (binding: Binding) => Result<Binding>,
+    state?: "claimed" | "dispatching",
+  ): Result<Binding> {
+    return transaction(() => {
+      if (!successorOwner(id, token, state))
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      const binding = get(id);
+      return binding.ok ? operation(binding.value) : binding;
+    });
+  }
+
+  function provisionSuccessorLaunch(
+    id: string,
+    token: string,
+    workspaceId: string,
+    paneId: string,
+  ): Result<Binding> {
+    if (workspaceId.length === 0 || paneId.length === 0)
+      return error("invalid_input", "Workspace and pane IDs are required");
+    return successorMutation(
+      id,
+      token,
+      (binding) =>
+        binding.launchState === "reserved"
+          ? saveBinding({ ...binding, workspaceId, paneId, launchState: "provisioning" })
+          : error("invalid_transition", "Only a reserved binding can be provisioned"),
+      "claimed",
+    );
+  }
+
+  function prepareSuccessorLaunch(id: string, token: string): Result<Binding> {
+    return successorMutation(
+      id,
+      token,
+      (binding) =>
+        binding.launchState === "closed" || binding.launchState === "closing"
+          ? error("invalid_transition", "A closing binding cannot be reopened")
+          : saveBinding({ ...binding, launchState: "provisioning" }),
+      "claimed",
+    );
+  }
+
+  function observeSuccessorSession(
+    id: string,
+    token: string,
+    sessionPath: string,
+  ): Result<Binding> {
+    if (sessionPath.length === 0) return error("invalid_input", "Session path is required");
+    return successorMutation(id, token, (binding) => {
+      if (binding.launchState !== "provisioning")
+        return error("invalid_transition", "Session observation requires provisioning");
+      if (binding.sessionPath !== null && binding.sessionPath !== sessionPath)
+        return error("identity_conflict", "Observed session path is immutable");
+      return saveBinding({ ...binding, sessionPath });
+    });
+  }
+
+  function activateSuccessorLaunch(
+    id: string,
+    token: string,
+    identityValue: RuntimeIdentity,
+  ): Result<Binding> {
+    const identity = runtimeIdentitySchema.safeParse(identityValue);
+    if (!identity.success)
+      return error("invalid_input", "Runtime identity is invalid", identity.error.issues);
+    return successorMutation(id, token, (binding) => {
+      if (
+        binding.launchState !== "provisioning" ||
+        binding.sessionPath === null ||
+        binding.workspaceId === null ||
+        binding.paneId === null
+      )
+        return error("invalid_transition", "Activation requires an observed provisioning session");
+      if (!matchesRuntime(binding, identity.data))
+        return error("identity_mismatch", "Runtime identity does not match the reserved role");
+      return saveBinding({
+        ...binding,
+        launchState: binding.initialization.state === "accepted" ? "ready" : "initializing",
+      });
+    });
+  }
+
+  function dispatchSuccessorLaunch(id: string, token: string): Result<Binding> {
+    return transaction(() => {
+      if (!successorOwner(id, token, "claimed"))
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      db.query(
+        "UPDATE successor_launch SET state = 'dispatching' WHERE binding_id = ? AND owner = ? AND state = 'claimed'",
+      ).run(id, token);
+      return get(id);
+    });
+  }
+
+  function reconcileSuccessorLaunch(
+    id: string,
+    attemptId: string,
+    expectedState: "claimed" | "uncertain",
+    identityValue: RuntimeIdentity,
+  ): Result<Binding> {
+    const identity = runtimeIdentitySchema.safeParse(identityValue);
+    if (!identity.success)
+      return error("invalid_input", "Runtime identity is invalid", identity.error.issues);
+    return transaction(() => {
+      const held = successorLaunchClaim(id);
+      if (held === null || held.owner !== attemptId || held.state !== expectedState)
+        return error("lease_lost", "Execute recovery attempt changed during observation");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (!matchesRuntime(binding.value, identity.data))
+        return error("identity_mismatch", "Runtime identity does not match the reserved role", {
+          binding: binding.value,
+          identity: identity.data,
+        });
+      const saved = saveBinding({
+        ...binding.value,
+        launchState: binding.value.initialization.state === "accepted" ? "ready" : "initializing",
+      });
+      if (!saved.ok) return saved;
+      db.query(
+        "UPDATE successor_launch SET state = 'ready' WHERE binding_id = ? AND owner = ? AND state = ?",
+      ).run(id, attemptId, expectedState);
+      return saved;
+    });
+  }
+
+  function failSuccessorLaunch(id: string, token: string): Result<Binding> {
+    return transaction(() => {
+      const held = successorLaunchClaim(id);
+      if (held === null || held.owner !== token)
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (held.state === "claimed") {
+        db.query("DELETE FROM successor_launch WHERE binding_id = ? AND owner = ?").run(id, token);
+        return binding;
+      }
+      if (held.state === "dispatching") {
+        const saved =
+          binding.value.launchState === "reserved"
+            ? binding
+            : saveBinding({ ...binding.value, launchState: "uncertain" });
+        if (!saved.ok) return saved;
+        db.query(
+          "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
+        ).run(id, token);
+        return saved;
+      }
+      return error("invalid_transition", "Execute recovery is already settled");
+    });
+  }
+
+  function releaseSuccessorLaunch(id: string, token: string): Result<boolean> {
+    return transaction(() => {
+      const released = db
+        .query(
+          "DELETE FROM successor_launch WHERE binding_id = ? AND owner = ? AND state = 'claimed'",
+        )
+        .run(id, token);
+      return ok(released.changes === 1);
+    });
+  }
+
+  function finishSuccessorLaunch(
+    id: string,
+    token: string,
+    state: "ready" | "uncertain",
+  ): Result<Binding> {
+    return transaction(() => {
+      if (!successorOwner(id, token))
+        return error("lease_lost", "Execute recovery is owned by another caller");
+      const held = successorLaunchClaim(id);
+      if (held?.state !== "claimed" && held?.state !== "dispatching")
+        return error("invalid_transition", "Execute recovery is already settled");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const saved =
+        state === "uncertain" && binding.value.launchState !== "reserved"
+          ? saveBinding({ ...binding.value, launchState: "uncertain" })
+          : state === "ready" && binding.value.initialization.state === "accepted"
+            ? saveBinding({ ...binding.value, launchState: "ready" })
+            : binding;
+      if (!saved.ok) return saved;
+      db.query("UPDATE successor_launch SET state = ? WHERE binding_id = ? AND owner = ?").run(
+        state,
+        id,
+        token,
+      );
+      return saved;
+    });
   }
 
   function activate(id: string, identityValue: RuntimeIdentity): Result<Binding> {
@@ -1705,6 +1985,18 @@ export function openRegistry(
     reattachPending,
     releaseReattach,
     finishReattach,
+    beginSuccessorLaunch,
+    successorLaunchIntent,
+    ownsSuccessorLaunch,
+    provisionSuccessorLaunch,
+    prepareSuccessorLaunch,
+    observeSuccessorSession,
+    activateSuccessorLaunch,
+    dispatchSuccessorLaunch,
+    reconcileSuccessorLaunch,
+    failSuccessorLaunch,
+    releaseSuccessorLaunch,
+    finishSuccessorLaunch,
     activate,
     setLaunchState,
     setContactState,

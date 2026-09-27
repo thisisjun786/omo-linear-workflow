@@ -133,6 +133,19 @@ export type ReattachClaim =
   | { readonly claimed: false; readonly binding: Binding }
   /** `token` fences this caller: every later step compares it, so an expired owner cannot act. */
   | { readonly claimed: true; readonly binding: Binding; readonly token: string };
+export type SuccessorLaunchIntentState = "claimed" | "dispatching" | "ready" | "uncertain";
+export interface SuccessorLaunchIntent {
+  readonly attemptId: string;
+  readonly state: SuccessorLaunchIntentState;
+}
+export type SuccessorLaunchClaim =
+  | {
+      readonly claimed: false;
+      readonly binding: Binding;
+      readonly state: SuccessorLaunchIntentState;
+    }
+  /** `token` fences every execute-stage launch mutation and side effect for this caller. */
+  | { readonly claimed: true; readonly binding: Binding; readonly token: string };
 export interface InitializationClaim {
   readonly disposition: "new" | "replay" | "in_progress";
   readonly binding: Binding;
@@ -312,6 +325,40 @@ export interface Registry {
   releaseReattach(id: string, token: string): Result<boolean>;
   /** Clear the claim once its TUI is verified; false if `token` no longer owns it. */
   finishReattach(id: string, token: string): Result<boolean>;
+  /** Claim exclusive ownership of execute-stage recovery before any launch side effect. */
+  beginSuccessorLaunch(
+    id: string,
+    expectedPaneId: string | null,
+    claimedAt: string,
+    staleBefore: string,
+  ): Result<SuccessorLaunchClaim>;
+  ownsSuccessorLaunch(id: string, token: string): Result<boolean>;
+  /** Token-fenced pane provisioning and launch-state mutation for a claimed recovery. */
+  provisionSuccessorLaunch(
+    id: string,
+    token: string,
+    workspaceId: string,
+    paneId: string,
+  ): Result<Binding>;
+  prepareSuccessorLaunch(id: string, token: string): Result<Binding>;
+  observeSuccessorSession(id: string, token: string, sessionPath: string): Result<Binding>;
+  activateSuccessorLaunch(id: string, token: string, identity: RuntimeIdentity): Result<Binding>;
+  /** Record dispatch before herdr.run; dispatching can never be taken over by elapsed time. */
+  dispatchSuccessorLaunch(id: string, token: string): Result<Binding>;
+  successorLaunchIntent(id: string): Result<SuccessorLaunchIntent | null>;
+  /** Settle only the exact attempt/state whose native session the caller observed. */
+  reconcileSuccessorLaunch(
+    id: string,
+    attemptId: string,
+    expectedState: "claimed" | "uncertain",
+    identity: RuntimeIdentity,
+  ): Result<Binding>;
+  /** Settle a failed owner: claimed is deleted; dispatching becomes uncertain. */
+  failSuccessorLaunch(id: string, token: string): Result<Binding>;
+  /** Only a proven pre-dispatch failure may return the intent to none. */
+  releaseSuccessorLaunch(id: string, token: string): Result<boolean>;
+  /** Settle a claimed/dispatching attempt without deleting its durable result. */
+  finishSuccessorLaunch(id: string, token: string, state: "ready" | "uncertain"): Result<Binding>;
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;
   setLaunchState(id: string, state: Binding["launchState"]): Result<Binding>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;

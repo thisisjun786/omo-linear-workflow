@@ -49,7 +49,10 @@ test.each(["a/secret", "a/b/secret"])(
     const w = await fixture(target);
     const deadline = AbortSignal.timeout(5_000);
     const writerReady = open(w.source, constants.O_WRONLY, 0o600);
-    const initialized = initializeCheckout(w.root, w.checkout);
+    const initialized = initializeCheckout(w.root, w.checkout).then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     const writer = await Promise.race([
       writerReady,
       new Promise<never>((_, reject) =>
@@ -62,7 +65,9 @@ test.each(["a/secret", "a/b/secret"])(
     await symlink(w.outside, join(w.checkoutPath, "a"));
     await writer.writeFile("RACE_FIXTURE_PRIVATE_BYTES");
     await writer.close();
-    await expect(initialized).rejects.toMatchObject({ code: "local_file_target_unsafe" });
+    const outcome = await initialized;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toMatchObject({ code: "local_file_target_unsafe" });
     expect(await Bun.file(join(w.outside, "secret")).exists()).toBe(false);
     expect(await Bun.file(join(w.outside, "b")).exists()).toBe(false);
     expect(JSON.parse(await readFile(w.receiptPath, "utf8"))).toMatchObject({ copies: [] });

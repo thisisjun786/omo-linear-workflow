@@ -192,8 +192,36 @@ function deliveryOutcome(result: Result<unknown>): Result<unknown> {
   };
 }
 
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function humanError(result: Result<unknown>): string | undefined {
+  if (result.ok) return undefined;
+  const { code, message } = result.error;
+  if (code === "herdr_required") return `OLW needs a Herdr pane. ${message}`;
+  if (code === "manager_busy") return `The OLW manager is busy. ${message}`;
+  if (code === "manager_unavailable") return `The OLW manager is unavailable. ${message}`;
+  const details = z
+    .object({
+      reason: z.literal("host_profile_mismatch"),
+      sessions: z.object({ total: z.number() }),
+      statusError: z.string().optional(),
+      recovery: z.object({ argv: z.array(z.string()) }),
+    })
+    .safeParse(result.error.details);
+  if (!details.success) return undefined;
+  const command = details.data.recovery.argv.map(shellArg).join(" ");
+  if (details.data.statusError !== undefined)
+    return `The running OMO host is from an older OLW generation, and its session status could not be read. OLW did not hand it off. When every host session is finished, run:\n${command}`;
+  const count = details.data.sessions.total;
+  return `The running OMO host is from an older OLW generation with ${count} session${count === 1 ? "" : "s"} attached. OLW did not hand it off. When they are finished, run:\n${command}`;
+}
+
 function print(result: Result<unknown>, json: boolean): void {
-  if (json || !result.ok) process.stdout.write(`${JSON.stringify(result)}\n`);
+  const human = !json && process.stdout.isTTY ? humanError(result) : undefined;
+  if (human !== undefined) process.stdout.write(`${human}\n`);
+  else if (json || !result.ok) process.stdout.write(`${JSON.stringify(result)}\n`);
   else process.stdout.write(`${JSON.stringify(result.value, null, 2)}\n`);
 }
 

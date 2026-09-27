@@ -12,6 +12,7 @@ import { openRegistry } from "../src/core/store";
 import { resolveHerdrArtifact } from "../src/herdr/artifact";
 import { createHerdrClient } from "../src/herdr/client";
 import { planPaneExited } from "../src/orchestrator";
+import { autoHostHandoffQa } from "./qa-auto-host-handoff";
 import { attach, idle } from "./qa-hierarchy";
 import { managerBusyNoticeQa, managerEntryQa } from "./qa-manager-entry";
 import { checkedQaCommand, prepareQaWorld } from "./qa-world";
@@ -19,6 +20,7 @@ import { checkedQaCommand, prepareQaWorld } from "./qa-world";
 export async function runOfficialHerdrQa(
   evidenceName = "lina-275-official-qa.json",
   entry = false,
+  autoHandoff = false,
 ): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const scratch = await mkdtemp(join(tmpdir(), "olw-official-"));
@@ -136,8 +138,14 @@ export async function runOfficialHerdrQa(
       await idle(client);
       return client;
     };
+    const handoffResult = autoHandoff ? await autoHostHandoffQa(world, herdr) : undefined;
+    if (handoffResult) evidence["autoHostHandoff"] = handoffResult;
     const entryResult = entry ? await managerEntryQa(world, herdr) : undefined;
     if (entryResult) evidence["managerEntry"] = entryResult.evidence;
+    if (autoHandoff) {
+      evidence["result"] = "PASS";
+      return;
+    }
     const manager =
       entryResult?.manager ??
       z.object({ binding: bindingSchema }).parse(await invoke(["manage"])).binding;
@@ -519,8 +527,15 @@ export async function runOfficialHerdrQa(
   if (failure) throw failure;
   console.log("OFFICIAL_HERDR_QA_PASS");
 }
-if (import.meta.main)
+if (import.meta.main) {
+  const autoHandoff = process.argv.includes("--auto-handoff");
   await runOfficialHerdrQa(
-    process.argv.includes("--entry") ? "qa-manager-entry.json" : "lina-275-official-qa.json",
+    autoHandoff
+      ? "qa-auto-host-handoff.json"
+      : process.argv.includes("--entry")
+        ? "qa-manager-entry.json"
+        : "lina-275-official-qa.json",
     process.argv.includes("--entry"),
+    autoHandoff,
   );
+}

@@ -61,6 +61,8 @@ async function world(agent = "omo") {
   const hooks: {
     failRun: boolean;
     hostCheck: (() => void) | undefined;
+    hostStatus: OrchestratorDependencies["readHostStatus"];
+    hostHandoffs: number;
     now: string;
     /** Awaited at createTab entry, before any tab exists. */
     beforeTab: (() => Promise<void>) | undefined;
@@ -72,6 +74,8 @@ async function world(agent = "omo") {
   } = {
     failRun: false,
     hostCheck: undefined,
+    hostStatus: undefined,
+    hostHandoffs: 0,
     now: "2026-09-26T00:00:00.000Z",
     beforeTab: undefined,
     beforeAttach: undefined,
@@ -196,6 +200,14 @@ async function world(agent = "omo") {
       kill() {},
     }),
     checkHostProfile: async () => hooks.hostCheck?.(),
+    readHostStatus: async (...args) => {
+      if (hooks.hostStatus === undefined) throw new Error("injected unreadable host status");
+      return hooks.hostStatus(...args);
+    },
+    handoffHost: async () => {
+      hooks.hostHandoffs += 1;
+      hooks.hostCheck = undefined;
+    },
     gitTip: (cwd, ref) => fixtureTip(root, "base-commit", cwd, ref),
     now: () => hooks.now,
     uuid: () => `id-${++sequence}`,
@@ -1734,7 +1746,14 @@ test("manage refuses an incompatible host before focusing or reattaching", async
       missingExtensions: [],
       missingCapabilities: ["olw_extension_protocol_2"],
       generation: 1,
-      sessions: { total: 1, worker: 0 },
+      sessions: {
+        total: 1,
+        interactive: 1,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
       actualProfile: null,
       recovery: { automatic: false, argv: ["omo", "host", "handoff"], env: {} },
     });
@@ -1754,11 +1773,188 @@ test("manage refuses an incompatible host before focusing or reattaching", async
   w.panes.delete(first.binding.paneId ?? "");
   expect(await w.orchestrator.manage()).toMatchObject(mismatch);
 
-  expect(checks).toBe(2);
+  expect(checks).toBe(4);
   expect(w.focused).toEqual([]);
   expect(w.tabs).toEqual([]);
   expect(w.runs).toHaveLength(1);
   expect(value(w.orchestrator.status())[0]?.paneId).toBe(first.binding.paneId);
+});
+
+test.each(["sessions", "unreadable"] as const)(
+  "bare entry keeps a mismatched host with %s and uses human TTY output unless --json is passed",
+  async (condition) => {
+    const w = await world();
+    const first = value(await w.orchestrator.manage()).binding;
+    const output = spyOn(process.stdout, "write").mockReturnValue(true);
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    w.hooks.hostCheck = () => {
+      throw new HostProfileMismatchError({
+        missingExtensions: [],
+        missingCapabilities: ["olw_extension_protocol_2"],
+        generation: 1,
+        sessions: {
+          total: 1,
+          interactive: 1,
+          worker: 0,
+          retained: 0,
+          foreign_attached: 0,
+          foreign_retained: 0,
+        },
+        actualProfile: null,
+        recovery: {
+          automatic: false,
+          argv: ["/fixture/omo", "host", "handoff", "--socket", "/fixture/socket"],
+          env: { XDG_CACHE_HOME: "/fixture/cache" },
+        },
+      });
+    };
+    w.hooks.hostStatus =
+      condition === "unreadable"
+        ? undefined
+        : async () => ({
+            reachable: true,
+            socket: "/fixture/socket",
+            generation: 1,
+            launchProfile: null,
+            sessions: {
+              total: 1,
+              interactive: 1,
+              worker: 0,
+              retained: 0,
+              foreign_attached: 0,
+              foreign_retained: 0,
+            },
+            env_keys: [],
+          });
+    try {
+      expect(await runCli(["--root", w.root, "manage"], w.deps)).toBe(3);
+      expect(w.hooks.hostHandoffs).toBe(0);
+      const human = String(output.mock.calls.at(-1)?.[0]);
+      expect(() => JSON.parse(human)).toThrow();
+      expect(human).toContain(condition === "sessions" ? "1 session" : "could not be read");
+      expect(human).toContain("/fixture/omo host handoff --socket /fixture/socket");
+      output.mockClear();
+      expect(await runCli(["--root", w.root, "manage", "--json"], w.deps)).toBe(3);
+      expect(JSON.parse(String(output.mock.calls.at(-1)?.[0]))).toMatchObject({
+        ok: false,
+        error: {
+          code: "runtime_unavailable",
+          details: { reason: "host_profile_mismatch" },
+        },
+      });
+      expect(
+        value(w.orchestrator.status()).find((binding) => binding.id === first.id),
+      ).toBeDefined();
+    } finally {
+      if (tty === undefined) delete (process.stdout as { isTTY?: boolean }).isTTY;
+      else Object.defineProperty(process.stdout, "isTTY", tty);
+      output.mockRestore();
+    }
+  },
+);
+
+test("bare entry hands off an idle mismatched host once and continues", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  const output = spyOn(process.stdout, "write").mockReturnValue(true);
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  w.hooks.hostCheck = () => {
+    throw new HostProfileMismatchError({
+      missingExtensions: ["old-extension"],
+      missingCapabilities: [],
+      generation: 1,
+      sessions: {
+        total: 0,
+        interactive: 0,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
+      actualProfile: null,
+      recovery: { automatic: false, argv: ["omo", "host", "handoff"], env: {} },
+    });
+  };
+  w.hooks.hostStatus = async () => ({
+    reachable: true,
+    socket: join(w.root, ".omo/state/omo.sock"),
+    generation: 1,
+    launchProfile: null,
+    sessions: {
+      total: 0,
+      interactive: 0,
+      worker: 0,
+      retained: 0,
+      foreign_attached: 0,
+      foreign_retained: 0,
+    },
+    env_keys: [],
+  });
+  try {
+    process.env["HERDR_ENV"] = "1";
+    process.env["HERDR_PANE_ID"] = "caller:p1";
+    expect(await runCli(["--root", w.root], w.deps)).toBe(0);
+    expect(w.hooks.hostHandoffs).toBe(1);
+    expect(w.runs).toHaveLength(1);
+  } finally {
+    output.mockRestore();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("concurrent manage calls perform exactly one idle-host handoff", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage()).binding;
+  w.panes.delete(first.paneId ?? "");
+  let mismatched = true;
+  w.hooks.hostCheck = () => {
+    if (!mismatched) return;
+    throw new HostProfileMismatchError({
+      missingExtensions: ["old-extension"],
+      missingCapabilities: [],
+      generation: 1,
+      sessions: {
+        total: 0,
+        interactive: 0,
+        worker: 0,
+        retained: 0,
+        foreign_attached: 0,
+        foreign_retained: 0,
+      },
+      actualProfile: null,
+      recovery: { automatic: false, argv: ["omo", "host", "handoff"], env: {} },
+    });
+  };
+  w.hooks.hostStatus = async () => ({
+    reachable: true,
+    socket: "/fixture/socket",
+    generation: 1,
+    launchProfile: null,
+    sessions: {
+      total: 0,
+      interactive: 0,
+      worker: 0,
+      retained: 0,
+      foreign_attached: 0,
+      foreign_retained: 0,
+    },
+    env_keys: [],
+  });
+  const orchestrator = new Orchestrator(w.root, "/fixture/herdr.sock", {
+    ...w.deps,
+    handoffHost: async () => {
+      w.hooks.hostHandoffs += 1;
+      mismatched = false;
+    },
+  });
+  const results = await Promise.all([orchestrator.manage(), orchestrator.manage()]);
+  expect(results.every((result) => result.ok)).toBe(true);
+  expect(w.hooks.hostHandoffs).toBe(1);
 });
 
 test("concurrent manage calls reattach a missing TUI exactly once", async () => {

@@ -30,7 +30,14 @@ async function fixture() {
     socket: join(root, ".omo/state/omo.sock"),
     generation: 4,
     launchProfile: { core: { session_runtime: "in-process", multi_session: true, extensions } },
-    sessions: { total: 3, worker: 1 },
+    sessions: {
+      total: 3,
+      interactive: 2,
+      worker: 1,
+      retained: 0,
+      foreign_attached: 0,
+      foreign_retained: 0,
+    },
     env_keys: [RUNTIME_CACHE_MARKER, "XDG_CACHE_HOME", EXTENSION_PROTOCOL_MARKER],
   };
   return { root, status };
@@ -56,7 +63,7 @@ test("rejects a running host missing the OLW extension without replacing its pro
     details: {
       missingExtensions: [join(root, "dist/extension/index.js")],
       generation: 4,
-      sessions: { total: 3, worker: 1 },
+      sessions: { total: 3, interactive: 2, worker: 1 },
       recovery: {
         automatic: false,
         argv: [

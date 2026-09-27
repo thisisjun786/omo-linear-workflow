@@ -22,7 +22,14 @@ const hostStatusSchema = z.object({
       }),
     })
     .nullable(),
-  sessions: z.object({ total: z.number(), worker: z.number() }),
+  sessions: z.object({
+    total: z.number(),
+    interactive: z.number(),
+    worker: z.number(),
+    retained: z.number(),
+    foreign_attached: z.number(),
+    foreign_retained: z.number(),
+  }),
   env_keys: z.array(z.string()).default([]),
 });
 export type HostStatus = z.infer<typeof hostStatusSchema>;
@@ -57,14 +64,14 @@ export class HostProfileMismatchError extends Error {
       readonly sessions: HostStatus["sessions"];
       readonly actualProfile: HostStatus["launchProfile"];
       readonly recovery: {
-        readonly automatic: false;
+        readonly automatic: boolean;
         readonly argv: readonly string[];
         readonly env: Readonly<Record<string, string>>;
       };
     },
   ) {
     super(
-      "Running host profile is incompatible; review its sessions before an explicit generation handoff",
+      "Running host profile is incompatible; OLW can hand off only after proving every session count is zero",
     );
   }
 }
@@ -83,7 +90,14 @@ export async function readHostStatus(
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<HostStatus> {
   const child = Bun.spawn(
-    [join(root, "node_modules/.bin/omo"), "host", "status", "--socket", socket],
+    [
+      join(root, "node_modules/.bin/omo"),
+      "host",
+      "status",
+      "--socket",
+      socket,
+      "--include-workers",
+    ],
     { cwd: root, env, stdout: "pipe", stderr: "pipe" },
   );
   const [code, stdout, stderr] = await Promise.all([
@@ -99,6 +113,25 @@ export async function readHostStatus(
 function isContained(root: string, candidate: string): boolean {
   const child = relative(root, candidate);
   return child !== "" && !child.startsWith("..") && !isAbsolute(child);
+}
+
+export async function handoffHost(
+  root: string,
+  recovery: HostProfileMismatchError["details"]["recovery"],
+): Promise<void> {
+  const child = Bun.spawn([...recovery.argv], {
+    cwd: root,
+    env: { ...process.env, ...recovery.env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (code !== 0)
+    throw new Error(`Native host handoff failed (${code}): ${stderr.trim() || stdout.trim()}`);
 }
 
 export async function createHostProfile(rootInput: string, status?: HostStatus): Promise<string> {
@@ -159,7 +192,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
         sessions: status.sessions,
         actualProfile: status.launchProfile,
         recovery: {
-          automatic: false,
+          automatic: status.sessions.total === 0,
           env: runtimeCacheEnvironment(root),
           argv: [
             join(root, "node_modules/.bin/omo"),

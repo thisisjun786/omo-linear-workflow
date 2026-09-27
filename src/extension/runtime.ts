@@ -166,6 +166,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly input: z.infer<typeof nativeSendInputSchema>;
     readonly userAnswer: boolean;
     readonly managerTarget?: Binding;
+    readonly noticeSender?: Binding;
     readonly admissionDeadline?: number;
     admissionFailure?: string;
     used: boolean;
@@ -634,17 +635,12 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     active.add("thread_send");
     port.setActiveTools([...active]);
     let details: unknown;
-    const managerNotice =
-      claim.target.assignment.role === "manager" &&
-      (envelope.kind === "report" || envelope.kind === "question");
+    // The claim transaction supplies sender data only for authorized manager notices.
+    const sender = claim.noticeSender;
+    const managerNotice = sender !== undefined;
     let message = JSON.stringify(envelope);
-    if (managerNotice) {
-      const sender = await lookup(ctx.sessionManager.getSessionId());
-      if (!sender.ok) return sender;
-      const project =
-        sender.value.assignment.role === "parent"
-          ? sender.value.assignment.projectId
-          : sender.value.id;
+    if (sender !== undefined) {
+      const project = sender.assignment.role === "parent" ? sender.assignment.projectId : sender.id;
       const summary =
         envelope.text.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim().slice(0, 100) ?? "";
       const command = envelope.kind === "report" ? "reports --all" : "questions";
@@ -692,7 +688,9 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           messageId: envelope.id,
           input,
           userAnswer,
-          ...(managerNotice ? { managerTarget: claim.target, admissionDeadline } : {}),
+          ...(sender === undefined
+            ? {}
+            : { managerTarget: claim.target, admissionDeadline, noticeSender: sender }),
           used: false,
         },
         async () => {
@@ -789,7 +787,15 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       toolName !== "request_user_input"
     )
       return undefined;
-    const sender = await lookup(ctx.sessionManager.getSessionId());
+    const permit = dispatch.getStore();
+    const claimedSender =
+      toolName === "thread_send" && permit?.senderSessionId === ctx.sessionManager.getSessionId()
+        ? permit.noticeSender
+        : undefined;
+    const sender =
+      claimedSender === undefined
+        ? await lookup(ctx.sessionManager.getSessionId())
+        : { ok: true as const, value: claimedSender };
     if (!sender.ok && sender.error.code === "not_found") return undefined;
     if (!sender.ok) return { block: true, reason: sender.error.message };
     if (toolName === "ask_user_question" || toolName === "request_user_input") {
@@ -804,7 +810,6 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     if (toolName === "thread_create") {
       return { block: true, reason: "Bound initiative roles cannot create native threads" };
     }
-    const permit = dispatch.getStore();
     if (
       permit === undefined ||
       permit.used ||

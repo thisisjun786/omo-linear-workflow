@@ -1651,6 +1651,15 @@ export function openRegistry(
       const target = authorize(senderSessionId, envelopeValue);
       if (!target.ok) return target;
       const parsed = envelopeSchema.parse(envelopeValue);
+      let notice: Pick<ClaimResult, "noticeSender"> = {};
+      if (
+        target.value.assignment.role === "manager" &&
+        (parsed.kind === "report" || parsed.kind === "question")
+      ) {
+        const sender = bySession(senderSessionId);
+        if (!sender.ok) return sender;
+        notice = { noticeSender: sender.value };
+      }
       const existingRow = deliveryById.get(parsed.id);
       if (existingRow !== null) {
         const existing = parseDelivery(existingRow);
@@ -1694,6 +1703,7 @@ export function openRegistry(
               attempts: [...history, next],
             },
             target: target.value,
+            ...notice,
             nativeKey,
           });
         }
@@ -1701,7 +1711,7 @@ export function openRegistry(
           existing.value.state === "accepted" || existing.value.state === "rejected"
             ? "replay"
             : "in_progress";
-        return ok({ disposition, record: existing.value, target: target.value });
+        return ok({ disposition, record: existing.value, target: target.value, ...notice });
       }
       const first: DeliveryAttempt = {
         number: 1,
@@ -1720,7 +1730,7 @@ export function openRegistry(
         "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, ?, NULL)",
       ).run(parsed.id, encoded(parsed), record.state);
       attempts.append(parsed.id, first);
-      return ok({ disposition: "new", record, target: target.value });
+      return ok({ disposition: "new", record, target: target.value, ...notice });
     });
   }
 

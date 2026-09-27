@@ -270,6 +270,8 @@ export interface ClaimResult {
   readonly disposition: "new" | "replay" | "in_progress";
   readonly record: DeliveryRecord;
   readonly target: Binding | null;
+  /** Sender snapshot read in the same transaction as manager-notice authorization. */
+  readonly noticeSender?: Binding | undefined;
   readonly nativeKey?: string | undefined;
 }
 export interface ReserveInput {

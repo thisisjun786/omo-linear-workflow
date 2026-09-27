@@ -263,6 +263,7 @@ export const claimResultSchema = z.strictObject({
   disposition: z.enum(["new", "replay", "in_progress"]),
   record: deliveryRecordSchema,
   target: bindingSchema.nullable(),
+  noticeSender: bindingSchema.optional(),
   nativeKey: text.optional(),
 });
 export const reserveInputSchema = z.strictObject({

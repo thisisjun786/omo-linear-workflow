@@ -35,6 +35,77 @@ test("reports defaults to posted user inbox; --all explicitly includes manager d
 });
 
 test.each(["report", "question"] as const)(
+  "manager %s carries authorized sender data through a failed lookup boundary and same-ID replay sends once",
+  async (kind) => {
+    await fixture(async ({ root, parent, digest }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager = linkReadyManager(registry, parent, root);
+        const harness = new Harness();
+        harness.receipt = {
+          kind: "ok",
+          thread_id: manager.durableSessionId,
+          message_seq: 1,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: "notice" },
+        };
+        registerInitiativeRuntime(harness, { root, hostRuntime: true });
+        await harness.start()(context(parent));
+        const exec = harness.exec.bind(harness);
+        let failedLookups = 0;
+        let authorizedClaims = 0;
+        let nativeAuthorizations = 0;
+        harness.exec = async (command, args, options) => {
+          const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
+          if (request.action === "lookup-session") {
+            failedLookups++;
+            return {
+              stdout: "",
+              stderr: "injected sender lookup worker failure",
+              code: 1,
+              killed: false,
+            };
+          }
+          const reply = await exec(command, args, options);
+          if (request.action === "claim") authorizedClaims++;
+          if (request.action === "authorize") nativeAuthorizations++;
+          return reply;
+        };
+        const message = {
+          ...envelope(
+            parent,
+            manager,
+            digest,
+            kind === "question" ? `question:${parent.id}:lookup-failure` : "report-lookup-failure",
+            kind,
+          ),
+          ...(kind === "question" ? { question: { questions: [], escalates: null } } : {}),
+        };
+        const send = harness.rpc("omo.initiative.send");
+        const first = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(first.state).toBe("accepted");
+        const replay = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(replay).toEqual(first);
+        expect(authorizedClaims).toBe(2);
+        expect(nativeAuthorizations).toBe(1);
+        // A failing secondary worker cannot strand the claim because it is never consulted.
+        expect(failedLookups).toBe(0);
+        expect(harness.executeCount).toBe(1);
+        expect(first.attempts).toMatchObject([
+          { number: 1, nativeKey: message.id, state: "accepted" },
+        ]);
+        expect(value(registry.delivery(message.id)).envelope).toEqual(message);
+        expect(
+          z.object({ idempotency_key: z.string() }).parse(harness.nativeInputs[0]).idempotency_key,
+        ).toBe(message.id);
+      } finally {
+        registry.close();
+      }
+    });
+  },
+);
+
+test.each(["report", "question"] as const)(
   "manager %s waits for idle, sends one-line notice and preserves its envelope",
   async (kind) => {
     await fixture(async ({ root, parent, digest }) => {

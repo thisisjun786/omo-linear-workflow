@@ -15,6 +15,46 @@ import { createRoleHerdrClient, registerRoleHerdrReporter } from "./herdr-report
 import { isManagerIdle, registerManagerIdle } from "./manager-idle";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
 
+const herdrRepublishProofSchema = z.object({
+  sessionId: z.string().min(1),
+  bindingId: z.string().min(1),
+  claimToken: z.string().min(1),
+});
+
+export function authorizeHerdrRepublish(
+  root: string,
+  data: unknown,
+  republish: (sessionId: string) => void,
+  now = Date.now(),
+) {
+  const parsed = herdrRepublishProofSchema.safeParse(data);
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      error: { code: "invalid_input", message: "Herdr republish proof is invalid" },
+    };
+  const dbPath = join(root, ".omo/state/registry.sqlite");
+  if (!existsSync(dbPath))
+    return {
+      ok: false as const,
+      error: { code: "herdr_republish_unauthorized", message: "Herdr republish proof is invalid" },
+    };
+  const registry = openRegistry(dbPath, { readonly: true });
+  try {
+    const authorized = registry.authorizeHerdrRepublish(
+      parsed.data.bindingId,
+      parsed.data.sessionId,
+      parsed.data.claimToken,
+      new Date(now - 120_000).toISOString(),
+    );
+    if (!authorized.ok) return authorized;
+    republish(authorized.value.durableSessionId);
+    return { ok: true as const };
+  } finally {
+    registry.close();
+  }
+}
+
 export function questionWaitWire(
   pi: Pick<ExtensionAPI, "events" | "appendEntry">,
 ): Pick<RuntimePort, "emitQuestionWait" | "appendQuestionWait"> {
@@ -76,11 +116,9 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
         });
       },
       onRepublish: (handler) => {
-        pi.rpc.handle("omo.initiative.herdr-republish", (data) => {
-          const parsed = z.object({ sessionId: z.string().min(1) }).parse(data);
-          handler(parsed.sessionId);
-          return { ok: true };
-        });
+        pi.rpc.handle("omo.initiative.herdr-republish", (data) =>
+          authorizeHerdrRepublish(root, data, handler),
+        );
       },
     },
     {

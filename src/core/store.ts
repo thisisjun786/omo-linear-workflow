@@ -207,6 +207,11 @@ export function openRegistry(
       db.run("ALTER TABLE manager_reattach ADD COLUMN owner_pid INTEGER");
     if (!reattachColumns.some((column) => column.name === "owner_starttime"))
       db.run("ALTER TABLE manager_reattach ADD COLUMN owner_starttime TEXT");
+    db.run(`CREATE TABLE IF NOT EXISTS manager_reattach_completed (
+    binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+    owner TEXT NOT NULL,
+    completed_at TEXT NOT NULL
+  )`);
     db.run(`CREATE TABLE IF NOT EXISTS successor_launch (
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
     state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
@@ -752,6 +757,7 @@ export function openRegistry(
   }
 
   function saveManagerClaim(id: string, token: string, claimedAt: string): void {
+    db.query("DELETE FROM manager_reattach_completed WHERE binding_id = ?").run(id);
     db.query(
       "INSERT INTO manager_reattach (binding_id, claimed_at, owner, owner_pid, owner_starttime) VALUES (?, ?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid, owner_starttime = excluded.owner_starttime",
     ).run(
@@ -835,14 +841,51 @@ export function openRegistry(
     }
   }
 
-  function finishReattach(id: string, token: string): Result<boolean> {
-    try {
+  function finishReattach(
+    id: string,
+    token: string,
+    completedAt = new Date().toISOString(),
+  ): Result<boolean> {
+    return transaction(() => {
       const finished = db
         .query("DELETE FROM manager_reattach WHERE binding_id = ? AND owner = ?")
         .run(id, token);
-      return ok(finished.changes === 1);
+      if (finished.changes !== 1) return ok(false);
+      db.query(
+        "INSERT INTO manager_reattach_completed (binding_id, owner, completed_at) VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET owner = excluded.owner, completed_at = excluded.completed_at",
+      ).run(id, token, completedAt);
+      return ok(true);
+    });
+  }
+
+  function authorizeHerdrRepublish(
+    bindingId: string,
+    sessionId: string,
+    claimToken: string,
+    completedAfter: string,
+  ): Result<Binding> {
+    try {
+      const binding = get(bindingId);
+      if (!binding.ok)
+        return binding.error.code === "not_found"
+          ? error("herdr_republish_unauthorized", "Herdr republish proof is invalid")
+          : binding;
+      if (
+        binding.value.durableSessionId !== sessionId ||
+        binding.value.launchState === "closing" ||
+        binding.value.launchState === "closed"
+      )
+        return error("herdr_republish_unauthorized", "Herdr republish proof is invalid");
+      const proof = db
+        .query<{ readonly owner: string; readonly completed_at: string }, [string]>(
+          "SELECT owner, completed_at FROM manager_reattach_completed WHERE binding_id = ?",
+        )
+        .get(bindingId);
+      return proof?.owner === claimToken && proof.completed_at >= completedAfter
+        ? binding
+        : error("herdr_republish_unauthorized", "Herdr republish proof is invalid");
     } catch (cause) {
-      return error("storage_error", "Could not release manager reattachment", messageOf(cause));
+      return error("storage_error", "Could not verify Herdr republish proof", messageOf(cause));
     }
   }
 
@@ -2144,6 +2187,7 @@ export function openRegistry(
     reattachPending,
     releaseReattach,
     finishReattach,
+    authorizeHerdrRepublish,
     beginSuccessorLaunch,
     successorLaunchIntent,
     ownsSuccessorLaunch,

@@ -313,7 +313,7 @@ export interface OrchestratorDependencies {
   readonly verifyHostAfterHandoff?: (root: string, status: HostStatus) => Promise<void>;
   readonly withHostHandoffLock?: <T>(path: string, operation: () => Promise<T>) => Promise<T>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
-  readonly republishHerdrState?: (binding: Binding) => Promise<void>;
+  readonly republishHerdrState?: (binding: Binding, claimToken: string) => Promise<void>;
   readonly launchHere?: (
     argv: readonly string[],
     cwd: string,
@@ -546,7 +546,7 @@ async function defaultTerminateBinding(binding: Binding): Promise<void> {
   }
 }
 
-async function republishHerdrState(binding: Binding): Promise<void> {
+async function republishHerdrState(binding: Binding, claimToken: string): Promise<void> {
   if (binding.sessionPath === null) return;
   const client = new RpcClient({ socketPath: binding.omoSocket });
   await client.start();
@@ -560,6 +560,8 @@ async function republishHerdrState(binding: Binding): Promise<void> {
       throw new Error("Could not attach retained manager session for Herdr republish");
     await client.requestExtension("omo.initiative.herdr-republish", {
       sessionId: binding.durableSessionId,
+      bindingId: binding.id,
+      claimToken,
     });
   } finally {
     await client.stop();
@@ -1204,7 +1206,9 @@ export class Orchestrator {
       const stillOwner = (): Result<boolean> =>
         this.#withRegistry((registry) => registry.ownsReattach(binding.id, owner));
       const finish = (): Result<boolean> =>
-        this.#withRegistry((registry) => registry.finishReattach(binding.id, owner));
+        this.#withRegistry((registry) =>
+          registry.finishReattach(binding.id, owner, this.#deps.now()),
+        );
       if (tuiRunning) {
         // An interrupted attempt's TUI did come up in the recorded pane; adopt it, launch nothing.
         const verified = await this.#whileForeground(this.#verifyManagerSession(binding), here);
@@ -1289,7 +1293,7 @@ export class Orchestrator {
       if (!finished.value) return leaseLost();
       if (here !== undefined) here.settled = true;
       try {
-        await this.#deps.republishHerdrState?.(moved.value);
+        await this.#deps.republishHerdrState?.(moved.value, owner);
       } catch (cause) {
         console.debug(`Herdr state republish failed: ${messageOf(cause)}`);
       }

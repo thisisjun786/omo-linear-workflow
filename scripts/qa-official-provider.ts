@@ -14,6 +14,16 @@ export default function offlineProvider(pi: ExtensionAPI, gate?: string): void {
       `${JSON.stringify({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, mode: ctx.mode, paths: ctx.loadedExtensionPaths ?? [] })}\n`,
     );
   });
+  pi.rpc.handle("oi.qa.olw-question-wait", (input: unknown) => {
+    const active = input === true;
+    pi.events.emit("continuation_hold_state", { source: "olw-question", active });
+    pi.events.emit("wake_source_state", {
+      source: "olw-question",
+      activeCount: active ? 1 : 0,
+      items: active ? [{ id: "qa-manager-question" }] : [],
+    });
+    return { active };
+  });
   pi.rpc.handle("oi.qa.olw-ask", async (input: unknown) => {
     const result = await pi.executeTool("olw_ask", input);
     if (result.isError)

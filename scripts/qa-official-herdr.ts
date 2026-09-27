@@ -152,7 +152,7 @@ export async function runOfficialHerdrQa(
       z.object({ binding: bindingSchema }).parse(await invoke(["manage"])).binding;
     const managerClient = await connected(manager);
     let reattached = { binding: manager };
-    if (!entry) {
+    if (!entry && !roleReport) {
       const initialManagerIdentity = {
         durableSessionId: manager.durableSessionId,
         sessionPath: manager.sessionPath,
@@ -235,6 +235,192 @@ export async function runOfficialHerdrQa(
         reattachedSnapshot,
         nativeIdentity: native,
       };
+    }
+    if (roleReport) {
+      const gate = join(scratch, "gate");
+      await rm(join(gate, "entered"), { force: true });
+      await rm(join(gate, "release"), { force: true });
+      const turnEntered = Promise.withResolvers<void>();
+      const inspectGate = () => {
+        if (existsSync(join(gate, "entered"))) turnEntered.resolve();
+      };
+      const gateWatcher = watch(gate, inspectGate);
+      const turnStarted = Promise.withResolvers<void>();
+      const turnSettled = Promise.withResolvers<void>();
+      const stopEvents = managerClient.onEvent((event) => {
+        if (event.type === "agent_start") turnStarted.resolve();
+        if (event.type === "agent_settled") turnSettled.resolve();
+      });
+      const deadline = setTimeout(() => {
+        const error = new Error("Manager reattach state deadline");
+        turnEntered.reject(error);
+        turnStarted.reject(error);
+        turnSettled.reject(error);
+      }, 60000);
+      const activeHerdr = herdr;
+      const activeWorld = world;
+      assert.ok(activeHerdr);
+      assert.ok(activeWorld);
+      assert.ok(manager.workspaceId);
+      await activeHerdr.createTab(manager.workspaceId, manager.cwd, "reattach-anchor");
+      const reattach = async (current: Binding, expectedState: "working" | "blocked") => {
+        assert.ok(current.paneId);
+        const start = activeWorld.herdrTraffic.length;
+        let moved: Binding | undefined;
+        const reported = Promise.withResolvers<void>();
+        const inspect = () => {
+          if (moved?.paneId === null || moved?.paneId === undefined) return;
+          const requests = activeWorld.herdrTraffic.slice(start);
+          if (
+            reportsFor(requests, moved.paneId, "pane.report_agent_session").length === 1 &&
+            reportsFor(requests, moved.paneId, "pane.report_agent").some(
+              (request) => request.params["state"] === expectedState,
+            )
+          )
+            reported.resolve();
+        };
+        const stopTraffic = activeWorld.onHerdrRequest(inspect);
+        const reportDeadline = setTimeout(
+          () => reported.reject(new Error(`Manager ${expectedState} report deadline`)),
+          30000,
+        );
+        try {
+          await checkedQaCommand(
+            ["herdr", "pane", "close", current.paneId],
+            activeWorld.repository,
+            activeWorld.environment,
+          );
+          moved = z
+            .object({ action: z.literal("reattached"), binding: bindingSchema })
+            .parse(await invoke(["manage"])).binding;
+          inspect();
+          await reported.promise;
+          return { binding: moved, raw: activeWorld.herdrTraffic.slice(start) };
+        } finally {
+          stopTraffic();
+          clearTimeout(reportDeadline);
+        }
+      };
+      const reportsFor = (requests: readonly unknown[], paneId: string, method: string) =>
+        requests.filter(
+          (request): request is { method: string; params: Record<string, unknown> } =>
+            typeof request === "object" &&
+            request !== null &&
+            "method" in request &&
+            request.method === method &&
+            "params" in request &&
+            typeof request.params === "object" &&
+            request.params !== null &&
+            "pane_id" in request.params &&
+            request.params.pane_id === paneId,
+        );
+      const turn = managerClient.prompt("OLW_ENTRY_BUSY_GATE");
+      try {
+        inspectGate();
+        await Promise.all([turnEntered.promise, turnStarted.promise]);
+        assert.ok(manager.paneId);
+        await checkedQaCommand(
+          ["herdr", "agent", "wait", manager.paneId, "--until", "working", "--timeout", "30000"],
+          world.repository,
+          world.environment,
+        );
+        const workingMove = await reattach(manager, "working");
+        const workingBinding = workingMove.binding;
+        assert.ok(workingBinding.paneId);
+        const workingRaw = workingMove.raw;
+        check(
+          "managerReattachDuringTurnSingleRpcOwner",
+          reportsFor(workingRaw, workingBinding.paneId, "pane.report_agent_session").length === 1,
+        );
+        check(
+          "managerReattachDuringTurnWorking",
+          reportsFor(workingRaw, workingBinding.paneId, "pane.report_agent").some(
+            (request) => request.params["state"] === "working",
+          ),
+        );
+
+        const blockedBeforeMove = Promise.withResolvers<void>();
+        const stopBlocked = activeWorld.onHerdrRequest((request) => {
+          if (
+            reportsFor([request], workingBinding.paneId ?? "", "pane.report_agent").some(
+              (report) => report.params["state"] === "blocked",
+            )
+          )
+            blockedBeforeMove.resolve();
+        });
+        const blockedDeadline = setTimeout(
+          () => blockedBeforeMove.reject(new Error("Manager blocked report deadline")),
+          30000,
+        );
+        try {
+          z.object({ active: z.literal(true) }).parse(
+            await managerClient.requestExtension("oi.qa.olw-question-wait", true),
+          );
+          await blockedBeforeMove.promise;
+        } finally {
+          stopBlocked();
+          clearTimeout(blockedDeadline);
+        }
+        const blockedMove = await reattach(workingBinding, "blocked");
+        const blockedBinding = blockedMove.binding;
+        reattached = { binding: blockedBinding };
+        assert.ok(blockedBinding.paneId);
+        const blockedRaw = blockedMove.raw;
+        check(
+          "managerReattachDuringQuestionSingleRpcOwner",
+          reportsFor(blockedRaw, blockedBinding.paneId, "pane.report_agent_session").length === 1,
+        );
+        check(
+          "managerReattachDuringQuestionBlocked",
+          reportsFor(blockedRaw, blockedBinding.paneId, "pane.report_agent").some(
+            (request) => request.params["state"] === "blocked",
+          ),
+        );
+
+        z.object({ active: z.literal(false) }).parse(
+          await managerClient.requestExtension("oi.qa.olw-question-wait", false),
+        );
+        await writeFile(join(gate, "release"), "release");
+        await turn;
+        await turnSettled.promise;
+        await idle(managerClient);
+        await checkedQaCommand(
+          [
+            "herdr",
+            "agent",
+            "wait",
+            blockedBinding.paneId,
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--timeout",
+            "30000",
+          ],
+          world.repository,
+          world.environment,
+        );
+        const idleRaw = activeWorld.herdrTraffic.slice(
+          activeWorld.herdrTraffic.indexOf(blockedRaw[0]),
+        );
+        check(
+          "managerReattachAfterTurnIdle",
+          reportsFor(idleRaw, blockedBinding.paneId, "pane.report_agent").some(
+            (request) => request.params["state"] === "idle",
+          ),
+        );
+        evidence["managerReattachRoleReportRaw"] = {
+          duringTurn: workingRaw,
+          duringQuestion: blockedRaw,
+          afterTurn: idleRaw,
+        };
+      } finally {
+        gateWatcher.close();
+        stopEvents();
+        clearTimeout(deadline);
+        if (!existsSync(join(gate, "release"))) await writeFile(join(gate, "release"), "release");
+        await turn;
+      }
     }
     await idle(managerClient);
     const remote = join(world.scratch, "remote.git");
@@ -332,6 +518,8 @@ export async function runOfficialHerdrQa(
     if (roleReport) {
       assert.ok(parent.paneId);
       const gate = join(scratch, "gate");
+      await rm(join(gate, "entered"), { force: true });
+      await rm(join(gate, "release"), { force: true });
       const entered = Promise.withResolvers<void>();
       const inspectGate = () => {
         if (existsSync(join(gate, "entered"))) entered.resolve();
@@ -638,7 +826,6 @@ export async function runOfficialHerdrQa(
       evidence["roleOwnership"] = { sessionReports, loaded, marker, plainPane };
     }
     if (roleReport) {
-      evidence["roleReportReachedReattachChecks"] = true;
       const cleanupClient = new RpcClient({
         socketPath: join(world.controlRoot, ".omo/state/omo.sock"),
       });
@@ -731,55 +918,6 @@ export async function runOfficialHerdrQa(
       planContract:
         "todo 11 exact-pane fallback: report the exact binding to close when relaunch is impossible",
     };
-    if (roleReport) {
-      assert.ok(reattached.binding.paneId);
-      const sessionReports = world.herdrTraffic.filter(
-        (value): value is { method: string; params: { pane_id?: string; source?: string } } =>
-          typeof value === "object" &&
-          value !== null &&
-          "method" in value &&
-          value.method === "pane.report_agent_session" &&
-          "params" in value &&
-          typeof value.params === "object" &&
-          value.params !== null,
-      );
-      const rolePanes = [
-        manager.paneId,
-        reattached.binding.paneId,
-        ...parents.map((p) => p.paneId),
-      ].filter((pane): pane is string => pane !== null);
-      for (const pane of new Set(rolePanes))
-        check(
-          `singleOwner:${pane}`,
-          sessionReports.filter((request) => request.params.pane_id === pane).length === 1,
-        );
-      const loaded = (await Bun.file(join(scratch, "gate/loaded-extensions.jsonl")).text())
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) =>
-          z.object({ sessionId: z.string(), paths: z.array(z.string()) }).parse(JSON.parse(line)),
-        );
-      assert.ok(plainPane);
-      check(
-        "plainBuiltinOwner",
-        sessionReports.filter((request) => request.params.pane_id === plainPane).length === 1,
-      );
-      const marker = join(world.controlRoot, "dist/extension/herdr-olw-owner.js");
-      for (const binding of [manager, ...parents])
-        check(
-          `markerLoaded:${binding.id}`,
-          loaded.some(
-            (receipt) =>
-              receipt.sessionId === binding.durableSessionId && receipt.paths.includes(marker),
-          ),
-        );
-      check(
-        "plainMarkerAbsent",
-        loaded.some((receipt) => receipt.paths.includes(marker) === false),
-      );
-      evidence["roleOwnership"] = { sessionReports, loaded, marker, plainPane };
-    }
     evidence["result"] = "PASS";
   } catch (error) {
     failure = error;

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -5,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
 import { hostLaunchProfile } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/protocol-identity.js";
+import { openRegistry } from "../src/core/store";
 import {
   createHostProfile,
   EXTENSION_PROTOCOL_MARKER,
@@ -604,7 +606,7 @@ test("flags a default crash-restart profile and provides the exact safe handoff 
   });
 });
 
-test("doctor leaves the endpoint daemon tree byte-identical", async () => {
+test("status and doctor leave stale reservations byte-identical and request only protocol info", async () => {
   const { root, status } = await fixture();
   await mkdir(join(root, "node_modules/.bin"), { recursive: true });
   await Bun.write(join(root, "node_modules/.bin/omo"), "#!/bin/sh\nexit 91\n");
@@ -631,6 +633,88 @@ test("doctor leaves the endpoint daemon tree byte-identical", async () => {
     join(daemonDir, "reservations/old-session.json"),
     JSON.stringify({ sessionPath: "/old/session.jsonl", attached: true }),
   );
+  const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+  try {
+    const scope = {
+      version: 1 as const,
+      source: "fixture" as const,
+      initiative: { id: "initiative", url: "linear://initiative", revision: "1" },
+      projects: [],
+      decisionRefs: [],
+    };
+    const imported = registry.importScope(scope);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const reserved = registry.reserve({
+      bindingId: "parent",
+      durableSessionId: "session-parent",
+      designation: {
+        id: "designation",
+        snapshotDigest: imported.value.digest,
+        designatedBy: "user",
+        designatedAt: "now",
+        create: true,
+        execute: true,
+        contact: true,
+      },
+      snapshot: scope,
+      assignment: { role: "supervisor", initiativeId: "initiative" },
+      cwd: root,
+      checkout: null,
+      herdrSocket: join(root, "missing-herdr.sock"),
+      omoSocket: status.socket,
+    });
+    if (!reserved.ok) throw new Error(reserved.error.message);
+    const db = new Database(join(root, ".omo/state/registry.sqlite"));
+    try {
+      db.query("UPDATE bindings SET launch_state = 'ready', json = ? WHERE id = ?").run(
+        JSON.stringify({
+          ...reserved.value,
+          workspaceId: "workspace",
+          paneId: "pane",
+          sessionPath: "/old/session.jsonl",
+          launchState: "ready",
+          initialization: { state: "accepted", text: "fixture" },
+        }),
+        reserved.value.id,
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    registry.close();
+  }
+  const herdrSocket = join(root, "fixture-herdr.sock");
+  const herdr = createServer((client) => {
+    client.on("data", (chunk) => {
+      const request = JSON.parse(chunk.toString("utf8").trim());
+      client.write(
+        `${JSON.stringify({
+          id: request.id,
+          result: {
+            type: "session_snapshot",
+            snapshot: {
+              focused_workspace_id: null,
+              focused_tab_id: null,
+              focused_pane_id: null,
+              workspaces: [{ workspace_id: "workspace", active_tab_id: "tab", label: "fixture" }],
+              panes: [
+                {
+                  pane_id: "pane",
+                  workspace_id: "workspace",
+                  tab_id: "tab",
+                  cwd: root,
+                  revision: 1,
+                  agent: "omo",
+                  agent_session: { kind: "path", value: "/old/session.jsonl" },
+                },
+              ],
+              layouts: [{ workspace_id: "workspace", tab_id: "tab", panes: [{ pane_id: "pane" }] }],
+            },
+          },
+        })}\n`,
+      );
+    });
+  });
   const commands: string[] = [];
   const server = createServer((client) => {
     client.on("data", (chunk) => {
@@ -655,8 +739,12 @@ test("doctor leaves the endpoint daemon tree byte-identical", async () => {
   server.once("listening", () => listening.resolve());
   server.once("error", (cause) => listening.reject(cause));
   server.listen(status.socket);
+  const herdrListening = Promise.withResolvers<void>();
+  herdr.once("listening", () => herdrListening.resolve());
+  herdr.once("error", (cause) => herdrListening.reject(cause));
+  herdr.listen(herdrSocket);
   await Promise.race([
-    listening.promise,
+    Promise.all([listening.promise, herdrListening.promise]),
     new Promise<never>((_resolve, reject) =>
       setTimeout(() => reject(new Error("fixture socket did not listen")), 1_000),
     ),
@@ -671,26 +759,42 @@ test("doctor leaves the endpoint daemon tree byte-identical", async () => {
     );
   };
   const before = await snapshot();
-  const proc = Bun.spawn(
-    [process.execPath, join(import.meta.dir, "../src/cli.ts"), "--root", root, "doctor", "--json"],
-    {
-      cwd: root,
-      env: { ...process.env, HOME: root, SENPI_CODING_AGENT_DIR: agentDir },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
-  const [code, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]).finally(() => server.close());
-  const output = JSON.parse(stdout);
-  expect([code, stderr]).toEqual([3, ""]);
-  expect(output).toMatchObject({
-    ok: false,
-    error: { details: { sideEffects: false } },
-  });
-  expect(commands).toEqual(["get_protocol_info"]);
-  expect(await snapshot()).toEqual(before);
+  for (const command of ["status", "doctor"] as const) {
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../src/cli.ts"),
+        "--root",
+        root,
+        "--herdr-socket",
+        herdrSocket,
+        command,
+        "--json",
+      ],
+      {
+        cwd: root,
+        env: { ...process.env, HOME: root, SENPI_CODING_AGENT_DIR: agentDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const output = JSON.parse(stdout);
+    if (command === "status")
+      expect([code, stderr, output]).toEqual([0, "", expect.objectContaining({ ok: true })]);
+    else {
+      expect([code, stderr]).toEqual([3, ""]);
+      expect(output).toMatchObject({ ok: false, error: { details: { sideEffects: false } } });
+    }
+    expect(await snapshot()).toEqual(before);
+  }
+  await Promise.all([
+    new Promise<void>((resolve) => server.close(() => resolve())),
+    new Promise<void>((resolve) => herdr.close(() => resolve())),
+  ]);
+  expect(commands).toEqual(["get_protocol_info", "get_protocol_info", "get_protocol_info"]);
 });

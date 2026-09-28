@@ -838,7 +838,8 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
       expect(inspected.ok).toBe(true);
       if (!inspected.ok) throw new Error(inspected.error.message);
       expect(inspected.value.find((binding) => binding.id === child.id)).toMatchObject({
-        runtimeState: "local_only",
+        runtimeState: "unknown",
+        runtimeStateReason: "Exact session not probed in read-only mode",
       });
     }
     expect(prompts).toHaveLength(0);
@@ -859,7 +860,11 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
           code: "reconciliation_uncertain",
           details: {
             bindings: expect.arrayContaining([
-              expect.objectContaining({ id: child.id, runtimeState: "local_only" }),
+              expect.objectContaining({
+                id: child.id,
+                runtimeState: "unknown",
+                lastRuntimeIncident: expect.objectContaining({ state: "local_only" }),
+              }),
             ]),
           },
         },
@@ -871,7 +876,8 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
         expect.objectContaining({
           id: child.id,
           launchState: "uncertain",
-          runtimeState: "local_only",
+          runtimeState: "unknown",
+          runtimeStateReason: "Exact session not probed in read-only mode",
           lastRuntimeIncident: expect.objectContaining({ state: "local_only" }),
         }),
       ]),
@@ -1117,7 +1123,7 @@ test("a child with an unverified owner pane posts host loss to the local inbox",
   }
 });
 
-test("read-only runtime health reports current state instead of stale persisted loss", async () => {
+test("read-only runtime health reports unverified current state instead of stale persisted loss", async () => {
   const w = await world();
   try {
     const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
@@ -1125,14 +1131,17 @@ test("read-only runtime health reports current state instead of stale persisted 
     const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
       ...w.dependencies,
       readHostReachabilityReadOnly: async () => "reachable" as const,
-      probeBindingSession: async () => ({ state: "open" as const }),
+      probeBindingSession: async () => {
+        throw new Error("Read-only status must not list native sessions");
+      },
     });
     expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
       ok: true,
       value: expect.arrayContaining([
         expect.objectContaining({
           id: child.id,
-          runtimeState: "connected",
+          runtimeState: "unknown",
+          runtimeStateReason: "Exact session not probed in read-only mode",
           lastRuntimeIncident: { state: "host_lost", incidentId: "old-incident" },
         }),
       ]),
@@ -1143,7 +1152,7 @@ test("read-only runtime health reports current state instead of stale persisted 
   }
 });
 
-test("read-only runtime health probes exact sessions without notifying", async () => {
+test("read-only runtime health never probes exact sessions or notifies", async () => {
   const w = await world();
   try {
     const starting = w.ready(w.reserve("starting", "direct"), "starting-ws", "starting-ws:p");
@@ -1152,10 +1161,9 @@ test("read-only runtime health probes exact sessions without notifying", async (
     const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
       ...w.dependencies,
       readHostReachabilityReadOnly: async () => "reachable" as const,
-      probeBindingSession: async (binding) =>
-        binding.id === starting.id
-          ? { state: "present" as const, status: "opening" as const }
-          : { state: "open" as const },
+      probeBindingSession: async () => {
+        throw new Error("Read-only status must not list native sessions");
+      },
       prompt: async (_binding, text) => {
         prompts.push(text);
       },
@@ -1163,12 +1171,14 @@ test("read-only runtime health probes exact sessions without notifying", async (
     const inspected = await orchestrator.statusWithRuntimeHealth();
     expect(inspected.ok).toBe(true);
     if (!inspected.ok) throw new Error(inspected.error.message);
-    expect(inspected.value.find((binding) => binding.id === starting.id)?.runtimeState).toBe(
-      "starting",
-    );
-    expect(inspected.value.find((binding) => binding.id === unknown.id)?.runtimeState).toBe(
-      "connected",
-    );
+    expect(inspected.value.find((binding) => binding.id === starting.id)).toMatchObject({
+      runtimeState: "unknown",
+      runtimeStateReason: "Exact session not probed in read-only mode",
+    });
+    expect(inspected.value.find((binding) => binding.id === unknown.id)).toMatchObject({
+      runtimeState: "unknown",
+      runtimeStateReason: "Exact session not probed in read-only mode",
+    });
     expect(prompts).toEqual([]);
     expect(value(w.registry.operationalNotices({}))).toEqual([]);
   } finally {

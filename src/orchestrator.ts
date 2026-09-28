@@ -2997,6 +2997,11 @@ export class Orchestrator {
           state: "unknown",
           reason: "Interactive host could not be observed",
         });
+      } else if (!notify) {
+        states.set(binding.id, {
+          state: "unknown",
+          reason: "Exact session not probed in read-only mode",
+        });
       } else {
         const probe = await (this.#deps.probeBindingSession ?? probeBindingSession)(binding);
         states.set(

@@ -1232,6 +1232,41 @@ export function openRegistry(
     });
   }
 
+  function transitionRuntimeState(
+    id: string,
+    state: NonNullable<Binding["runtimeState"]>,
+    reason: string | undefined,
+    proposedIncidentId: string,
+  ): Result<{ readonly binding: Binding; readonly notify: boolean; readonly incidentId?: string }> {
+    return transaction(() => {
+      const current = get(id);
+      if (!current.ok) return current;
+      const lost = state === "local_only" || state === "host_lost";
+      const transition = lost && current.value.runtimeState !== state;
+      const incidentId = transition
+        ? proposedIncidentId
+        : lost
+          ? current.value.runtimeIncidentId
+          : undefined;
+      const saved = saveBinding({
+        ...current.value,
+        runtimeState: state,
+        ...(reason === undefined
+          ? { runtimeStateReason: undefined }
+          : { runtimeStateReason: reason }),
+        ...(incidentId === undefined
+          ? { runtimeIncidentId: undefined }
+          : { runtimeIncidentId: incidentId }),
+      });
+      if (!saved.ok) return saved;
+      return ok({
+        binding: saved.value,
+        notify: transition,
+        ...(incidentId === undefined ? {} : { incidentId }),
+      });
+    });
+  }
+
   function setContactState(id: string, state: Binding["contactState"]): Result<Binding> {
     return transaction(() => {
       const binding = get(id);
@@ -2241,6 +2276,7 @@ export function openRegistry(
     activate,
     setLaunchState,
     setRuntimeState,
+    transitionRuntimeState,
     setContactState,
     setOwner,
     post,

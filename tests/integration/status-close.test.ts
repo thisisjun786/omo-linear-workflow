@@ -16,7 +16,7 @@ import { modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Workspace } from "../../src/herdr";
 import { roleLabel } from "../../src/linear";
-import { Orchestrator } from "../../src/orchestrator";
+import { Orchestrator, promptBindingWithClient } from "../../src/orchestrator";
 import { NativeSessionAbsentError } from "../../src/transport";
 
 const roots: string[] = [];
@@ -837,9 +837,9 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
       const inspected = await orchestrator.statusWithRuntimeHealth();
       expect(inspected.ok).toBe(true);
       if (!inspected.ok) throw new Error(inspected.error.message);
-      expect(
-        inspected.value.find((binding) => binding.id === child.id)?.runtimeState,
-      ).toBeUndefined();
+      expect(inspected.value.find((binding) => binding.id === child.id)).toMatchObject({
+        runtimeState: "local_only",
+      });
     }
     expect(prompts).toHaveLength(0);
     expect(value(w.registry.operationalNotices({}))).toHaveLength(0);
@@ -872,6 +872,7 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
           id: child.id,
           launchState: "uncertain",
           runtimeState: "local_only",
+          lastRuntimeIncident: expect.objectContaining({ state: "local_only" }),
         }),
       ]),
     });
@@ -879,7 +880,8 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
     expect(prompts[0]?.bindingId).toBe(w.parent.id);
     expect(value(w.registry.operationalNotices({}))).toHaveLength(1);
     expect(value(w.registry.operationalNotices({}))[0]).toMatchObject({
-      state: "accepted",
+      state: "uncertain",
+      receipt: null,
       envelope: {
         kind: "operational_notice",
         operational: { failure: { source: "host_loss" } },
@@ -920,6 +922,132 @@ test("stale readiness and pane session metadata do not prove a role TUI is live"
         (notice) => notice.envelope.fromBindingId === child.id,
       ),
     ).toEqual([]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("slow initial prompts remain pending past the notice deadline and can still succeed", async () => {
+  const accepted = Promise.withResolvers<void>();
+  const promptEntered = Promise.withResolvers<void>();
+  const client = {
+    start: async () => {},
+    listSessions: async () => [
+      {
+        sessionId: "native-parent",
+        durableSessionId: "s-parent",
+        sessionPath: "/session.jsonl",
+        cwd: "/repo",
+        status: "open" as const,
+      },
+    ],
+    openSession: async () => ({ sessionId: "native-parent", attached: true }),
+    prompt: async () => {
+      promptEntered.resolve();
+      await accepted.promise;
+    },
+    stop: async () => {},
+  };
+  const operation = promptBindingWithClient(
+    {
+      id: "parent",
+      designationId: "d",
+      assignment: { role: "parent", initiativeId: null, projectId: "p", ownerBindingId: null },
+      durableSessionId: "s-parent",
+      cwd: "/repo",
+      checkout: null,
+      herdrSocket: "/herdr",
+      omoSocket: "/omo",
+      workspaceId: "workspace",
+      paneId: "pane",
+      sessionPath: "/session.jsonl",
+      launchState: "initializing",
+      contactState: "active",
+      initialization: { state: "sending", text: "brief" },
+    },
+    "brief",
+    client,
+  );
+  await promptEntered.promise;
+  const fiveSecondDeadline = Promise.withResolvers<"deadline">();
+  fiveSecondDeadline.resolve("deadline");
+  expect(
+    await Promise.race([operation.then(() => "completed" as const), fiveSecondDeadline.promise]),
+  ).toBe("deadline");
+  accepted.resolve();
+  await expect(operation).resolves.toBeUndefined();
+});
+
+test("concurrent reconciles allocate one runtime incident and one notice", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    const bothProbing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let probes = 0;
+    const dependencies = {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      probeBindingSession: async () => ({ state: "absent" as const }),
+      promptRuntimeNotice: async () => null,
+      uuid: () => `incident-${++probes}`,
+    };
+    const make = () => new Orchestrator(w.root, "/fake/herdr", dependencies);
+    dependencies.readHostReachabilityReadOnly = async () => {
+      probes += 1;
+      if (probes === 2) bothProbing.resolve();
+      await release.promise;
+      return "unreachable" as const;
+    };
+    const first = make().statusWithRuntimeHealth({}, true);
+    const second = make().statusWithRuntimeHealth({}, true);
+    await bothProbing.promise;
+    release.resolve();
+    await Promise.all([first, second]);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(1);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("runtime loss notices retain a real native receipt when one is returned", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    const receipt = {
+      kind: "ok" as const,
+      thread_id: w.parent.durableSessionId,
+      message_seq: 41,
+      deduplicated: false,
+      delivery: { kind: "started" as const, turn_id: "native-turn-41" },
+    };
+    const db = new Database(w.path);
+    try {
+      const row = db
+        .query<{ json: string }, [string]>("SELECT json FROM bindings WHERE id = ?")
+        .get(w.parent.id);
+      if (row === null) throw new Error("Missing parent fixture");
+      db.query("UPDATE bindings SET json = ? WHERE id = ?").run(
+        JSON.stringify({ ...JSON.parse(row.json), sessionPath: null }),
+        w.parent.id,
+      );
+    } finally {
+      db.close();
+    }
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      promptRuntimeNotice: async () => receipt,
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    expect(
+      value(w.registry.operationalNotices({})).find(
+        (notice) => notice.envelope.fromBindingId === child.id,
+      ),
+    ).toMatchObject({ state: "accepted", receipt });
   } finally {
     w.cleanup();
   }
@@ -989,7 +1117,33 @@ test("a child with an unverified owner pane posts host loss to the local inbox",
   }
 });
 
-test("read-only runtime health does not probe exact sessions or notify", async () => {
+test("read-only runtime health reports current state instead of stale persisted loss", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    value(w.registry.setRuntimeState(child.id, "host_lost", undefined, "old-incident"));
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "reachable" as const,
+      probeBindingSession: async () => ({ state: "open" as const }),
+    });
+    expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({
+          id: child.id,
+          runtimeState: "connected",
+          lastRuntimeIncident: { state: "host_lost", incidentId: "old-incident" },
+        }),
+      ]),
+    });
+    expect(value(w.registry.get(child.id)).runtimeState).toBe("host_lost");
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("read-only runtime health probes exact sessions without notifying", async () => {
   const w = await world();
   try {
     const starting = w.ready(w.reserve("starting", "direct"), "starting-ws", "starting-ws:p");
@@ -998,9 +1152,10 @@ test("read-only runtime health does not probe exact sessions or notify", async (
     const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
       ...w.dependencies,
       readHostReachabilityReadOnly: async () => "reachable" as const,
-      probeBindingSession: async () => {
-        throw new Error("Read-only status must not list native sessions");
-      },
+      probeBindingSession: async (binding) =>
+        binding.id === starting.id
+          ? { state: "present" as const, status: "opening" as const }
+          : { state: "open" as const },
       prompt: async (_binding, text) => {
         prompts.push(text);
       },
@@ -1008,12 +1163,12 @@ test("read-only runtime health does not probe exact sessions or notify", async (
     const inspected = await orchestrator.statusWithRuntimeHealth();
     expect(inspected.ok).toBe(true);
     if (!inspected.ok) throw new Error(inspected.error.message);
-    expect(
-      inspected.value.find((binding) => binding.id === starting.id)?.runtimeState,
-    ).toBeUndefined();
-    expect(
-      inspected.value.find((binding) => binding.id === unknown.id)?.runtimeState,
-    ).toBeUndefined();
+    expect(inspected.value.find((binding) => binding.id === starting.id)?.runtimeState).toBe(
+      "starting",
+    );
+    expect(inspected.value.find((binding) => binding.id === unknown.id)?.runtimeState).toBe(
+      "connected",
+    );
     expect(prompts).toEqual([]);
     expect(value(w.registry.operationalNotices({}))).toEqual([]);
   } finally {

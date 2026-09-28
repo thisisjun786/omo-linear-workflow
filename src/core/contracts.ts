@@ -402,6 +402,12 @@ export interface Registry {
     reason?: string,
     incidentId?: string,
   ): Result<Binding>;
+  transitionRuntimeState(
+    id: string,
+    state: NonNullable<Binding["runtimeState"]>,
+    reason: string | undefined,
+    proposedIncidentId: string,
+  ): Result<{ readonly binding: Binding; readonly notify: boolean; readonly incidentId?: string }>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;
   setOwner(parentId: string, supervisorId: string | null): Result<Binding>;
   beginClose(id: string): Result<Binding>;

@@ -138,6 +138,16 @@ export function createStageLineage(db: Database, readonly: boolean) {
           .get(bindingId)?.binding_id ?? null
       );
     },
+    hasRetiredSuccessor(bindingId: string): boolean {
+      if (!available) return false;
+      return (
+        db
+          .query(
+            "SELECT binding_id FROM retired_stage_lineage WHERE previous_binding_id = ? LIMIT 1",
+          )
+          .get(bindingId) !== null
+      );
+    },
     nextOrdinal(bindingId: string): number {
       if (!available) return 0;
       const row = db

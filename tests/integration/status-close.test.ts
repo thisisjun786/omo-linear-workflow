@@ -476,6 +476,39 @@ test.each(["plan", "execute"])(
   },
 );
 
+test("status/close: plan close refuses while its execute successor requires abandonment", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+
+    expect(await w.orchestrator.close("plan", false, true)).toMatchObject({
+      ok: false,
+      error: {
+        code: "successor_abandon_required",
+        details: { bindingId: "execute" },
+      },
+    });
+    expect(w.workspaces.has("childws")).toBe(true);
+    expect(value(w.registry.stageOf("execute"))).not.toBeNull();
+    expect(value(w.registry.get("execute")).launchState).toBe("uncertain");
+    expect(w.events.filter((event) => event === "workspace:childws")).toHaveLength(0);
+    expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(0);
+  } finally {
+    w.cleanup();
+  }
+});
+
 test.each([
   ["pane", "/another-binding/session.jsonl", false],
   ["workspace", null, true],

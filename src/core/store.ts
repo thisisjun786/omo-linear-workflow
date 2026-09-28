@@ -642,11 +642,14 @@ export function openRegistry(
       const priorStage = lineage.get(previousBindingId);
       if (priorStage?.handoff === null || priorStage === null)
         return error("handoff_missing", "Previous stage has no handoff");
+      const abandonedPredecessor =
+        previous.value.launchState === "closed" &&
+        previous.value.contactState === "cancelled" &&
+        previous.value.checkout !== null &&
+        previous.value.workspaceId !== null &&
+        lineage.hasRetiredSuccessor(previousBindingId);
       if (
-        !(
-          previous.value.launchState === "ready" ||
-          (previous.value.launchState === "closed" && previous.value.contactState === "cancelled")
-        ) ||
+        !(previous.value.launchState === "ready" || abandonedPredecessor) ||
         previous.value.assignment.role !== "child" ||
         parsed.data.assignment.role !== "child" ||
         ownershipKey(previous.value.assignment) !== ownershipKey(parsed.data.assignment) ||
@@ -654,10 +657,15 @@ export function openRegistry(
         previous.value.designationId !== parsed.data.designation.id ||
         lineage.successor(previousBindingId) !== null
       )
-        return error(
-          "stage_conflict",
-          "Previous stage is not the live owner or already has a successor",
-        );
+        return previous.value.launchState === "closed" && !abandonedPredecessor
+          ? error(
+              "stage_predecessor_closed",
+              "Closed plan was not preserved by uncertain-successor abandonment",
+            )
+          : error(
+              "stage_conflict",
+              "Previous stage is not the live owner or already has a successor",
+            );
       if (
         db
           .query(

@@ -60,7 +60,13 @@ async function fixture(
       designation,
       snapshot,
       cwd: "/repo",
-      checkout: null,
+      checkout: {
+        originalRepoRoot: "/repo",
+        path: "/repo",
+        branch: "issue",
+        baseBranch: "main",
+        baseCommit: "base",
+      },
       herdrSocket: "/tmp/herdr",
       omoSocket: "/tmp/omo",
     };
@@ -596,6 +602,26 @@ test("handoff requires a ready plan and succession requires a handoff", async ()
     value(registry.recordStage(plan.id, "issue", "direct", 0, null));
     ready(registry, plan);
     expect(code(registry.recordHandoff(plan.id, handoff))).toBe("handoff_not_allowed");
+  });
+});
+
+test("an ordinarily closed plan cannot reserve an execute successor", async () => {
+  await fixture((_path, registry, _parent, plan, next) => {
+    value(registry.recordStage(plan.id, "issue", "plan", 0, null));
+    ready(registry, plan);
+    value(registry.recordHandoff(plan.id, handoff));
+    value(registry.beginClose(plan.id));
+    value(registry.finishClose(plan.id));
+
+    expect(registry.successorReservation(plan.id, next, "execute")).toMatchObject({
+      ok: false,
+      error: { code: "stage_predecessor_closed" },
+    });
+    expect(value(registry.stageChain("issue"))).toHaveLength(1);
+    expect(registry.get(next.bindingId)).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
   });
 });
 

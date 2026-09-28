@@ -3264,6 +3264,34 @@ export class Orchestrator {
             await this.#closeUncertainSuccessor(target.value, confirmAbsent),
             inspected.value,
           );
+        if (stage.value.stage === "plan") {
+          const lineage = this.#withRegistry((registry) => registry.lineageFor(bindingId));
+          if (!lineage.ok) return lineage;
+          for (const member of lineage.value.stages.filter(
+            (entry) => entry.stage === "execute" && entry.launchState !== "closed",
+          )) {
+            const successor = this.#binding(member.bindingId);
+            if (!successor.ok) return successor;
+            const successorIntent = this.#withRegistry((registry) =>
+              registry.successorLaunchIntent(successor.value.id),
+            );
+            if (!successorIntent.ok) return successorIntent;
+            const successorRetiring = this.#withRegistry((registry) =>
+              registry.uncertainSuccessorClosePending(successor.value.id),
+            );
+            if (!successorRetiring.ok) return successorRetiring;
+            if (
+              (successor.value.launchState === "uncertain" &&
+                successorIntent.value?.state === "uncertain") ||
+              successorRetiring.value
+            )
+              return failure(
+                "successor_abandon_required",
+                `Close the uncertain execute binding first: olw close --binding ${successor.value.id}`,
+                { bindingId: successor.value.id },
+              );
+          }
+        }
         return this.#closeLineage(target.value, confirmAbsent);
       }
     }

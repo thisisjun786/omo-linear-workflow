@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
 import { hostLaunchProfile } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/protocol-identity.js";
@@ -412,6 +413,12 @@ test("resolves the OMO agent directory with launcher precedence and cwd-relative
     resolveOmoAgentDir({ HOME: "/fallback", OMO_CODING_AGENT_DIR: " /omo-state " }, "/fixture/cwd"),
   ).toBe("/omo-state");
   expect(resolveOmoAgentDir({ HOME: "/fallback" }, "/fixture/cwd")).toBe("/fallback/.omo/agent");
+  expect(resolveOmoAgentDir({ HOME: "", USERPROFILE: "/fixture/profile" }, "/fixture/cwd")).toBe(
+    "/fixture/profile/.omo/agent",
+  );
+  expect(resolveOmoAgentDir({ HOME: "", USERPROFILE: "" }, "/fixture/cwd")).toBe(
+    join(homedir(), ".omo/agent"),
+  );
 });
 
 test("reads only recent crashes for this socket and labels SIGKILL as likely OOM", async () => {
@@ -501,6 +508,7 @@ test("doctor leaves the endpoint daemon tree byte-identical", async () => {
   );
   const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(status.socket));
   await mkdir(join(daemonDir, "generations/dead/scratch"), { recursive: true });
+  await mkdir(join(daemonDir, "reservations"), { recursive: true });
   await writeFile(
     join(daemonDir, "host.pid"),
     JSON.stringify({ layout: 2, instance_id: "dead", generation_dir: "generations/dead" }),
@@ -509,6 +517,40 @@ test("doctor leaves the endpoint daemon tree byte-identical", async () => {
     join(daemonDir, "generations/dead/host.pid"),
     JSON.stringify({ pid: 2_147_483_647, processStartTime: "1", generation: 7 }),
   );
+  await writeFile(
+    join(daemonDir, "reservations/old-session.json"),
+    JSON.stringify({ sessionPath: "/old/session.jsonl", attached: true }),
+  );
+  const commands: string[] = [];
+  const server = createServer((client) => {
+    client.on("data", (chunk) => {
+      const request = JSON.parse(chunk.toString("utf8").trim());
+      commands.push(request.type);
+      client.write(
+        `${JSON.stringify({
+          id: request.id,
+          success: true,
+          data: {
+            protocolVersion: 1,
+            serverVersion: "fixture",
+            capabilities: [],
+            generation: 7,
+            launch_profile: status.launchProfile,
+          },
+        })}\n`,
+      );
+    });
+  });
+  const listening = Promise.withResolvers<void>();
+  server.once("listening", () => listening.resolve());
+  server.once("error", (cause) => listening.reject(cause));
+  server.listen(status.socket);
+  await Promise.race([
+    listening.promise,
+    new Promise<never>((_resolve, reject) =>
+      setTimeout(() => reject(new Error("fixture socket did not listen")), 1_000),
+    ),
+  ]);
   const snapshot = async () => {
     const files = (await readdir(daemonDir, { recursive: true })).sort();
     return Promise.all(
@@ -532,12 +574,13 @@ test("doctor leaves the endpoint daemon tree byte-identical", async () => {
     proc.exited,
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
-  ]);
+  ]).finally(() => server.close());
   const output = JSON.parse(stdout);
   expect([code, stderr]).toEqual([3, ""]);
   expect(output).toMatchObject({
     ok: false,
     error: { details: { sideEffects: false } },
   });
+  expect(commands).toEqual(["get_protocol_info"]);
   expect(await snapshot()).toEqual(before);
 });

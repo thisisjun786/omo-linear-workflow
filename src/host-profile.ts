@@ -7,10 +7,7 @@ import { z } from "zod";
 import { readDaemonEnvKeys } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-env.js";
 import { createHostDaemonPaths } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js";
 import { readHostRegistration } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-registration.js";
-import {
-  probeProtocolInfo,
-  requestOnSocket,
-} from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-probe.js";
+import { probeProtocolInfo } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-probe.js";
 import { readHostProcessMetrics } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-process-metrics.js";
 
 const EXTENSIONS = [
@@ -42,19 +39,12 @@ const hostStatusSchema = z.object({
     foreign_retained: z.number(),
   }),
   rss_mb: z.number().nullable().optional(),
+  sessions_observed: z.boolean().optional(),
   env_keys: z.array(z.string()).default([]),
 });
 export type HostStatus = z.infer<typeof hostStatusSchema>;
 
 const observedSessionsSchema = z.object({ sessions: z.array(z.unknown()) });
-const healthSessionsSchema = z.object({
-  sessions: z.array(
-    z.object({
-      kind: z.string().optional(),
-      attachments: z.number().optional(),
-    }),
-  ),
-});
 const HOST_STATUS_TIMEOUT_MS = 15_000;
 const HOST_HANDOFF_TIMEOUT_MS = 45_000;
 const HOST_GROUP_TERM_GRACE_MS = 250;
@@ -125,7 +115,7 @@ export interface HostHealth {
       readonly argv: readonly string[];
     };
   };
-  readonly sessions: HostStatus["sessions"];
+  readonly sessions: HostStatus["sessions"] | null;
   readonly rssMb: number | null;
   readonly rssWarningMb: number;
   readonly crashes: ReadonlyArray<
@@ -142,7 +132,7 @@ export function resolveOmoAgentDir(
     const configured = env[name]?.trim();
     if (configured) return resolve(cwd, configured);
   }
-  return join(env["HOME"] ?? homedir(), ".omo/agent");
+  return join(env["HOME"] || env["USERPROFILE"] || homedir(), ".omo/agent");
 }
 
 export function runtimeCacheEnvironment(
@@ -280,19 +270,11 @@ export async function readHostStatusReadOnly(
   agentDir: string,
 ): Promise<HostStatus> {
   const paths = createHostDaemonPaths({ socket, agentDir });
-  const [protocol, registration, sessionReply, envKeys] = await Promise.all([
+  const [protocol, registration, envKeys] = await Promise.all([
     probeProtocolInfo(socket, HOST_STATUS_TIMEOUT_MS),
     readHostRegistration(paths),
-    requestOnSocket(
-      socket,
-      { type: "list_sessions", include_workers: true },
-      HOST_STATUS_TIMEOUT_MS,
-    ),
     readDaemonEnvKeys(paths),
   ]);
-  const parsedSessions = healthSessionsSchema.safeParse(sessionReply);
-  const rows = parsedSessions.success ? parsedSessions.data.sessions : [];
-  const attached = rows.filter((row) => (row.attachments ?? 0) > 0).length;
   const pid = registration?.record.pid;
   const metrics = pid === undefined ? { rss_mb: null } : await readHostProcessMetrics(pid);
   return hostStatusSchema.parse({
@@ -301,14 +283,15 @@ export async function readHostStatusReadOnly(
     generation: protocol?.generation ?? registration?.generation ?? null,
     launchProfile: protocol?.launch_profile ?? null,
     sessions: {
-      total: rows.length,
-      interactive: rows.filter((row) => row.kind !== "worker").length,
-      worker: rows.filter((row) => row.kind === "worker").length,
-      retained: rows.length - attached,
-      foreign_attached: attached,
-      foreign_retained: rows.length - attached,
+      total: 0,
+      interactive: 0,
+      worker: 0,
+      retained: 0,
+      foreign_attached: 0,
+      foreign_retained: 0,
     },
     rss_mb: metrics.rss_mb,
+    sessions_observed: false,
     env_keys: envKeys,
   });
 }
@@ -513,7 +496,12 @@ export async function inspectHostHealth(
   const rssMb = status.rss_mb ?? null;
   if (rssMb !== null && rssMb > rssWarningMb)
     warnings.push(`Shared host RSS ${rssMb} MiB exceeds ${rssWarningMb} MiB.`);
-  if (status.reachable && status.sessions.total === 0 && (options.readyBindings ?? 0) > 0)
+  if (
+    status.sessions_observed !== false &&
+    status.reachable &&
+    status.sessions.total === 0 &&
+    (options.readyBindings ?? 0) > 0
+  )
     warnings.push(
       `Shared host has 0 sessions while ${options.readyBindings ?? 0} OLW bindings are ready; run olw status for per-binding state.`,
     );
@@ -535,7 +523,7 @@ export async function inspectHostHealth(
         ],
       },
     },
-    sessions: status.sessions,
+    sessions: status.sessions_observed === false ? null : status.sessions,
     rssMb,
     rssWarningMb,
     crashes: await readCrashRecords(options.agentDir, status.socket, options.now?.() ?? new Date()),

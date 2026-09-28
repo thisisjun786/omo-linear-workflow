@@ -13,6 +13,7 @@ import {
 } from "./core/schema";
 import { openRegistry } from "./core/store";
 import { resolveHerdrArtifact } from "./herdr/artifact";
+import { inspectHostHealth, readHostStatusReadOnly, resolveOmoAgentDir } from "./host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
 import { fetchMirror, listMirrors, MirrorError } from "./repo/mirror";
@@ -261,10 +262,27 @@ function scopeFilter(options: Options, required: boolean): Result<ScopeFilter> {
   return required ? invalid("--initiative or --project is required") : { ok: true, value: {} };
 }
 
-async function doctor(
-  root: string,
-  herdrSocket?: string,
-): Promise<Result<{ sideEffects: false; paths: unknown; checks: unknown }>> {
+async function hostHealth(root: string, readyBindings: number) {
+  const socket = join(root, ".omo/state/omo.sock");
+  const agentDir = resolveOmoAgentDir(process.env, process.cwd());
+  const status = await readHostStatusReadOnly(socket, agentDir);
+  const configuredThreshold = Number(process.env["OLW_HOST_RSS_WARNING_MB"] ?? "8192");
+  return inspectHostHealth(root, status, {
+    agentDir,
+    readyBindings,
+    rssWarningMb:
+      Number.isFinite(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 8192,
+  });
+}
+
+interface DoctorResult {
+  readonly sideEffects: false;
+  readonly paths: unknown;
+  readonly checks: unknown;
+  readonly host: unknown;
+}
+
+async function doctor(root: string, herdrSocket?: string): Promise<Result<DoctorResult>> {
   const paths = new Orchestrator(root, herdrSocket).paths();
   const database = join(root, ".omo/state/registry.sqlite");
   if (await Bun.file(database).exists()) {
@@ -330,7 +348,19 @@ async function doctor(
       },
     };
   }
-  return { ok: true, value: { sideEffects: false, paths, checks } };
+  let readyBindings = 0;
+  if (await Bun.file(database).exists()) {
+    const registry = openRegistry(database, { readonly: true });
+    try {
+      const bindings = registry.list();
+      if (!bindings.ok) return bindings;
+      readyBindings = bindings.value.filter((binding) => binding.launchState === "ready").length;
+    } finally {
+      registry.close();
+    }
+  }
+  const host = await hostHealth(root, readyBindings);
+  return { ok: true, value: { sideEffects: false, paths, checks, host } };
 }
 
 async function doctorWithChains(root: string, herdrSocket?: string): Promise<Result<unknown>> {

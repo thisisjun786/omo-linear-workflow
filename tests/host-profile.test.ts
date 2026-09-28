@@ -1,20 +1,50 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
+import { hostLaunchProfile } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/protocol-identity.js";
 import {
   createHostProfile,
   EXTENSION_PROTOCOL_MARKER,
   HostCommandTimeoutError,
+  inspectHostHealth,
   observeEmptyHostSessions,
   RUNTIME_CACHE_MARKER,
+  readHostStatusReadOnly,
+  resolveOmoAgentDir,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
 
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+test("an unreachable host reports no generation even when its registration remains", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-dead-host-"));
+  roots.push(root);
+  const socket = join(root, "absent.sock");
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(socket));
+  await mkdir(join(daemonDir, "generations/dead"), { recursive: true });
+  await writeFile(
+    join(daemonDir, "host.pid"),
+    JSON.stringify({ layout: 2, instance_id: "dead", generation_dir: "generations/dead" }),
+  );
+  await writeFile(
+    join(daemonDir, "generations/dead/host.pid"),
+    JSON.stringify({ pid: 2_147_483_647, processStartTime: "1", generation: 7 }),
+  );
+
+  const status = await readHostStatusReadOnly(socket, agentDir);
+
+  expect(status.reachable).toBe(false);
+  expect(status.generation).toBeNull();
 });
 
 async function fixture() {
@@ -31,7 +61,17 @@ async function fixture() {
     reachable: true,
     socket: join(root, ".omo/state/omo.sock"),
     generation: 4,
-    launchProfile: { core: { session_runtime: "in-process", multi_session: true, extensions } },
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...extensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
     sessions: {
       total: 3,
       interactive: 2,
@@ -47,14 +87,20 @@ async function fixture() {
 
 test("rejects a running host missing the OLW extension without replacing its profile or sessions", async () => {
   const { root, status } = await fixture();
+  const oldExtensions = status.launchProfile.core.extensions.slice(0, -1);
   const old = {
     ...status,
-    launchProfile: {
-      core: {
-        ...status.launchProfile.core,
-        extensions: status.launchProfile.core.extensions.slice(0, -1),
-      },
-    },
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...oldExtensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
   };
   const result = await createHostProfile(root, old).then(
     () => null,
@@ -63,7 +109,9 @@ test("rejects a running host missing the OLW extension without replacing its pro
   expect(result).toMatchObject({
     name: "HostProfileMismatchError",
     details: {
-      missingExtensions: [join(root, "dist/extension/index.js")],
+      missingExtensions: status.launchProfile.core.extensions.filter(
+        (extension) => !oldExtensions.includes(extension),
+      ),
       generation: 4,
       sessions: { total: 3, interactive: 2, worker: 1 },
       recovery: {
@@ -85,9 +133,25 @@ test("rejects a running host missing the OLW extension without replacing its pro
 
 test("accepts required effective extensions while retaining additional host extensions", async () => {
   const { root, status } = await fixture();
-  status.launchProfile.core.extensions.push(join(root, "user-extension.js"));
-  expect(await createHostProfile(root, status)).toBe(join(root, "omo-host.json"));
-  expect(status.launchProfile.core.extensions).toHaveLength(4);
+  const extensions = [...status.launchProfile.core.extensions, join(root, "user-extension.js")];
+  const withExtra = {
+    ...status,
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...extensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
+  };
+  expect(await createHostProfile(root, withExtra)).toBe(join(root, "omo-host.json"));
+  const health = await inspectHostHealth(root, withExtra, { agentDir: join(root, "agent") });
+  expect(health.profile.matchesOlw).toBe(true);
+  expect(withExtra.launchProfile.core.extensions).toHaveLength(4);
 });
 
 test("does not consider an unknown running launch profile ready", async () => {
@@ -332,4 +396,254 @@ test("prepares a new profile when no host is reachable", async () => {
   expect(await createHostProfile(root, { ...status, reachable: false, launchProfile: null })).toBe(
     join(root, "omo-host.json"),
   );
+  await rm(join(root, "omo-host.json"));
+  const health = await inspectHostHealth(
+    root,
+    { ...status, reachable: false, launchProfile: null },
+    { agentDir: join(root, "agent") },
+  );
+  expect(health.profile.matchesOlw).toBe(false);
+  expect(health.profile.recovery).toMatchObject({
+    ready: false,
+    preparation: ["olw", "manage", "--root", root],
+  });
+});
+
+test("reports generation, profile, sessions, RSS warnings, and local-only roles", async () => {
+  const { root, status } = await fixture();
+  const health = await inspectHostHealth(
+    root,
+    {
+      ...status,
+      rss_mb: 9_001,
+      sessions: { ...status.sessions, total: 0, interactive: 0, worker: 0, retained: 0 },
+    },
+    {
+      agentDir: join(root, "agent"),
+      readyBindings: 2,
+      rssWarningMb: 8_192,
+    },
+  );
+  expect(health).toMatchObject({
+    reachable: true,
+    generation: 4,
+    profile: { matchesOlw: true },
+    sessions: { total: 0 },
+    rssMb: 9_001,
+    warnings: [
+      expect.stringContaining("RSS 9001 MiB exceeds 8192 MiB"),
+      expect.stringContaining("run olw status for per-binding state"),
+    ],
+  });
+});
+
+test("resolves the OMO agent directory with launcher precedence and cwd-relative overrides", () => {
+  expect(
+    resolveOmoAgentDir(
+      {
+        HOME: "/fallback",
+        SENPI_CODING_AGENT_DIR: "senpi-state",
+        PI_CODING_AGENT_DIR: "/pi-state",
+      },
+      "/fixture/cwd",
+    ),
+  ).toBe("/fixture/cwd/senpi-state");
+  expect(
+    resolveOmoAgentDir({ HOME: "/fallback", SENPI_CODING_AGENT_DIR: "relative" }, process.cwd()),
+  ).toBe(join(process.cwd(), "relative"));
+  expect(
+    resolveOmoAgentDir({ HOME: "/fallback", OMO_CODING_AGENT_DIR: " /omo-state " }, "/fixture/cwd"),
+  ).toBe("/omo-state");
+  expect(resolveOmoAgentDir({ HOME: "/fallback" }, "/fixture/cwd")).toBe("/fallback/.omo/agent");
+  expect(resolveOmoAgentDir({ HOME: "", USERPROFILE: "/fixture/profile" }, "/fixture/cwd")).toBe(
+    "/fixture/profile/.omo/agent",
+  );
+  expect(resolveOmoAgentDir({ HOME: "", USERPROFILE: "" }, "/fixture/cwd")).toBe(
+    join(homedir(), ".omo/agent"),
+  );
+});
+
+test("reads only recent crashes for this socket and labels SIGKILL as likely OOM", async () => {
+  const { root, status } = await fixture();
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(status.socket));
+  await mkdir(daemonDir, { recursive: true });
+  await writeFile(
+    join(daemonDir, "crashes.jsonl"),
+    [
+      JSON.stringify({ at: "2026-09-20T23:59:59.999Z", signal: "SIGBUS", uptimeMs: 1 }),
+      JSON.stringify({ at: "2026-09-21T00:00:00.000Z", signal: "SIGKILL", uptimeMs: 2 }),
+      JSON.stringify({ at: "2026-09-27T17:54:32.119Z", signal: "SIGKILL", uptimeMs: 14_398_708 }),
+      "not-json",
+      JSON.stringify({ at: "2026-09-28T01:00:00.000Z", code: 1, uptimeMs: 50 }),
+    ].join("\n"),
+  );
+  const health = await inspectHostHealth(
+    root,
+    { ...status, rss_mb: 512 },
+    {
+      agentDir,
+      now: () => new Date("2026-09-28T02:00:00.000Z"),
+    },
+  );
+  expect(health.crashes).toEqual([
+    {
+      at: "2026-09-27T17:54:32.119Z",
+      signal: "SIGKILL",
+      uptimeMs: 14_398_708,
+      likelyOom: true,
+    },
+    { at: "2026-09-28T01:00:00.000Z", code: 1, uptimeMs: 50, likelyOom: false },
+  ]);
+});
+
+test("preserves host diagnostics when the crash journal cannot be read", async () => {
+  const { root, status } = await fixture();
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const journal = join(
+    agentDir,
+    "rpc-host-daemon",
+    daemonDirectoryName(status.socket),
+    "crashes.jsonl",
+  );
+  await mkdir(journal, { recursive: true });
+  const health = await inspectHostHealth(root, { ...status, rss_mb: 512 }, { agentDir });
+  expect(health.reachable).toBe(true);
+  expect(health.crashes).toEqual([]);
+  expect(health.crashHistoryError).toContain("crashes.jsonl");
+});
+
+test("flags a default crash-restart profile and provides the exact safe handoff command", async () => {
+  const { root, status } = await fixture();
+  const health = await inspectHostHealth(
+    root,
+    {
+      ...status,
+      generation: 0,
+      rss_mb: 300,
+      launchProfile: hostLaunchProfile(
+        ["--mode", "rpc", "--multi-session", "--session-runtime", "in-process"],
+        root,
+      ),
+    },
+    { agentDir: join(root, "agent") },
+  );
+  expect(health.profile).toMatchObject({
+    matchesOlw: false,
+    recovery: {
+      argv: [
+        join(root, "node_modules/.bin/omo"),
+        "host",
+        "handoff",
+        "--launch-spec",
+        join(root, "omo-host.json"),
+        "--socket",
+        status.socket,
+      ],
+    },
+  });
+  expect(health.warnings).toEqual([expect.stringContaining("does not match OLW")]);
+  expect(health.profile.recovery).toMatchObject({
+    ready: false,
+    preparation: expect.any(Array),
+    env: runtimeCacheEnvironment(root),
+    argv: expect.any(Array),
+  });
+});
+
+test("doctor leaves the endpoint daemon tree byte-identical", async () => {
+  const { root, status } = await fixture();
+  await mkdir(join(root, "node_modules/.bin"), { recursive: true });
+  await Bun.write(join(root, "node_modules/.bin/omo"), "#!/bin/sh\nexit 91\n");
+  await chmod(join(root, "node_modules/.bin/omo"), 0o700);
+  await cp(join(import.meta.dir, "../herdr-release.json"), join(root, "herdr-release.json"));
+  await cp(join(import.meta.dir, "../.omo/herdr"), join(root, ".omo/herdr"), { recursive: true });
+  await mkdir(join(root, ".omo/state"), { recursive: true });
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(status.socket));
+  await mkdir(join(daemonDir, "generations/dead/scratch"), { recursive: true });
+  await mkdir(join(daemonDir, "reservations"), { recursive: true });
+  await writeFile(
+    join(daemonDir, "host.pid"),
+    JSON.stringify({ layout: 2, instance_id: "dead", generation_dir: "generations/dead" }),
+  );
+  await writeFile(
+    join(daemonDir, "generations/dead/host.pid"),
+    JSON.stringify({ pid: 2_147_483_647, processStartTime: "1", generation: 7 }),
+  );
+  await writeFile(
+    join(daemonDir, "reservations/old-session.json"),
+    JSON.stringify({ sessionPath: "/old/session.jsonl", attached: true }),
+  );
+  const commands: string[] = [];
+  const server = createServer((client) => {
+    client.on("data", (chunk) => {
+      const request = JSON.parse(chunk.toString("utf8").trim());
+      commands.push(request.type);
+      client.write(
+        `${JSON.stringify({
+          id: request.id,
+          success: true,
+          data: {
+            protocolVersion: 1,
+            serverVersion: "fixture",
+            capabilities: [],
+            generation: 7,
+            launch_profile: status.launchProfile,
+          },
+        })}\n`,
+      );
+    });
+  });
+  const listening = Promise.withResolvers<void>();
+  server.once("listening", () => listening.resolve());
+  server.once("error", (cause) => listening.reject(cause));
+  server.listen(status.socket);
+  await Promise.race([
+    listening.promise,
+    new Promise<never>((_resolve, reject) =>
+      setTimeout(() => reject(new Error("fixture socket did not listen")), 1_000),
+    ),
+  ]);
+  const snapshot = async () => {
+    const files = (await readdir(daemonDir, { recursive: true })).sort();
+    return Promise.all(
+      files.map(async (file) => {
+        const path = join(daemonDir, file);
+        return [file, (await Bun.file(path).exists()) && (await Bun.file(path).text())] as const;
+      }),
+    );
+  };
+  const before = await snapshot();
+  const proc = Bun.spawn(
+    [process.execPath, join(import.meta.dir, "../src/cli.ts"), "--root", root, "doctor", "--json"],
+    {
+      cwd: root,
+      env: { ...process.env, HOME: root, SENPI_CODING_AGENT_DIR: agentDir },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]).finally(() => server.close());
+  const output = JSON.parse(stdout);
+  expect([code, stderr]).toEqual([3, ""]);
+  expect(output).toMatchObject({
+    ok: false,
+    error: { details: { sideEffects: false } },
+  });
+  expect(commands).toEqual(["get_protocol_info"]);
+  expect(await snapshot()).toEqual(before);
 });

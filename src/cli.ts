@@ -13,11 +13,7 @@ import {
 } from "./core/schema";
 import { openRegistry } from "./core/store";
 import { resolveHerdrArtifact } from "./herdr/artifact";
-import {
-  inspectHostHealth,
-  readHostStatusReadOnly,
-  resolveOmoAgentDir,
-} from "./host-profile";
+import { inspectHostHealth, readHostStatusReadOnly, resolveOmoAgentDir } from "./host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
 import { fetchMirror, listMirrors, MirrorError } from "./repo/mirror";

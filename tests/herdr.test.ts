@@ -281,8 +281,11 @@ describe("HerdrClient", () => {
     );
     const client = createHerdrClient(server.path);
     cleanups.push(() => client.close());
-    expect(await client.paneForegroundProcessNames("ws:p1")).toEqual(["zsh", "bun"]);
-    await expect(client.paneForegroundProcessNames("ws:p2")).rejects.toMatchObject({
+    expect(await client.paneForegroundProcesses("ws:p1")).toEqual([
+      { pid: 1, name: "zsh" },
+      { pid: 2, name: "bun" },
+    ]);
+    await expect(client.paneForegroundProcesses("ws:p2")).rejects.toMatchObject({
       code: "pane_mismatch",
     });
   });

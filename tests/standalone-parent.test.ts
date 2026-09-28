@@ -432,8 +432,8 @@ async function world() {
     async paneContainsProcess() {
       return true;
     },
-    async paneForegroundProcessNames() {
-      return ["bun"];
+    async paneForegroundProcesses() {
+      return [{ pid: 424242, name: "bun" }];
     },
     async run(paneId, argv) {
       launches.push(paneId);

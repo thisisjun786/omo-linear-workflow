@@ -1218,7 +1218,8 @@ export class Orchestrator {
       // A pane reporting a session file must report this manager's session; `pi`/`omo` alone
       // (reporters without a session path) stays accepted for official Herdr compatibility.
       // A reporter can leave its agent label behind after the TUI exits, so an agent-only
-      // pane counts as live only while a Bun process holds its foreground.
+      // pane counts as live only while a Bun process other than this entry holds its
+      // foreground (bare `olw` typed in the stale manager pane is itself a Bun process).
       const tuiRunning =
         recordedPane !== undefined &&
         hasLiveTui(recordedPane) &&
@@ -1226,8 +1227,8 @@ export class Orchestrator {
           recordedPane.sessionPath === binding.sessionPath) &&
         (typeof recordedPane.sessionPath === "string" ||
           (
-            await this.#whileForeground(herdr.paneForegroundProcessNames(recordedPane.paneId), here)
-          ).includes("bun"));
+            await this.#whileForeground(herdr.paneForegroundProcesses(recordedPane.paneId), here)
+          ).some((process) => process.name === "bun" && !this.#entryProcess(process.pid)));
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
@@ -1498,6 +1499,11 @@ export class Orchestrator {
 
   #whileForeground<T>(work: Promise<T>, here?: ManagerHere): Promise<T> {
     return here === undefined ? work : Promise.race([work, here.interruption]);
+  }
+
+  /** This entry's own process or its launcher shell, which share the pane foreground. */
+  #entryProcess(pid: number): boolean {
+    return pid === process.pid || pid === process.ppid;
   }
 
   #ownsForeground(here: ManagerHere): boolean {

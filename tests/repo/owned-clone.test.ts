@@ -117,8 +117,8 @@ async function world() {
     async paneContainsProcess() {
       return true;
     },
-    async paneForegroundProcessNames() {
-      return ["bun"];
+    async paneForegroundProcesses() {
+      return [{ pid: 424242, name: "bun" }];
     },
     async sendKeys() {},
     async run(paneId, argv) {

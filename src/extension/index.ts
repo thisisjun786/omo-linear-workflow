@@ -8,9 +8,7 @@ import {
   isTerminalMonitorStateEvent,
   isWakeSourceStateEvent,
 } from "../../node_modules/@code-yeongyu/senpi/dist/core/extensions/builtin/monitor-state-event.js";
-import type { Binding } from "../core/contracts";
 import { openRegistry } from "../core/store";
-import { probeBindingSession } from "../transport";
 import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
 import { createRoleHerdrClient, registerRoleHerdrReporter } from "./herdr-reporter";
@@ -75,42 +73,10 @@ export function questionWaitWire(
   };
 }
 
-export async function abortOrphanedFallbackTurn(
-  root: string,
-  ctx: {
-    abort(source?: "user" | "system"): void;
-    sessionManager: { getSessionId(): string };
-  },
-  probe: (binding: Binding) => ReturnType<typeof probeBindingSession> = probeBindingSession,
-): Promise<boolean> {
-  const dbPath = join(root, ".omo/state/registry.sqlite");
-  if (!existsSync(dbPath)) return false;
-  const registry = openRegistry(dbPath, { readonly: true });
-  try {
-    const binding = registry.bySession(ctx.sessionManager.getSessionId());
-    if (!binding.ok) return false;
-    const observed = await probe(binding.value);
-    if (observed.state !== "absent") return false;
-    ctx.abort("system");
-    return true;
-  } finally {
-    registry.close();
-  }
-}
-
 export default function initiativeExtension(pi: ExtensionAPI): void {
   registerManagerIdle(pi);
   const { OMO_INITIATIVE_HOST: hostMarker, OMO_INITIATIVE_ROOT: initiativeRoot } = process.env;
   const root = initiativeRoot ?? pi.cwd;
-  if (hostMarker !== "1") {
-    pi.on("session_start", async (_event, ctx) => {
-      try {
-        await abortOrphanedFallbackTurn(root, ctx);
-      } catch (cause) {
-        console.error("OLW fallback host-session check failed", cause);
-      }
-    });
-  }
   const debug = debuglog("olw:herdr");
   registerRoleHerdrReporter(
     {

@@ -776,21 +776,7 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
     });
     const runtimeDependencies = {
       ...w.dependencies,
-      readHostStatus: async () => ({
-        reachable: true,
-        socket: "/fake/omo",
-        generation: 0,
-        launchProfile: null,
-        sessions: {
-          total: 1,
-          interactive: 1,
-          worker: 0,
-          retained: 0,
-          foreign_attached: 0,
-          foreign_retained: 0,
-        },
-        env_keys: [],
-      }),
+      readHostReachabilityReadOnly: async () => "reachable" as const,
       probeBindingSession: async (binding: Binding) =>
         binding.id === child.id ? { state: "absent" as const } : { state: "open" as const },
       attachBinding: async (binding: Binding) => {
@@ -804,12 +790,12 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
     const orchestrator = new Orchestrator(w.root, "/fake/herdr", runtimeDependencies);
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
-        ok: true,
-        value: expect.arrayContaining([
-          expect.objectContaining({ id: child.id, runtimeState: "local_only" }),
-        ]),
-      });
+      const inspected = await orchestrator.statusWithRuntimeHealth();
+      expect(inspected.ok).toBe(true);
+      if (!inspected.ok) throw new Error(inspected.error.message);
+      expect(
+        inspected.value.find((binding) => binding.id === child.id)?.runtimeState,
+      ).toBeUndefined();
     }
     expect(prompts).toHaveLength(0);
     expect(value(w.registry.operationalNotices({}))).toHaveLength(0);
@@ -860,7 +846,7 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
   }
 });
 
-test("runtime health distinguishes starting and unknown probes without notifying", async () => {
+test("read-only runtime health does not probe exact sessions or notify", async () => {
   const w = await world();
   try {
     const starting = w.ready(w.reserve("starting", "direct"), "starting-ws", "starting-ws:p");
@@ -868,38 +854,23 @@ test("runtime health distinguishes starting and unknown probes without notifying
     const prompts: string[] = [];
     const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
       ...w.dependencies,
-      readHostStatus: async () => ({
-        reachable: true,
-        socket: "/fake/omo",
-        generation: 0,
-        launchProfile: null,
-        sessions: {
-          total: 2,
-          interactive: 2,
-          worker: 0,
-          retained: 0,
-          foreign_attached: 0,
-          foreign_retained: 0,
-        },
-        env_keys: [],
-      }),
-      probeBindingSession: async (binding) =>
-        binding.id === starting.id
-          ? { state: "present" as const, status: "opening" as const }
-          : binding.id === unknown.id
-            ? { state: "unknown" as const, reason: "probe timed out" }
-            : { state: "open" as const },
+      readHostReachabilityReadOnly: async () => "reachable" as const,
+      probeBindingSession: async () => {
+        throw new Error("Read-only status must not list native sessions");
+      },
       prompt: async (_binding, text) => {
         prompts.push(text);
       },
     });
-    expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
-      ok: true,
-      value: expect.arrayContaining([
-        expect.objectContaining({ id: starting.id, runtimeState: "starting" }),
-        expect.objectContaining({ id: unknown.id, runtimeState: "unknown" }),
-      ]),
-    });
+    const inspected = await orchestrator.statusWithRuntimeHealth();
+    expect(inspected.ok).toBe(true);
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    expect(
+      inspected.value.find((binding) => binding.id === starting.id)?.runtimeState,
+    ).toBeUndefined();
+    expect(
+      inspected.value.find((binding) => binding.id === unknown.id)?.runtimeState,
+    ).toBeUndefined();
     expect(prompts).toEqual([]);
     expect(value(w.registry.operationalNotices({}))).toEqual([]);
   } finally {
@@ -944,21 +915,7 @@ test("project reconciliation checks an affected manager outside display scope an
     const prompts: string[] = [];
     const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
       ...w.dependencies,
-      readHostStatus: async () => ({
-        reachable: true,
-        socket: "/fake/omo",
-        generation: 0,
-        launchProfile: null,
-        sessions: {
-          total: 0,
-          interactive: 0,
-          worker: 0,
-          retained: 0,
-          foreign_attached: 0,
-          foreign_retained: 0,
-        },
-        env_keys: [],
-      }),
+      readHostReachabilityReadOnly: async () => "reachable" as const,
       probeBindingSession: async () => ({ state: "absent" as const }),
       attachBinding: async () => {
         throw new NativeSessionAbsentError();

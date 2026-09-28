@@ -44,7 +44,25 @@ test("an unreachable host reports no generation even when its registration remai
   const status = await readHostStatusReadOnly(socket, agentDir);
 
   expect(status.reachable).toBe(false);
+  expect(status.reachability).toBe("unreachable");
   expect(status.generation).toBeNull();
+});
+
+test("read-only status classifies a silent protocol endpoint as unknown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-host-silent-"));
+  roots.push(root);
+  const socket = join(root, "silent.sock");
+  const server = createServer((connection) => connection.on("data", () => {}));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socket, resolve);
+  });
+  try {
+    const status = await readHostStatusReadOnly(socket, join(root, "agent"));
+    expect(status).toMatchObject({ reachable: false, reachability: "unknown" });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 async function fixture() {

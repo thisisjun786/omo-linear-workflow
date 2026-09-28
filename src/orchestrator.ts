@@ -49,6 +49,8 @@ import {
   handoffHost,
   observeEmptyHostSessions,
   readHostStatus,
+  readHostStatusReadOnly,
+  resolveOmoAgentDir,
   runtimeCacheEnvironment,
   verifyHostAfterHandoff,
 } from "./host-profile";
@@ -298,6 +300,9 @@ export interface OrchestratorDependencies {
   readonly createHerdrClient: (socket: string) => HerdrClient;
   readonly attachBinding: (binding: Binding) => Promise<NativeSession>;
   readonly probeBindingSession?: (binding: Binding) => Promise<NativeSessionProbe>;
+  readonly readHostReachabilityReadOnly?: (
+    socket: string,
+  ) => Promise<"reachable" | "unreachable" | "unknown">;
   readonly terminateBinding: (binding: Binding) => Promise<void>;
   readonly resolveHerdrArtifact: (root: string) => Promise<{ readonly artifactDir: string }>;
   readonly ensureHost: (
@@ -597,6 +602,13 @@ const defaults: OrchestratorDependencies = {
   createHerdrClient,
   attachBinding,
   probeBindingSession,
+  readHostReachabilityReadOnly: async (socket) => {
+    const status = await readHostStatusReadOnly(
+      socket,
+      resolveOmoAgentDir(process.env, process.cwd()),
+    );
+    return status.reachability ?? (status.reachable ? "reachable" : "unknown");
+  },
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
@@ -2875,23 +2887,26 @@ export class Orchestrator {
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {
       const snapshot = await herdr.snapshot();
-      const live = candidates.filter((binding) =>
-        snapshot.panes.some(
-          (pane) =>
-            pane.paneId === binding.paneId &&
-            pane.workspaceId === binding.workspaceId &&
-            hasLiveTui(pane),
-        ),
-      );
+      const live: StatusBinding[] = [];
+      for (const binding of candidates) {
+        const pane = snapshot.panes.find(
+          (candidate) =>
+            candidate.paneId === binding.paneId && candidate.workspaceId === binding.workspaceId,
+        );
+        if (pane === undefined) continue;
+        if (hasLiveTui(pane) || (await readReadiness(this.#root, binding)) !== null)
+          live.push(binding);
+      }
       if (live.length === 0) return listed;
-      const hostReachability = new Map<string, "reachable" | "lost" | "unknown">();
+      const hostReachability = new Map<string, "reachable" | "unreachable" | "unknown">();
       for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
         try {
-          const status = await (this.#deps.readHostStatus ?? readHostStatus)(this.#root, socket, {
-            ...process.env,
-            ...runtimeCacheEnvironment(this.#root),
-          });
-          hostReachability.set(socket, status.reachable ? "reachable" : "lost");
+          hostReachability.set(
+            socket,
+            await (this.#deps.readHostReachabilityReadOnly ?? defaults.readHostReachabilityReadOnly)(
+              socket,
+            ),
+          );
         } catch {
           hostReachability.set(socket, "unknown");
         }
@@ -2899,7 +2914,12 @@ export class Orchestrator {
       const states = new Map<string, NonNullable<StatusBinding["runtimeState"]>>();
       for (const binding of live) {
         const host = hostReachability.get(binding.omoSocket);
-        if (host === "lost") {
+        if (!notify) {
+          if (host === "unreachable") states.set(binding.id, "host_lost");
+          else if (host === "unknown") states.set(binding.id, "unknown");
+          continue;
+        }
+        if (host === "unreachable") {
           states.set(binding.id, "host_lost");
           continue;
         }

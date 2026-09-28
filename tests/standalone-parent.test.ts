@@ -475,6 +475,9 @@ async function world() {
     createHerdrClient: () => herdr,
     resolveHerdrArtifact: async () => ({ artifactDir: "/fixture/herdr" }),
     ensureHost: async () => {},
+    readHostReachabilityReadOnly: async () => "reachable",
+    probeBindingSession: async (binding) =>
+      identities.has(binding.id) ? { state: "open" } : { state: "absent" },
     gitTip: (cwd, ref) => fixtureTip(control, "base-commit", cwd, ref),
     now: () => "2026-09-23",
     uuid: () => `id-${++sequence}`,
@@ -996,7 +999,7 @@ test("no-supervisor creation through child instruction, report and user inbox us
     ok: true,
     value: { id: p.id, designationId: p.designationId, assignment: { ownerBindingId: null } },
   });
-  expect(w.registry((r) => value(r.get(p.id)))).toEqual(p);
+  expect(w.registry((r) => value(r.get(p.id)))).toEqual({ ...p, runtimeState: "connected" });
   expect(w.sends).toHaveLength(sendsBefore);
 });
 

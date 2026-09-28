@@ -123,6 +123,8 @@ test("accepts required effective extensions while retaining additional host exte
     ),
   };
   expect(await createHostProfile(root, withExtra)).toBe(join(root, "omo-host.json"));
+  const health = await inspectHostHealth(root, withExtra, { agentDir: join(root, "agent") });
+  expect(health.profile.matchesOlw).toBe(true);
   expect(withExtra.launchProfile.core.extensions).toHaveLength(4);
 });
 
@@ -368,6 +370,14 @@ test("prepares a new profile when no host is reachable", async () => {
   expect(await createHostProfile(root, { ...status, reachable: false, launchProfile: null })).toBe(
     join(root, "omo-host.json"),
   );
+  await rm(join(root, "omo-host.json"));
+  const health = await inspectHostHealth(
+    root,
+    { ...status, reachable: false, launchProfile: null },
+    { agentDir: join(root, "agent") },
+  );
+  expect(health.profile.matchesOlw).toBe(false);
+  expect(health.profile.recovery).toMatchObject({ ready: false, preparation: expect.any(Array) });
 });
 
 test("reports generation, profile, sessions, RSS warnings, and local-only roles", async () => {
@@ -409,6 +419,9 @@ test("resolves the OMO agent directory with launcher precedence and cwd-relative
       "/fixture/cwd",
     ),
   ).toBe("/fixture/cwd/senpi-state");
+  expect(
+    resolveOmoAgentDir({ HOME: "/fallback", SENPI_CODING_AGENT_DIR: "relative" }, process.cwd()),
+  ).toBe(join(process.cwd(), "relative"));
   expect(
     resolveOmoAgentDir({ HOME: "/fallback", OMO_CODING_AGENT_DIR: " /omo-state " }, "/fixture/cwd"),
   ).toBe("/omo-state");
@@ -458,6 +471,25 @@ test("reads only recent crashes for this socket and labels SIGKILL as likely OOM
   ]);
 });
 
+test("preserves host diagnostics when the crash journal cannot be read", async () => {
+  const { root, status } = await fixture();
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const journal = join(
+    agentDir,
+    "rpc-host-daemon",
+    daemonDirectoryName(status.socket),
+    "crashes.jsonl",
+  );
+  await mkdir(journal, { recursive: true });
+  const health = await inspectHostHealth(root, { ...status, rss_mb: 512 }, { agentDir });
+  expect(health.reachable).toBe(true);
+  expect(health.crashes).toEqual([]);
+  expect(health.crashHistoryError).toContain("crashes.jsonl");
+});
+
 test("flags a default crash-restart profile and provides the exact safe handoff command", async () => {
   const { root, status } = await fixture();
   const health = await inspectHostHealth(
@@ -489,6 +521,8 @@ test("flags a default crash-restart profile and provides the exact safe handoff 
   });
   expect(health.warnings).toEqual([expect.stringContaining("does not match OLW")]);
   expect(health.profile.recovery).toMatchObject({
+    ready: false,
+    preparation: expect.any(Array),
     env: runtimeCacheEnvironment(root),
     argv: expect.any(Array),
   });

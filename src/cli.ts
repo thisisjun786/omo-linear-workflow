@@ -264,7 +264,7 @@ function scopeFilter(options: Options, required: boolean): Result<ScopeFilter> {
 
 async function hostHealth(root: string, readyBindings: number) {
   const socket = join(root, ".omo/state/omo.sock");
-  const agentDir = resolveOmoAgentDir(process.env, root);
+  const agentDir = resolveOmoAgentDir(process.env, process.cwd());
   const status = await readHostStatusReadOnly(socket, agentDir);
   const configuredThreshold = Number(process.env["OLW_HOST_RSS_WARNING_MB"] ?? "8192");
   return inspectHostHealth(root, status, {

@@ -1,0 +1,30 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/manage.test.ts:
+41 |   if (previousSocket === undefined) delete process.env["HERDR_SOCKET_PATH"];
+42 |   else process.env["HERDR_SOCKET_PATH"] = previousSocket;
+43 |   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+44 | });
+45 | function value<T>(result: Result<T>): T {
+46 |   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+                                 ^
+error: manager_unavailable: An unfinished manager still has a live TUI; reconcile it before recovery
+      at value (/home/jun/code/olw-wt/fix-stale-pane-agent/tests/manage.test.ts:46:29)
+      at <anonymous> (/home/jun/code/olw-wt/fix-stale-pane-agent/tests/manage.test.ts:864:14)
+(fail) bare entry reclaims a dead reserved launch owner through a new fenced token [132.73ms]
+41 |   if (previousSocket === undefined) delete process.env["HERDR_SOCKET_PATH"];
+42 |   else process.env["HERDR_SOCKET_PATH"] = previousSocket;
+43 |   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+44 | });
+45 | function value<T>(result: Result<T>): T {
+46 |   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+                                 ^
+error: manager_unavailable: An unfinished manager still has a live TUI; reconcile it before recovery
+      at value (/home/jun/code/olw-wt/fix-stale-pane-agent/tests/manage.test.ts:46:29)
+      at <anonymous> (/home/jun/code/olw-wt/fix-stale-pane-agent/tests/manage.test.ts:864:14)
+(fail) bare entry reclaims a dead provisioning launch owner through a new fenced token [114.59ms]
+
+ 0 pass
+ 80 filtered out
+ 2 fail
+Ran 2 tests across 1 file. [777.00ms]

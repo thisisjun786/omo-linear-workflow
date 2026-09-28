@@ -843,7 +843,10 @@ test.each(["reserved", "provisioning"] as const)(
     );
     db.query("UPDATE manager_reattach SET owner_pid = ?").run(child.pid);
     db.close();
-    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "", agent: "pi" });
+    Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+      paneForegroundProcesses: async () => [{ pid: 1998154, name: "zsh" }],
+    });
     const old = {
       HERDR_ENV: process.env["HERDR_ENV"],
       HERDR_PANE_ID: process.env["HERDR_PANE_ID"],

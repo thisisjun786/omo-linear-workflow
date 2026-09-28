@@ -561,6 +561,102 @@ test("status/close: interrupted uncertain-successor retirement resumes without c
   }
 });
 
+test("status/close: resumed uncertain-successor close refuses a replacement TUI", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+    const execute = value(w.registry.get("execute"));
+    if (execute.sessionPath === null) throw new Error("Missing execute session path");
+    const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+      id: execute.durableSessionId,
+    });
+    const header = manager.getHeader();
+    if (header === null) throw new Error("Missing execute session header");
+    await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+
+    w.setFault("after-terminate");
+    expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable" },
+    });
+    expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(true);
+
+    w.setFault("none");
+    w.paneSessions.set("childws:execute", "/replacement/session.jsonl");
+    w.agentPanes.add("childws:execute");
+    const quitsBeforeRetry = w.events.filter((event) => event === "quit:childws:execute").length;
+    expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+      ok: false,
+      error: { code: "identity_mismatch" },
+    });
+    expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(
+      quitsBeforeRetry,
+    );
+    expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(true);
+    expect(value(w.registry.get("execute")).launchState).toBe("closing");
+    expect(value(w.registry.stageOf("execute"))).not.toBeNull();
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("status/close: uncertain local-only successor closes while its host is unreachable", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+    const execute = value(w.registry.get("execute"));
+    if (execute.sessionPath === null) throw new Error("Missing execute session path");
+    const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+      id: execute.durableSessionId,
+    });
+    const header = manager.getHeader();
+    if (header === null) throw new Error("Missing execute session header");
+    await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+    const hostUnavailable = Object.assign(new Error("connect ENOENT /missing/omo.sock"), {
+      code: "ENOENT",
+    });
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      terminateBinding: async () => {
+        throw hostUnavailable;
+      },
+    });
+
+    expect(await orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
+    expect(value(w.registry.get("plan"))).toMatchObject({
+      launchState: "ready",
+      contactState: "active",
+    });
+    expect(value(w.registry.stageOf("execute"))).toBeNull();
+    expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(false);
+    expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(1);
+  } finally {
+    w.cleanup();
+  }
+});
+
 test("status/close: repeated interruptions finish closure with exactly one workspace removal", async () => {
   const w = await world();
   try {

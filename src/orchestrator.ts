@@ -3349,47 +3349,52 @@ export class Orchestrator {
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     try {
       const snapshot = await herdr.snapshot();
+      const workspace = snapshot.workspaces.find(
+        (item) => item.workspaceId === binding.workspaceId,
+      );
       const pane = snapshot.panes.find(
         (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
       );
-      if (!pending.value) {
-        const workspace = snapshot.workspaces.find(
-          (item) => item.workspaceId === binding.workspaceId,
+      if (workspace === undefined || workspace.cwd !== binding.cwd || binding.sessionPath === null)
+        return failure(
+          "identity_mismatch",
+          "Uncertain successor workspace or session identity does not match the binding",
         );
-        if (
-          workspace === undefined ||
-          workspace.cwd !== binding.cwd ||
-          pane === undefined ||
-          pane.sessionPath !== binding.sessionPath ||
-          binding.sessionPath === null
-        )
+      try {
+        if (SessionManager.open(binding.sessionPath).getSessionId() !== binding.durableSessionId)
           return failure(
             "identity_mismatch",
-            "Uncertain successor workspace, pane, or session path does not match the binding",
+            "Uncertain successor durable session does not match the binding",
           );
-        try {
-          if (SessionManager.open(binding.sessionPath).getSessionId() !== binding.durableSessionId)
-            return failure(
-              "identity_mismatch",
-              "Uncertain successor durable session does not match the binding",
-            );
-        } catch (cause) {
-          return failure(
-            "identity_mismatch",
-            "Uncertain successor session identity could not be verified",
-            messageOf(cause),
-          );
-        }
+      } catch (cause) {
+        return failure(
+          "identity_mismatch",
+          "Uncertain successor session identity could not be verified",
+          messageOf(cause),
+        );
       }
+      if (pane !== undefined && pane.sessionPath !== binding.sessionPath)
+        return failure(
+          "identity_mismatch",
+          "Uncertain successor pane advertises a different session",
+        );
+      if (!pending.value && pane === undefined)
+        return failure("identity_mismatch", "Uncertain successor pane does not match the binding");
+
       const closing = this.#withRegistry((registry) =>
         registry.beginUncertainSuccessorClose(binding.id),
       );
       if (!closing.ok) return closing;
-      if (pane !== undefined && hasLiveTui(pane)) {
-        const stopped = await this.#stopStageSession(binding, herdr);
+      let localStopped = pane === undefined || !hasLiveTui(pane);
+      if (!localStopped) {
+        const stopped = await this.#stopStageSession(binding, herdr, false);
         if (!stopped.ok) return stopped;
-      } else {
+        localStopped = true;
+      }
+      try {
         await this.#deps.terminateBinding(binding);
+      } catch (cause) {
+        if (!localStopped || !this.#hostIsUnreachable(cause)) throw cause;
       }
       await removeReadiness(this.#root, binding.id);
       return this.#withRegistry((registry) => registry.closeUncertainSuccessor(binding.id));
@@ -3402,6 +3407,15 @@ export class Orchestrator {
     } finally {
       herdr.close();
     }
+  }
+
+  #hostIsUnreachable(cause: unknown): boolean {
+    return (
+      cause instanceof NativeSessionAbsentError ||
+      (cause instanceof Error &&
+        "code" in cause &&
+        (cause.code === "ENOENT" || cause.code === "ECONNREFUSED"))
+    );
   }
 
   async #closeLineage(target: Binding, confirmAbsent: boolean): Promise<Result<Binding>> {
@@ -3507,7 +3521,11 @@ export class Orchestrator {
     }
   }
 
-  async #stopStageSession(binding: Binding, herdr: HerdrClient): Promise<Result<void>> {
+  async #stopStageSession(
+    binding: Binding,
+    herdr: HerdrClient,
+    terminateNative = true,
+  ): Promise<Result<void>> {
     if (binding.paneId === null) return failure("runtime_unavailable", "Stage has no Herdr pane");
     let stop: (() => void) | undefined;
     try {
@@ -3529,7 +3547,7 @@ export class Orchestrator {
       } finally {
         clearTimeout(timeout);
       }
-      await this.#deps.terminateBinding(binding);
+      if (terminateNative) await this.#deps.terminateBinding(binding);
       return ok(undefined);
     } finally {
       stop?.();

@@ -253,6 +253,103 @@ test("a read-only registry without a generation column still returns lineage", a
   }
 });
 
+test("writable migration backfills legacy successor launch attempts without changing read-only bytes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "olw-successor-attempt-migration-"));
+  const path = join(dir, "registry.sqlite");
+  const registry = openRegistry(path);
+  try {
+    const digest = value(registry.importScope(snapshot)).digest;
+    const designation = {
+      id: "designation",
+      snapshotDigest: digest,
+      designatedBy: "user",
+      designatedAt: "now",
+      create: true,
+      execute: true,
+      contact: true,
+    };
+    const parent = value(
+      registry.reserve({
+        designation,
+        snapshot,
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/tmp/herdr",
+        omoSocket: "/tmp/omo",
+        bindingId: "parent",
+        durableSessionId: "session-parent",
+        assignment: {
+          role: "parent",
+          initiativeId: null,
+          projectId: "project",
+          ownerBindingId: null,
+        },
+      }),
+    );
+    value(
+      registry.reserve({
+        designation,
+        snapshot,
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/tmp/herdr",
+        omoSocket: "/tmp/omo",
+        bindingId: "execute",
+        durableSessionId: "session-execute",
+        assignment: {
+          role: "child",
+          initiativeId: null,
+          projectId: "project",
+          issueId: "issue",
+          ownerBindingId: parent.id,
+        },
+      }),
+    );
+  } finally {
+    registry.close();
+  }
+  const legacy = new Database(path);
+  try {
+    legacy.run("DROP TABLE successor_launch_attempts");
+    legacy
+      .query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'legacy-time', 'legacy-owner')",
+      )
+      .run();
+  } finally {
+    legacy.close();
+  }
+  const before = await Bun.file(path).arrayBuffer();
+  const readonly = openRegistry(path, { readonly: true });
+  readonly.close();
+  expect(Buffer.from(await Bun.file(path).arrayBuffer())).toEqual(Buffer.from(before));
+
+  const migrated = openRegistry(path);
+  migrated.close();
+  const reopened = openRegistry(path);
+  reopened.close();
+  const inspected = new Database(path, { readonly: true });
+  try {
+    expect(
+      inspected
+        .query<{ attempt_number: number; owner: string; state: string; claimed_at: string }, []>(
+          "SELECT attempt_number, owner, state, claimed_at FROM successor_launch_attempts WHERE binding_id = 'execute'",
+        )
+        .all(),
+    ).toEqual([
+      {
+        attempt_number: 1,
+        owner: "legacy-owner",
+        state: "uncertain",
+        claimed_at: "legacy-time",
+      },
+    ]);
+  } finally {
+    inspected.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("malformed persisted handoff returns storage_corrupt from every lineage and transaction path", async () => {
   await fixture((path, registry, _parent, plan, next) => {
     value(registry.recordStage(plan.id, "issue", "plan", 0, null));

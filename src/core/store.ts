@@ -236,6 +236,16 @@ export function openRegistry(
     if (!successorColumns.some((column) => column.name === "state")) {
       db.run("ALTER TABLE successor_launch ADD COLUMN state TEXT NOT NULL DEFAULT 'claimed'");
     }
+    db.run(`INSERT INTO successor_launch_attempts
+      (binding_id, attempt_number, owner, state, claimed_at)
+      SELECT launch.binding_id,
+        COALESCE((SELECT max(attempt_number) + 1 FROM successor_launch_attempts
+          WHERE binding_id = launch.binding_id), 1),
+        launch.owner, launch.state, launch.claimed_at
+      FROM successor_launch AS launch
+      WHERE NOT EXISTS (
+        SELECT 1 FROM successor_launch_attempts AS attempt WHERE attempt.owner = launch.owner
+      )`);
     db.run(`CREATE TABLE IF NOT EXISTS deliveries (
     message_id TEXT PRIMARY KEY,
     envelope_json TEXT NOT NULL,

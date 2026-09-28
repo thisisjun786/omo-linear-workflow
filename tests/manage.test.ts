@@ -24,7 +24,7 @@ import {
 } from "../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
-import type { NativeSession } from "../src/transport";
+import { type NativeSession, TuiLocalFallbackError } from "../src/transport";
 import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
@@ -377,6 +377,105 @@ test.each([true, false])(
     expect(w.runs).toHaveLength(1);
   },
 );
+
+test.each(["new-manager", "reattach", "parent"] as const)(
+  "%s hold-only fallback never reaches native initialization",
+  async (mode) => {
+    const w = await world();
+    const manager = mode === "reattach" ? value(await w.orchestrator.manage()).binding : undefined;
+    if (manager?.paneId) w.panes.delete(manager.paneId);
+    let listener: ((event: unknown) => void) | undefined;
+    let quits = 0;
+    const closed: string[] = [];
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const closeTab = herdr.closeTab.bind(herdr);
+    Object.assign(herdr, {
+      subscribe: async (cb: (event: unknown) => void) => {
+        listener = cb;
+        return () => {};
+      },
+      sendKeys: async (pane: string) => {
+        quits++;
+        listener?.({ event: "pane.exited", data: { pane_id: pane } });
+      },
+      closeTab: async (tab: string) => {
+        closed.push(tab);
+        await closeTab(tab);
+      },
+    });
+    Object.assign(w.deps, {
+      acquireLaunchSession: async () => ({
+        confirmTuiAttachment: async () => {
+          throw new TuiLocalFallbackError(1);
+        },
+        release: async () => {},
+      }),
+    });
+    const result =
+      mode === "parent" ? await w.createParent("project", true) : await w.orchestrator.manage();
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable", details: { reason: "tui_local_fallback" } },
+    });
+    expect(quits).toBe(1);
+    if (manager) {
+      expect(closed).toHaveLength(1);
+      expect(w.readRegistry((r) => value(r.get(manager.id)))).toMatchObject({
+        initialization: { state: "accepted" },
+      });
+    } else {
+      expect(value(w.orchestrator.status()).at(-1)).toMatchObject({
+        launchState: "closed",
+        initialization: { state: "pending" },
+      });
+      expect(w.prompts.size).toBe(0);
+    }
+  },
+);
+
+test("foreground local fallback kills only its child and preserves the user workspace", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  const exit = Promise.withResolvers<number>();
+  let kills = 0;
+  Object.assign(w.deps, {
+    launchHere: () => ({
+      exited: exit.promise,
+      kill: () => {
+        kills++;
+        exit.resolve(0);
+      },
+    }),
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiLocalFallbackError(1);
+      },
+      release: async () => {},
+    }),
+  });
+  try {
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable", details: { reason: "tui_local_fallback" } },
+    });
+    expect(kills).toBe(1);
+    expect(w.workspaces.has("caller")).toBe(true);
+    expect(value(w.orchestrator.status()).at(-1)).toMatchObject({
+      launchState: "closed",
+      workspaceOwned: false,
+    });
+  } finally {
+    exit.resolve(0);
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("manager reattachment capacity refusal preserves its initialized identity without another TUI", async () => {
   const w = await world();
@@ -1279,6 +1378,7 @@ test("foreground exit before readiness returns its code and releases the singlet
         acquireLaunchSession: async () => {
           held = true;
           return {
+            confirmTuiAttachment: async () => {},
             release: async () => {
               held = false;
             },

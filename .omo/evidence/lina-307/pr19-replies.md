@@ -69,3 +69,28 @@ remain untouched.
 RED-first tests assert both new-tab cleanup and existing-tab preservation, including
 cleanup before successor retirement. The Herdr adapter exercises exact tab.close
 RPC parameters over a fixture Unix socket; no live workspace is used.
+
+### 5. Prove TUI attachment rather than the admission hold - discussion_r4121675141
+
+All three launch paths now confirm the exact native row (routing handle, durable
+ID, session path and cwd) has at least two attachments before any identity probe
+or activation. The confirmation uses the hold connection itself, so its check does
+not add an attachment. It subscribes before checking, rechecks on native events,
+and makes a final bounded deadline check without sleeps or polling. After releasing
+the hold, it requires the exact row to retain at least one attachment.
+
+The check precedes waiting for OLW readiness: a local TUI that never publishes
+readiness is also handled. Failure returns host_session_capacity at full occupancy,
+otherwise runtime_unavailable with reason tui_local_fallback. It stops the local
+TUI, closes only attempt-owned tabs/workspaces and retires the uninitialized binding
+after exit proof. Existing initialized manager identity and user workspaces remain.
+Successor cleanup is owner-token-fenced and may retire a dispatched attempt only
+after local TUI stop plus pending initialization. No initial instruction was sent.
+
+RED-first regression reproduced ready from the hold alone. Expanded tests cover
+new manager, reattachment, parent, direct child and successor, missing readiness,
+wrong native identity, event-driven attachment and post-release loss. Disposable
+QA invokes the real native TUI adapter against an unavailable TUI socket while
+OLW holds the actual worker session: the fallback warning is observed, attachment
+count stays1, no verification/initialization occurs, local surface is stopped and
+the binding/native hold are removed. status/doctor were not changed.

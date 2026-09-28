@@ -107,3 +107,26 @@ closed binding, and held-slot attach survival after admission release.
 Cleanup receipt: twenty sessions closed, host stopped, socket and root removed.
 The injected pre-native persistence failure and tab ownership are covered by
 round3 integration tests; this run is not represented as real Herdr tab UI QA.
+
+## PR19 round4 local-fallback QA
+
+`bun scripts/qa-manager-idle.ts --local-fallback --capacity-race`, attempt1 PASS,
+exit0,2026-09-28T11:47Z. Host PID941055, `/tmp/olw-manager-idle-uSrxVQ`.
+Actual worker host holds seeded role path, list_sessions attachments1. Real installed
+createInteractiveHostRuntime attempts the deliberately missing TUI socket and emits
+interactive_host_fallback: "Warning: shared interactive host unavailable; continuing locally".
+The adapter returns its local runtime sentinel. Workspace/TUI exit control is a
+fixture, not a live Herdr pane. Orchestrator rejects hold-only attachment at its
+deadline with runtime_unavailable/details.reason=tui_local_fallback, requests local
+exit, removes its workspace and closes binding with initialization pending/null.
+No describe/configure/prompt callback may run. Native row absent after hold release.
+The run also passed idle/busy/replay/same-ID retry,19-to20 capacity race, and the
+positive two-attachment path with a surviving attachment after hold release.
+Cleanup receipt:20 sessions closed, host stopped, root/socket removed.
+
+Final round4 build rerun at11:55Z: same command PASS, PID1004033,
+`/tmp/olw-manager-idle-AuRQHR`. Confirms final check ordering before readiness:
+holdAttachments1, real adapter local fallback warning, typed refusal, stopped local
+fixture and removed owned workspace, pending binding closed. Positive attach>=2
+then post-release>=1 still passed. Cleanup20 sessions/host/socket/root succeeded.
+Both allowed QA attempts passed; no third run.

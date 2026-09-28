@@ -18,7 +18,11 @@ import type { HerdrClient, Snapshot } from "../../src/herdr";
 import { HostCapacityError } from "../../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
-import { type NativeSession, NativeSessionAbsentError } from "../../src/transport";
+import {
+  type NativeSession,
+  NativeSessionAbsentError,
+  TuiLocalFallbackError,
+} from "../../src/transport";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -480,6 +484,48 @@ test.each([true, false])(
     expect(w.launches()).toBe(0);
   },
 );
+
+test("successor hold-only fallback is stopped before activation and its owned tab is closed", async () => {
+  const w = await world({ executeInitialized: false, unprovisioned: true });
+  const closed: string[] = [];
+  let released = false;
+  w.setCreateTab(async () => ({ tabId: "workspace:execute", rootPaneId: "pane-execute" }));
+  Object.assign(w.dependencies.createHerdrClient("/herdr"), {
+    closeTab: async (id: string) => {
+      closed.push(id);
+    },
+  });
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiLocalFallbackError(20);
+      },
+      release: async () => {
+        released = true;
+      },
+    }),
+  });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: {
+      code: "host_session_capacity",
+      details: {
+        reason: "tui_local_fallback",
+        count: 20,
+        limit: 20,
+        action: "close_an_existing_role",
+      },
+    },
+  });
+  expect(w.sends()).toBe(0);
+  expect(w.quits()).toBe(1);
+  expect(closed).toEqual(["workspace:execute"]);
+  expect(released).toBe(true);
+  expect(w.registry((r) => value(r.get(w.execute.id)))).toMatchObject({
+    launchState: "closed",
+    initialization: { state: "pending" },
+  });
+});
 
 test("capacity during initialized successor reattachment preserves accepted work and typed refusal", async () => {
   const w = await world();

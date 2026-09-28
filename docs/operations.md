@@ -197,8 +197,12 @@ allowed at capacity. If another open takes the last slot after the initial count
 check, the held-open admission maps native `open_failed: too_many_sessions` to the
 same terminal capacity result before any TUI can fall back locally. Its unstarted
 binding is closed; a never-dispatched successor edge is retired. An initialized
-manager keeps its identity when reattachment is refused. The admission attachment
-is released after launch verification, leaving the TUI's attachment in place.
+manager keeps its identity when reattachment is refused. Before identity activation,
+OLW requires at least two live attachments on the exact native session: its hold
+and the launched TUI. It then releases the hold and verifies at least one remains.
+The event/deadline check adds no probe attachment. An unproven TUI is stopped and
+returns `runtime_unavailable` with reason `tui_local_fallback` (or the capacity
+error when full); only its attempt-owned resources and pending binding are closed.
 Never retry accepted or uncertain delivery to work around capacity.
 
 Manager notices are admitted in the manager's own isolate. The receiving RPC reads

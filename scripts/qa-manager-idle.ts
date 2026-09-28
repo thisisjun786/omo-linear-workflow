@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
+import { createInteractiveHostRuntime } from "../node_modules/@code-yeongyu/senpi/dist/modes/interactive/interactive-host-runtime.js";
 import type { Binding, Designation, Envelope, Result, ScopeSnapshot } from "../src/core/contracts";
 import { deliveryRecordSchema, resultSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
@@ -17,14 +18,16 @@ import {
   runtimeCacheEnvironment,
 } from "../src/host-profile";
 import { Orchestrator } from "../src/orchestrator";
+import { publishReadiness } from "../src/readiness";
 import { acquireLaunchSession } from "../src/transport";
 
 const root = resolve(import.meta.dir, "..");
 const runCapacity = process.argv.slice(2).includes("--capacity");
 const runRace = process.argv.slice(2).includes("--capacity-race");
+const runFallback = process.argv.slice(2).includes("--local-fallback");
 const unknownArgs = process.argv
   .slice(2)
-  .filter((arg) => arg !== "--capacity" && arg !== "--capacity-race");
+  .filter((arg) => arg !== "--capacity" && arg !== "--capacity-race" && arg !== "--local-fallback");
 if (unknownArgs.length > 0) throw new Error(`Unknown arguments: ${unknownArgs.join(" ")}`);
 
 const MODEL = "anthropic/claude-opus-5-5";
@@ -532,6 +535,142 @@ async function main(): Promise<void> {
       transcriptOccurrences: 1,
     });
 
+    if (runFallback) {
+      let listener: ((event: unknown) => void) | undefined;
+      let stopped = false;
+      let removed = false;
+      const unexpected = async (): Promise<never> => {
+        throw new Error("Unexpected fallback QA operation");
+      };
+      const herdr: HerdrClient = {
+        createWorkspace: async (cwd) => ({
+          workspaceId: "fallback-ws",
+          rootPaneId: "fallback-pane",
+          cwd,
+        }),
+        subscribe: async (cb) => {
+          listener = cb;
+          return () => {};
+        },
+        close() {},
+        run: async (_pane, argv) => {
+          const path = argv[argv.indexOf("--session") + 1];
+          assert.ok(path);
+          const observer = new RpcClient({ socketPath: socket });
+          await observer.start();
+          try {
+            const row = (await observer.listSessions()).find((row) => row.sessionPath === path);
+            assert.ok(row);
+            assert.equal(row.attachments, 1);
+            const warnings: unknown[] = [];
+            // Minimal local sentinel is sufficient: the actual native adapter's
+            // connect fails before it accesses further local runtime methods.
+            const local = { session: { sessionFile: path }, cwd: scratch };
+            const runtime = await Reflect.apply(createInteractiveHostRuntime, undefined, [
+              local,
+              {
+                socket: join(scratch, "missing-tui.sock"),
+                ensureHost: async () => undefined,
+                onWarning: (warning: unknown) => warnings.push(warning),
+              },
+            ]);
+            assert.equal(runtime, local);
+            assert.equal(warnings.length, 1);
+            receipt("local-fallback-adapter", { holdAttachments: row.attachments, warnings });
+          } finally {
+            await observer.stop();
+          }
+          const registry = openRegistry(join(state, "registry.sqlite"));
+          try {
+            const binding = value(registry.bySession(SessionManager.open(path).getSessionId()));
+            await publishReadiness(scratch, {
+              bindingId: binding.id,
+              durableSessionId: binding.durableSessionId,
+              sessionPath: path,
+              cwd: scratch,
+              paneId: "fallback-pane",
+            });
+          } finally {
+            registry.close();
+          }
+        },
+        sendKeys: async (pane) => {
+          assert.equal(pane, "fallback-pane");
+          stopped = true;
+          listener?.({ event: "pane.exited", data: { pane_id: pane } });
+        },
+        closeWorkspace: async (id) => {
+          assert.equal(id, "fallback-ws");
+          assert.equal(stopped, true);
+          removed = true;
+        },
+        createWorktree: unexpected,
+        createTab: unexpected,
+        renameTab: unexpected,
+        closeTab: unexpected,
+        focusWorkspace: unexpected,
+        focusPane: unexpected,
+        paneContainsProcess: unexpected,
+        snapshot: unexpected,
+        removeWorktree: unexpected,
+      };
+      const registry = openRegistry(join(state, "registry.sqlite"));
+      let digest: string;
+      try {
+        digest = value(
+          registry.importScope({
+            version: 1,
+            source: "fixture",
+            initiative: { id: "fallback", url: "linear://fallback", revision: "1" },
+            projects: [],
+            decisionRefs: [],
+          }),
+        ).digest;
+      } finally {
+        registry.close();
+      }
+      const orchestrator = new Orchestrator(scratch, join(scratch, "unused-herdr.sock"), {
+        openRegistry,
+        createHerdrClient: () => herdr,
+        resolveHerdrArtifact: async () => ({ artifactDir: scratch }),
+        ensureHost: async () => {},
+        checkHostProfile: async () => {},
+        acquireLaunchSession,
+        attachBinding: unexpected,
+        terminateBinding: unexpected,
+        prompt: unexpected,
+        gitTip: unexpected,
+        now: () => new Date().toISOString(),
+        uuid: () => crypto.randomUUID(),
+      });
+      const result = await orchestrator.createSupervisor({
+        initiativeId: "fallback",
+        scopeDigest: digest,
+        designationId: "fallback-designation",
+        execute: true,
+        fixture: true,
+      });
+      assert.deepEqual(result.ok, false);
+      if (result.ok) throw new Error("Local fallback activated");
+      assert.equal(result.error.code, "runtime_unavailable");
+      assert.deepEqual(result.error.details, { reason: "tui_local_fallback" });
+      assert.equal(stopped, true);
+      assert.equal(removed, true);
+      const binding = value(orchestrator.status({ initiativeId: "fallback" }))[0];
+      assert.equal(binding?.launchState, "closed");
+      const observer = new RpcClient({ socketPath: socket });
+      await observer.start();
+      try {
+        assert.equal(
+          (await observer.listSessions()).some((row) => row.sessionPath === binding?.sessionPath),
+          false,
+        );
+      } finally {
+        await observer.stop();
+      }
+      receipt("local-fallback-cleaned", { result, stopped, removed, binding });
+    }
+
     if (runCapacity || runRace) {
       for (let index = owned.length; index < (runRace ? CAPACITY - 1 : CAPACITY); index++) {
         const path = await writeSession(sessions, scratch, `qa-capacity-${index}`);
@@ -692,6 +831,7 @@ async function main(): Promise<void> {
           await tui.start();
           const attached = await tui.openSession({ sessionPath: heldPath, cwd: scratch });
           assert.equal(attached.attached, true);
+          await held.confirmTuiAttachment();
           await held.release();
           assert.equal((await tui.getState()).sessionId, "qa-held-launch");
           owned.push({ client: tui, sessionId: attached.sessionId });

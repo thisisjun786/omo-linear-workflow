@@ -27,7 +27,7 @@ import { openRegistry } from "../src/core/store";
 import type { HerdrClient, Workspace } from "../src/herdr";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
-import type { NativeSession } from "../src/transport";
+import { type NativeSession, TuiLocalFallbackError } from "../src/transport";
 import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
@@ -831,6 +831,44 @@ test.each(["reconcile", "close"] as const)(
     expect(w.prompts).toEqual(prompts);
   },
 );
+
+test("direct child local fallback cannot activate the OLW hold or initialize", async () => {
+  const w = await world();
+  const parent = value(await w.create()).binding;
+  const sends = w.sends.length;
+  let listener: ((event: unknown) => void) | undefined;
+  let quits = 0;
+  const herdr = w.deps.createHerdrClient("/fixture/herdr");
+  Object.assign(herdr, {
+    subscribe: async (cb: (event: unknown) => void) => {
+      listener = cb;
+      return () => {};
+    },
+    sendKeys: async (pane: string) => {
+      quits++;
+      listener?.({ event: "pane.exited", data: { pane_id: pane } });
+    },
+  });
+  Object.assign(w.deps, {
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiLocalFallbackError(2);
+      },
+      release: async () => {},
+    }),
+  });
+  expect(await w.orchestrator.createChild({ parentId: parent.id, issueId: "issue" })).toMatchObject(
+    {
+      ok: false,
+      error: { code: "runtime_unavailable", details: { reason: "tui_local_fallback" } },
+    },
+  );
+  expect(quits).toBe(1);
+  expect(w.sends).toHaveLength(sends);
+  const child = value(w.orchestrator.status()).find((b) => b.assignment.role === "child");
+  expect(child).toMatchObject({ launchState: "closed", initialization: { state: "pending" } });
+  expect(w.workspaces.has(child?.workspaceId ?? "")).toBe(false);
+});
 
 test("child worktree creation uses the recorded parent repository", async () => {
   const w = await world();

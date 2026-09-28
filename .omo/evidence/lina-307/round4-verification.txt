@@ -1,0 +1,50 @@
+PR19 round4 baseline46f17a2, assigned worktree only.
+
+NORMAL FULL SUITE
+bun test:760 pass,0 fail,73 files,174.91s,exit0.
+
+HERDR-UNSET FULL SUITE
+env -u HERDR_ENV HERDR_SOCKET_PATH=/tmp/olw-lina307-r4-no-socket bun test
+760 pass,0 fail,73 files,174.38s,exit0.
+
+REGRESSION EVIDENCE
+round4-red.txt: baseline activates a held session despite local-only TUI.
+Exact native row attachment count now required before readiness/identity activation.
+Focused paths164/0; additional foreground user-workspace preservation1/0.
+Coverage: new manager, reattachment, supervisor, parent, direct child, successor,
+readiness absent/present, exact durableId/path/cwd, post-release attachment loss,
+native event-triggered recheck. No fixed sleeps in tests or production checks.
+
+LSP
+src49, tests50 capped, tests/integration3, tests/transport1, scripts40: errors0.
+Individual fresh-file diagnostic timeouts resolved by directory scans.
+
+STATIC / RELEASE / INSTALL
+bun run typecheck && bun run lint && bun run build && bun run release:check
+&& bun test tests/install.test.ts && bun dist/cli.js --help
+All exit0; Biome173 files with no errors/warnings, information diagnostics remain.
+Release0.2.0/v0.2.0. Install smoke5 pass/0 fail,2.50s; actual pnpm/build/launcher.
+Expected negative installer build exit7 is part of a passing test, not a failure.
+
+SELF REVIEW / INVARIANTS
+All3 acquire sites confirm before probe/activation; verification creates no extra
+attachment. Hold release is idempotent; post-release exact row must retain>=1.
+Native wait checks immediately, on subscribed events, and at a bounded deadline.
+Local TUI exit is subscribed before /quit, or owned foreground child killed/awaited.
+Only after exit proof are pending bindings and owned tabs/workspaces closed.
+Successor dispatch retirement requires same owner token and pending initialization;
+already accepted state is not retired. Cleanup failure is not hidden as success.
+Read-only status/doctor unchanged; no new list_sessions there. No upstream/patch/
+package/global config changes, no bun.lock. No live root/socket operation. No
+accepted/uncertain resend. Reply5 is a local unposted draft; no push authorized.
+
+Evidence: qa.md, round4-red.txt, pr19-replies.md.
+
+REAL QA
+Two runs of bun scripts/qa-manager-idle.ts --local-fallback --capacity-race,
+both PASS exit0. Final PID1004033/rootAuRQHR after final build. Real native adapter
+warning plus held native worker attachments1 reproduces false identity evidence;
+orchestrator now refuses before attach/describe/configure/prompt. Local lifecycle
+and workspace are fixture controlled (not full Herdr UI). Post-release native row
+absent in fallback; positive real second attachment survives hold release. All
+twenty QA sessions, hosts, sockets and roots removed. Details/receipts in qa.md.

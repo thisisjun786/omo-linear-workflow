@@ -163,6 +163,92 @@ test("launch admission holds the actual slot until explicit release", async () =
   expect(client.stopped).toBe(1);
 });
 
+test("launch proof rejects a hold-only row even though native describe succeeds", async () => {
+  const client = new FakeRpc();
+  const held = await acquireLaunchSession(binding, client);
+  try {
+    expect(await client.requestExtension("omo.initiative.describe")).toMatchObject({ ok: true });
+    await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+      reason: "tui_local_fallback",
+    });
+  } finally {
+    await held.release();
+  }
+});
+
+test("launch proof requires exact identity and surviving attachment after release", async () => {
+  for (const survives of [false, true]) {
+    const client = new FakeRpc();
+    let heldOpen = true;
+    client.listSessions = async () =>
+      client.sessions.map((row) => ({ ...row, attachments: heldOpen ? 2 : survives ? 1 : 0 }));
+    client.closeSession = async () => {
+      heldOpen = false;
+      client.closeSessionCalls++;
+    };
+    const held = await acquireLaunchSession(binding, client);
+    try {
+      if (survives) await held.confirmTuiAttachment(0);
+      else
+        await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+          reason: "tui_local_fallback",
+        });
+    } finally {
+      await held.release();
+    }
+    expect(client.closeSessionCalls).toBe(1);
+  }
+});
+
+test.each(["durableSessionId", "sessionPath", "cwd"] as const)(
+  "launch proof rejects another session's attachments: %s",
+  async (key) => {
+    const client = new FakeRpc();
+    client.listSessions = async () =>
+      client.sessions.map((row) => ({ ...row, [key]: "/other", attachments: 2 }));
+    const held = await acquireLaunchSession(binding, client);
+    try {
+      await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+        reason: "tui_local_fallback",
+      });
+    } finally {
+      await held.release();
+    }
+  },
+);
+
+test("launch proof rechecks on a native event without polling", async () => {
+  const client = new FakeRpc();
+  let listener: ((event: RpcClientEvent) => void) | undefined;
+  const observed = Promise.withResolvers<void>();
+  let attachments = 1;
+  client.onEvent = (cb) => {
+    listener = cb;
+    return () => {
+      listener = undefined;
+    };
+  };
+  client.listSessions = async () => {
+    observed.resolve();
+    return client.sessions.map((row) => ({ ...row, attachments }));
+  };
+  client.closeSession = async () => {
+    attachments--;
+    client.closeSessionCalls++;
+  };
+  const held = await acquireLaunchSession(binding, client);
+  const proof = held.confirmTuiAttachment(1000);
+  try {
+    await observed.promise;
+    attachments = 2;
+    listener?.({ type: "agent_start" });
+    await proof;
+    expect(attachments).toBe(1);
+  } finally {
+    await held.release();
+  }
+});
+
 describe("native session client", () => {
   test("attaches only an exact existing durable id, path, and cwd", async () => {
     const missing = new FakeRpc();

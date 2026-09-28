@@ -13,6 +13,19 @@ export class NativeSessionAbsentError extends Error {
   }
 }
 
+export class TuiLocalFallbackError extends Error {
+  readonly reason = "tui_local_fallback";
+  constructor(readonly count: number) {
+    super("TUI did not retain its own attachment to the exact native session");
+    this.name = "TuiLocalFallbackError";
+  }
+}
+
+export interface LaunchSession {
+  confirmTuiAttachment(timeoutMs?: number): Promise<void>;
+  release(): Promise<void>;
+}
+
 export class NativeSessionNotReadyError extends Error {
   constructor(readonly status: "opening" | "closing" | "closed") {
     super(`Exact durable native session is present but ${status}`);
@@ -45,13 +58,14 @@ export interface RpcPort {
   /** Emergency transport teardown for adapters whose graceful stop can stall. */
   destroy?(): void;
   closeSession(sessionId?: string): Promise<void>;
-  listSessions(): Promise<
+  listSessions(options?: { include_workers: boolean }): Promise<
     ReadonlyArray<{
       readonly sessionId: string;
       readonly durableSessionId?: string;
       readonly sessionPath?: string;
       readonly cwd: string;
       readonly status: "opening" | "open" | "closing" | "closed";
+      readonly attachments?: number;
     }>
   >;
   openSession(options: {
@@ -95,7 +109,7 @@ export function publicRpcClient(socketPath: string): RpcPort {
 export async function acquireLaunchSession(
   binding: Binding,
   client: RpcPort = publicRpcClient(binding.omoSocket),
-): Promise<{ release(): Promise<void> }> {
+): Promise<LaunchSession> {
   if (binding.sessionPath === null) throw new Error("Launch requires a seeded session path");
   try {
     await client.start();
@@ -104,10 +118,87 @@ export async function acquireLaunchSession(
       cwd: binding.cwd,
       retain_on_disconnect: false,
     });
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await client.closeSession(opened.sessionId);
+    };
     return {
+      async confirmTuiAttachment(timeoutMs = 5_000) {
+        const exact = (rows: Awaited<ReturnType<RpcPort["listSessions"]>>) =>
+          rows.find(
+            (row) =>
+              row.sessionId === opened.sessionId &&
+              row.durableSessionId === binding.durableSessionId &&
+              row.sessionPath === binding.sessionPath &&
+              row.cwd === binding.cwd &&
+              row.status === "open",
+          );
+        // Readiness may precede remote attachment. Check on native events and once
+        // at the deadline; no timer polling and no verification attachment added.
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          let checking = false;
+          let deadline = timeoutMs === 0;
+          let count = 0;
+          const finish = (cause?: unknown) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            clearTimeout(hardDeadline);
+            stop();
+            if (cause === undefined) resolve();
+            else reject(cause);
+          };
+          const check = async () => {
+            if (settled || checking) return;
+            checking = true;
+            try {
+              const rows = await client.listSessions({ include_workers: true });
+              count = rows.length;
+              if ((exact(rows)?.attachments ?? 0) >= 2) finish();
+              else if (deadline) finish(new TuiLocalFallbackError(count));
+            } catch {
+              finish(new TuiLocalFallbackError(count));
+            } finally {
+              checking = false;
+            }
+          };
+          const stop = client.onEvent(() => {
+            void check();
+          });
+          const timer = setTimeout(() => {
+            deadline = true;
+            void check();
+          }, timeoutMs);
+          const hardDeadline = setTimeout(
+            () => finish(new TuiLocalFallbackError(count)),
+            timeoutMs + 5_000,
+          );
+          void check();
+        });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            (async () => {
+              await release();
+              const rows = await client.listSessions({ include_workers: true });
+              if ((exact(rows)?.attachments ?? 0) < 1) throw new TuiLocalFallbackError(rows.length);
+            })(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new TuiLocalFallbackError(0)), 5_000);
+            }),
+          ]);
+        } catch (cause) {
+          throw cause instanceof TuiLocalFallbackError ? cause : new TuiLocalFallbackError(0);
+        } finally {
+          clearTimeout(timer);
+        }
+      },
       async release() {
         try {
-          await client.closeSession(opened.sessionId);
+          await release();
         } finally {
           await client.stop();
         }

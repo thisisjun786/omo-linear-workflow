@@ -268,3 +268,33 @@ Remaining: record second suite, one new commit, SHA/status check, DoneClaim JSON
 
 Herdr-unset final suite746/0,170.39s,exit0. All round3 checks complete;
 recorded in round3-verification.txt. Create one commit and verify SHA/clean status.
+
+## PR19 round4 base46f17a2
+
+Root fix: LaunchSession.confirmTuiAttachment uses hold client list_sessions with
+include_workers, exact handle/durableID/path/cwd/status and attachments>=2. Subscribes
+native events then checks now/event/deadline; no sleep/poll. Releases own hold then
+requires attachments>=1 with bounded post-release check. Called immediately after
+TUI launch before readiness/identity activation at all3 sites. release idempotent.
+Fallback error count classifies capacity vs runtime_unavailable reason. Stops TUI
+with existing event-driven /quit or owned foreground kill; only then closes owned
+workspace/tab and pending binding. Successor dispatched retirement requires explicit
+localTuiStopped proof and same token, preserves initialized work.
+RED0pass/3fail reproduced baseline false-ready bug; recorded round4-red.txt. Focused13/0 and full
+related5files164/0. Added readiness-absent test too. QA attempt1 PASS actual worker
+host + actual native adapter fallback warning (missing TUI socket); native hold1,
+terminal failure, stopped fixture TUI, closed binding, native row gone. PID941055
+uSrxVQ cleaned. No live root/socket. Reply draft5 done. Need final full suites both
+modes, static/build/release/smoke/LSP, evidence and one new commit/no push. User asks
+not to end turn before DoneClaim; continue tools through pending monitor events.
+
+Round4 final code now checked before readiness (covers no readiness). Added foreground
+owned-child-only kill test and direct child fallback. Focused164/0 plusforeground1/0.
+Normal full760/0,174.91s. No-Herdr pending mon_HT415ZY63GGJEYFY. Static/type/lint/build/
+release/install all exit0, install5/0; LSP0. QA second/final runPASS PID1004033 AuRQHR
+after check reordering and bounded post-release check; bothQA roots/PIDs independently
+gone. round4-verification.txt current. Remaining second fullsuite, final diff review,
+one new commit with evidence trailers, clean/SHA check, DoneClaim. No more QA runs.
+
+Round4 second fullsuite completed760/0,174.38s,exit0. All checks complete. Commit
+staged single increment now, verify exactly1 new commit/clean worktree, DoneClaim.

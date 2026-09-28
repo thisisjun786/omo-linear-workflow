@@ -1195,9 +1195,16 @@ export function openRegistry(
     });
   }
 
-  function closeUnstartedSuccessor(id: string, token: string): Result<Binding> {
+  function closeUnstartedSuccessor(
+    id: string,
+    token: string,
+    localTuiStopped = false,
+  ): Result<Binding> {
     return transaction(() => {
-      if (!successorOwner(id, token, "claimed"))
+      if (
+        !successorOwner(id, token, "claimed") &&
+        !(localTuiStopped && successorOwner(id, token, "dispatching"))
+      )
         return error("lease_lost", "Only the undispatched successor owner can retire admission");
       const binding = get(id);
       if (!binding.ok) return binding;

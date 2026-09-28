@@ -90,3 +90,10 @@ console.log(
     rootRemoved: !(await Bun.file(root).exists()),
   }),
 );
+const passed =
+  proofWithRealClient === true &&
+  proofAfterDisconnect === false &&
+  stopError === undefined &&
+  !(await Bun.file(root).exists());
+console.log(passed ? "QA_PASS" : "QA_FAIL");
+process.exit(passed ? 0 : 1);

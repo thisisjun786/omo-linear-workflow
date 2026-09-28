@@ -12,3 +12,5 @@ The kernel reports the live listener under both `omo.sock.next-1` and `omo.sock`
 | this branch | **true** | false |
 
 Cleanup receipt: every run stopped its host with `host stop` in `finally` and removed its temp root (`rootRemoved: true`). A process check found no leftover `olw-handoff-proof` processes.
+
+The script now enforces pass criteria: it prints `QA_PASS` and exits 0 only when the proof with a real attached client is true, the proof after disconnect is false, host stop succeeds, and the temp root is removed. Otherwise it exits 1. Re-run: this branch printed `QA_PASS`, exit 0. With `origin/dev`'s readiness.ts it printed `QA_FAIL`, exit 1. No leftover processes.

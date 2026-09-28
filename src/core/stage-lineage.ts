@@ -44,6 +44,11 @@ export function createStageLineage(db: Database, readonly: boolean) {
     const columns = db.query<{ name: string }, []>("PRAGMA table_info(stage_lineage)").all();
     if (!columns.some((column) => column.name === "generation"))
       db.run("ALTER TABLE stage_lineage ADD COLUMN generation INTEGER NOT NULL DEFAULT 0");
+    db.run(`CREATE TABLE IF NOT EXISTS retired_stage_lineage (
+      binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+      previous_binding_id TEXT NOT NULL REFERENCES bindings(id),
+      ordinal INTEGER NOT NULL
+    )`);
   }
   const available =
     db
@@ -128,10 +133,40 @@ export function createStageLineage(db: Database, readonly: boolean) {
       return (
         db
           .query<{ binding_id: string }, [string]>(
-            "SELECT binding_id FROM stage_lineage WHERE previous_binding_id = ? LIMIT 1",
+            "SELECT l.binding_id FROM stage_lineage l JOIN bindings b ON b.id = l.binding_id WHERE l.previous_binding_id = ? AND b.launch_state <> 'closed' LIMIT 1",
           )
           .get(bindingId)?.binding_id ?? null
       );
+    },
+    hasRetiredSuccessor(bindingId: string): boolean {
+      if (!available) return false;
+      return (
+        db
+          .query(
+            "SELECT binding_id FROM retired_stage_lineage WHERE previous_binding_id = ? LIMIT 1",
+          )
+          .get(bindingId) !== null
+      );
+    },
+    nextOrdinal(bindingId: string): number {
+      if (!available) return 0;
+      const row = db
+        .query<StageRow, [string]>("SELECT * FROM stage_lineage WHERE binding_id = ?")
+        .get(bindingId);
+      if (row === null) return 0;
+      const active =
+        db
+          .query<{ ordinal: number | null }, [string, number]>(
+            "SELECT max(ordinal) AS ordinal FROM stage_lineage WHERE issue_id = ? AND generation = ?",
+          )
+          .get(row.issue_id, generationOfRow(row))?.ordinal ?? row.ordinal;
+      const retired =
+        db
+          .query<{ ordinal: number | null }, [string]>(
+            "SELECT max(ordinal) AS ordinal FROM retired_stage_lineage WHERE previous_binding_id = ?",
+          )
+          .get(bindingId)?.ordinal ?? -1;
+      return Math.max(active, retired) + 1;
     },
     nextGeneration(issueId: string): number {
       const latest = this.rows(issueId)
@@ -166,6 +201,12 @@ export function createStageLineage(db: Database, readonly: boolean) {
         JSON.stringify(value),
         bindingId,
       );
+    },
+    retire(bindingId: string): void {
+      db.query(
+        "INSERT OR IGNORE INTO retired_stage_lineage (binding_id, previous_binding_id, ordinal) SELECT binding_id, previous_binding_id, ordinal FROM stage_lineage WHERE binding_id = ? AND previous_binding_id IS NOT NULL",
+      ).run(bindingId);
+      db.query("DELETE FROM stage_lineage WHERE binding_id = ?").run(bindingId);
     },
   };
 }

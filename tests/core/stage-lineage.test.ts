@@ -60,7 +60,13 @@ async function fixture(
       designation,
       snapshot,
       cwd: "/repo",
-      checkout: null,
+      checkout: {
+        originalRepoRoot: "/repo",
+        path: "/repo",
+        branch: "issue",
+        baseBranch: "main",
+        baseCommit: "base",
+      },
       herdrSocket: "/tmp/herdr",
       omoSocket: "/tmp/omo",
     };
@@ -114,6 +120,48 @@ function ready(registry: ReturnType<typeof openRegistry>, binding: Binding) {
   value(registry.beginInitialization(binding.id, "hello"));
   value(registry.finishInitialization(binding.id, "accepted"));
 }
+
+test("closing an uncertain successor retires its lineage and preserves launch history", async () => {
+  await fixture((path, registry, _parent, plan, next) => {
+    ready(registry, plan);
+    value(registry.recordStage(plan.id, "issue", "plan", 0, null));
+    value(registry.recordHandoff(plan.id, handoff));
+    const execute = value(registry.successorReservation(plan.id, next, "execute"));
+    value(registry.provision(execute.id, "workspace", "execute-pane"));
+    const claim = value(registry.beginSuccessorLaunch(execute.id, "execute-pane", "now", "before"));
+    if (!claim.claimed) throw new Error("missing launch claim");
+    value(registry.dispatchSuccessorLaunch(execute.id, claim.token));
+    value(registry.failSuccessorLaunch(execute.id, claim.token));
+    value(registry.beginUncertainSuccessorClose(execute.id));
+    value(registry.closeUncertainSuccessor(execute.id));
+
+    expect(value(registry.stageOf(execute.id))).toBeNull();
+    expect(value(registry.lineageFor(plan.id)).stages.map((stage) => stage.bindingId)).toEqual([
+      plan.id,
+    ]);
+    expect(value(registry.successorLaunchIntent(execute.id))).toEqual({
+      attemptId: claim.token,
+      state: "uncertain",
+    });
+    const replacement = value(
+      registry.successorReservation(
+        plan.id,
+        { ...next, bindingId: "execute-2", durableSessionId: "session-execute-2" },
+        "execute",
+      ),
+    );
+    expect(value(registry.stageOf(replacement.id))).toMatchObject({ ordinal: 2 });
+    const db = new Database(path, { readonly: true });
+    try {
+      expect(
+        db.query<{ count: number }, []>("SELECT count(*) AS count FROM successor_launch").get()
+          ?.count,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+});
 
 test("a read-only registry without a generation column still returns lineage", async () => {
   const dir = await mkdtemp(join(tmpdir(), "olw-lineage-ro-"));
@@ -207,6 +255,103 @@ test("a read-only registry without a generation column still returns lineage", a
     expect(value(readonly.stageOf("child"))?.stage).toBe("direct");
   } finally {
     readonly.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("writable migration backfills legacy successor launch attempts without changing read-only bytes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "olw-successor-attempt-migration-"));
+  const path = join(dir, "registry.sqlite");
+  const registry = openRegistry(path);
+  try {
+    const digest = value(registry.importScope(snapshot)).digest;
+    const designation = {
+      id: "designation",
+      snapshotDigest: digest,
+      designatedBy: "user",
+      designatedAt: "now",
+      create: true,
+      execute: true,
+      contact: true,
+    };
+    const parent = value(
+      registry.reserve({
+        designation,
+        snapshot,
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/tmp/herdr",
+        omoSocket: "/tmp/omo",
+        bindingId: "parent",
+        durableSessionId: "session-parent",
+        assignment: {
+          role: "parent",
+          initiativeId: null,
+          projectId: "project",
+          ownerBindingId: null,
+        },
+      }),
+    );
+    value(
+      registry.reserve({
+        designation,
+        snapshot,
+        cwd: "/repo",
+        checkout: null,
+        herdrSocket: "/tmp/herdr",
+        omoSocket: "/tmp/omo",
+        bindingId: "execute",
+        durableSessionId: "session-execute",
+        assignment: {
+          role: "child",
+          initiativeId: null,
+          projectId: "project",
+          issueId: "issue",
+          ownerBindingId: parent.id,
+        },
+      }),
+    );
+  } finally {
+    registry.close();
+  }
+  const legacy = new Database(path);
+  try {
+    legacy.run("DROP TABLE successor_launch_attempts");
+    legacy
+      .query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'legacy-time', 'legacy-owner')",
+      )
+      .run();
+  } finally {
+    legacy.close();
+  }
+  const before = await Bun.file(path).arrayBuffer();
+  const readonly = openRegistry(path, { readonly: true });
+  readonly.close();
+  expect(Buffer.from(await Bun.file(path).arrayBuffer())).toEqual(Buffer.from(before));
+
+  const migrated = openRegistry(path);
+  migrated.close();
+  const reopened = openRegistry(path);
+  reopened.close();
+  const inspected = new Database(path, { readonly: true });
+  try {
+    expect(
+      inspected
+        .query<{ attempt_number: number; owner: string; state: string; claimed_at: string }, []>(
+          "SELECT attempt_number, owner, state, claimed_at FROM successor_launch_attempts WHERE binding_id = 'execute'",
+        )
+        .all(),
+    ).toEqual([
+      {
+        attempt_number: 1,
+        owner: "legacy-owner",
+        state: "uncertain",
+        claimed_at: "legacy-time",
+      },
+    ]);
+  } finally {
+    inspected.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -457,6 +602,26 @@ test("handoff requires a ready plan and succession requires a handoff", async ()
     value(registry.recordStage(plan.id, "issue", "direct", 0, null));
     ready(registry, plan);
     expect(code(registry.recordHandoff(plan.id, handoff))).toBe("handoff_not_allowed");
+  });
+});
+
+test("an ordinarily closed plan cannot reserve an execute successor", async () => {
+  await fixture((_path, registry, _parent, plan, next) => {
+    value(registry.recordStage(plan.id, "issue", "plan", 0, null));
+    ready(registry, plan);
+    value(registry.recordHandoff(plan.id, handoff));
+    value(registry.beginClose(plan.id));
+    value(registry.finishClose(plan.id));
+
+    expect(registry.successorReservation(plan.id, next, "execute")).toMatchObject({
+      ok: false,
+      error: { code: "stage_predecessor_closed" },
+    });
+    expect(value(registry.stageChain("issue"))).toHaveLength(1);
+    expect(registry.get(next.bindingId)).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
   });
 });
 

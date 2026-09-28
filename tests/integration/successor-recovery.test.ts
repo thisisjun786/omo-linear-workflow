@@ -1,7 +1,9 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@code-yeongyu/senpi";
 import { runCli } from "../../src/cli";
 import type {
   Binding,
@@ -26,7 +28,7 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-async function world(options: { executeInitialized?: boolean } = {}) {
+async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "olw-successor-recovery-"));
   roots.push(root);
   await mkdir(join(root, ".omo/state"), { recursive: true });
@@ -100,10 +102,18 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     const model = execute
       ? modelForLaunch("child", "execute")
       : modelForRole(binding.assignment.role);
-    const sessionPath = join(root, `${binding.id}.jsonl`);
+    const manager = SessionManager.create(root, join(root, ".omo/state/sessions"), {
+      id: binding.durableSessionId,
+    });
+    manager.appendModelChange(model.provider, model.modelId);
+    manager.appendThinkingLevelChange(model.thinking);
+    const sessionPath = manager.getSessionFile();
+    const header = manager.getHeader();
+    if (sessionPath === undefined || header === null) throw new Error("missing session seed");
+    await mkdir(join(root, ".omo/state/sessions"), { recursive: true });
     await writeFile(
       sessionPath,
-      `${JSON.stringify({ type: "model_change", provider: model.provider, modelId: model.modelId })}\n${JSON.stringify({ type: "thinking_level_change", thinkingLevel: model.thinking })}\n`,
+      `${[header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
     );
     value(registry.provision(binding.id, "workspace", `pane-${binding.id}`));
     value(registry.observeSession(binding.id, sessionPath));
@@ -142,10 +152,18 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     options.executeInitialized === false
       ? await (async () => {
           const model = modelForLaunch("child", "execute");
-          const sessionPath = join(root, "execute.jsonl");
+          const manager = SessionManager.create(root, join(root, ".omo/state/sessions"), {
+            id: executeReservation.durableSessionId,
+          });
+          manager.appendModelChange(model.provider, model.modelId);
+          manager.appendThinkingLevelChange(model.thinking);
+          const sessionPath = manager.getSessionFile();
+          const header = manager.getHeader();
+          if (sessionPath === undefined || header === null) throw new Error("missing session seed");
+          await mkdir(join(root, ".omo/state/sessions"), { recursive: true });
           await writeFile(
             sessionPath,
-            `${JSON.stringify({ type: "model_change", provider: model.provider, modelId: model.modelId })}\n${JSON.stringify({ type: "thinking_level_change", thinkingLevel: model.thinking })}\n`,
+            `${[header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
           );
           value(registry.provision(executeReservation.id, "workspace", "pane-execute"));
           value(registry.observeSession(executeReservation.id, sessionPath));
@@ -166,6 +184,7 @@ async function world(options: { executeInitialized?: boolean } = {}) {
   let elapsed = 0;
   let native = false;
   let paneLive = false;
+  let quits = 0;
   let launches = 0;
   let absenceHook: ((count: number) => Promise<void>) | undefined;
   let sendState: "accepted" | "rejected" = "accepted";
@@ -174,12 +193,15 @@ async function world(options: { executeInitialized?: boolean } = {}) {
   let absences = 0;
   let descriptions = 0;
   let sends = 0;
+  let createTabHook: HerdrClient["createTab"] | undefined;
+  let paneSessionPath: string | null | undefined;
+  let beforePaneExit: (() => Promise<void>) | undefined;
   const listeners = new Set<(event: unknown) => void>();
   const pane = (): Snapshot["panes"][number] => ({
     paneId: "pane-execute",
     workspaceId: "workspace",
     revision: 1,
-    sessionPath: paneLive ? execute.sessionPath : null,
+    sessionPath: paneLive ? (paneSessionPath ?? execute.sessionPath) : null,
     ...(paneLive ? { agent: "pi" } : {}),
   });
   const herdr: HerdrClient = {
@@ -189,14 +211,22 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     createWorktree: async () => {
       throw new Error("unexpected createWorktree");
     },
-    createTab: async () => {
+    createTab: async (workspaceId, cwd, label) => {
+      if (createTabHook) return createTabHook(workspaceId, cwd, label);
       throw new Error("unexpected createTab");
     },
     renameTab: async () => {},
     focusWorkspace: async () => {},
     focusPane: async () => {},
     paneContainsProcess: async () => true,
-    sendKeys: async () => {},
+    sendKeys: async (paneId, text, keys) => {
+      expect([paneId, text, keys]).toEqual(["pane-execute", "/quit", ["Enter"]]);
+      quits += 1;
+      await beforePaneExit?.();
+      paneLive = false;
+      for (const listener of listeners)
+        listener({ event: "pane.exited", data: { pane_id: paneId } });
+    },
     closeWorkspace: async () => {},
     removeWorktree: async () => {},
     snapshot: async () => ({
@@ -224,13 +254,30 @@ async function world(options: { executeInitialized?: boolean } = {}) {
   async function publish() {
     native = true;
     paneLive = true;
-    if (execute.sessionPath === null) throw new Error("missing session path");
+    const current = withRegistry((opened) => {
+      const listed = value(opened.list());
+      return listed.find(
+        (binding) =>
+          binding.assignment.role === "child" &&
+          value(opened.stageOf(binding.id))?.stage === "execute" &&
+          binding.launchState !== "closed",
+      );
+    });
+    if (current?.sessionPath === null || current === undefined)
+      throw new Error("missing session path");
+    identities.set(current.durableSessionId, {
+      durableSessionId: current.durableSessionId,
+      sessionPath: current.sessionPath,
+      cwd: current.cwd,
+      ...modelForLaunch("child", "execute"),
+      extensionProtocol: 2,
+    });
     await publishReadiness(root, {
-      bindingId: execute.id,
-      durableSessionId: execute.durableSessionId,
-      sessionPath: execute.sessionPath,
+      bindingId: current.id,
+      durableSessionId: current.durableSessionId,
+      sessionPath: current.sessionPath,
       cwd: root,
-      paneId: "pane-execute",
+      paneId: current.paneId ?? "pane-execute",
     });
   }
   function session(identity: RuntimeIdentity): NativeSession {
@@ -271,9 +318,27 @@ async function world(options: { executeInitialized?: boolean } = {}) {
       close: async () => {},
     };
   }
+  const createHerdrClient = (): HerdrClient => {
+    if (!options.closeAwareHerdr) return herdr;
+    let closed = false;
+    return new Proxy(herdr, {
+      get(target, property) {
+        if (property === "close")
+          return () => {
+            closed = true;
+          };
+        const member = Reflect.get(target, property);
+        if (typeof member !== "function") return member;
+        return (...args: unknown[]) => {
+          if (closed) throw new Error("Herdr client is closed");
+          return Reflect.apply(member, target, args);
+        };
+      },
+    });
+  };
   const dependencies: OrchestratorDependencies = {
     openRegistry,
-    createHerdrClient: () => herdr,
+    createHerdrClient,
     resolveHerdrArtifact: async () => ({ artifactDir: join(root, "herdr") }),
     checkHostProfile: async () => {},
     ensureHost: async () => {},
@@ -321,6 +386,19 @@ async function world(options: { executeInitialized?: boolean } = {}) {
       native = present;
       paneLive = present;
     },
+    setLocalFallback: () => {
+      native = false;
+      paneLive = true;
+    },
+    setCreateTab: (hook: HerdrClient["createTab"]) => {
+      createTabHook = hook;
+    },
+    setPaneSessionPath: (path: string) => {
+      paneSessionPath = path;
+    },
+    setBeforePaneExit: (hook: () => Promise<void>) => {
+      beforePaneExit = hook;
+    },
     disconnect: () => {
       for (const listener of listeners)
         listener({ event: "connection.error", data: { code: "closed", message: "disconnected" } });
@@ -342,11 +420,163 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     },
     launches: () => launches,
     sends: () => sends,
+    quits: () => quits,
     orchestrator: () => new Orchestrator(root, "/herdr", dependencies),
     absences: () => absences,
     registry: withRegistry,
   };
 }
+
+test("stage start refuses an uncertain local-only successor without changing it", async () => {
+  const w = await world({ executeInitialized: false, closeAwareHerdr: true });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  const before = w.registry((registry) => value(registry.get("execute")));
+  const intent = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
+
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: {
+      code: "successor_abandon_required",
+      details: {
+        bindingId: "execute",
+        recovery: "inspect_then_close_and_restart_stage",
+      },
+    },
+  });
+  expect(w.registry((registry) => value(registry.get("execute")))).toEqual(before);
+  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual(
+    intent,
+  );
+  expect(w.quits()).toBe(0);
+  expect(w.launches()).toBe(1);
+  expect(w.sends()).toBe(0);
+});
+
+test("close then stage start creates a fresh successor and preserves old attempt history", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  const oldIntent = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
+  if (oldIntent === null) throw new Error("Missing uncertain attempt");
+
+  expect(await w.orchestrator().close("execute", false, true)).toMatchObject({ ok: true });
+  expect(w.registry((registry) => value(registry.get("plan")))).toMatchObject({
+    launchState: "closed",
+    contactState: "cancelled",
+  });
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({ ok: true });
+  const sendsBeforePlanContact = w.sends();
+  expect(
+    await w.orchestrator().send({
+      fromId: "parent",
+      toId: "plan",
+      kind: "instruction",
+      text: "are you there?",
+      messageId: "contact-retired-plan",
+    }),
+  ).toMatchObject({ ok: false, error: { code: "not_ready" } });
+  expect(w.sends()).toBe(sendsBeforePlanContact);
+  await Bun.write(join(w.root, "plan.md"), "plan");
+  const planSha = new Bun.CryptoHasher("sha256").update("plan").digest("hex");
+  const deliveryDb = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    deliveryDb
+      .query(
+        "UPDATE stage_lineage SET handoff_json = json_set(handoff_json, '$.completionReportId', 'plan-report', '$.planSha256', ?) WHERE binding_id = 'plan'",
+      )
+      .run(planSha);
+    deliveryDb
+      .query(
+        "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'accepted', ?)",
+      )
+      .run(
+        "plan-report",
+        JSON.stringify({
+          version: 1,
+          id: "plan-report",
+          fromBindingId: "plan",
+          toBindingId: "parent",
+          designationId: "designation",
+          snapshotDigest: value(w.registry((registry) => registry.designation("designation")))
+            .snapshotDigest,
+          kind: "report",
+          text: "done",
+          outcome: "completed",
+          evidence: [join(w.root, "plan.md")],
+        }),
+        JSON.stringify({
+          kind: "ok",
+          thread_id: "session-parent",
+          message_seq: 1,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: "plan" },
+        }),
+      );
+  } finally {
+    deliveryDb.close();
+  }
+  let nextPane = 2;
+  w.setCreateTab(async () => ({
+    tabId: `fresh:t${nextPane}`,
+    rootPaneId: `pane-fresh-${nextPane++}`,
+  }));
+  w.setRunHook(async () => w.publish());
+  const fresh = await w.start();
+  expect(fresh).toMatchObject({ ok: true, value: { stage: "execute" } });
+  if (!fresh.ok) throw new Error(fresh.error.message);
+  expect(fresh.value.binding.id).not.toBe("execute");
+  expect(w.registry((registry) => value(registry.stageOf(fresh.value.binding.id)))).toMatchObject({
+    ordinal: 2,
+    previousBindingId: "plan",
+  });
+  const history = new Database(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
+  try {
+    expect(
+      history
+        .query<{ owner: string; state: string }, []>(
+          "SELECT owner, state FROM successor_launch_attempts WHERE binding_id = 'execute' ORDER BY attempt_number",
+        )
+        .all(),
+    ).toContainEqual({ owner: oldIntent.attemptId, state: "uncertain" });
+  } finally {
+    history.close();
+  }
+});
+
+test("reconcile reports an uncertain local-only successor for manual abandonment", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  const before = w.registry((registry) => value(registry.get("execute")));
+
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({
+    ok: false,
+    error: {
+      code: "reconciliation_uncertain",
+      details: {
+        issues: [{ bindingId: "execute", code: "successor_abandon_required" }],
+      },
+    },
+  });
+  expect(w.registry((registry) => value(registry.get("execute")))).toMatchObject({
+    id: before.id,
+    launchState: "uncertain",
+    initialization: before.initialization,
+  });
+  expect(w.quits()).toBe(0);
+  expect(w.launches()).toBe(1);
+  expect(w.sends()).toBe(0);
+});
 
 test("a stale absence observation revalidates after the owner succeeds", async () => {
   const w = await world();
@@ -443,6 +673,61 @@ test("a stale token cannot mutate a newer claimed attempt", async () => {
   expect(
     w.registry((registry) => value(registry.ownsSuccessorLaunch("execute", second.token))),
   ).toBe(true);
+  const attempts = new Database(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
+  try {
+    expect(
+      attempts
+        .query<{ owner: string; state: string }, []>(
+          "SELECT owner, state FROM successor_launch_attempts WHERE binding_id = 'execute' ORDER BY attempt_number",
+        )
+        .all(),
+    ).toEqual([
+      { owner: first.token, state: "superseded" },
+      { owner: second.token, state: "claimed" },
+    ]);
+  } finally {
+    attempts.close();
+  }
+});
+
+test("reconcile marks an expired dispatch from a dead owner uncertain without retrying", async () => {
+  const w = await world();
+  const claim = value(
+    w.registry((registry) =>
+      registry.beginSuccessorLaunch(
+        "execute",
+        "pane-execute",
+        "2026-09-27T00:00:00.000Z",
+        "2026-09-26T23:58:00.000Z",
+      ),
+    ),
+  );
+  if (!claim.claimed) throw new Error("claim missing");
+  value(w.registry((registry) => registry.prepareSuccessorLaunch("execute", claim.token)));
+  value(w.registry((registry) => registry.dispatchSuccessorLaunch("execute", claim.token)));
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    db.query(
+      "UPDATE successor_launch SET owner_pid = 2147483647, owner_starttime = '1' WHERE binding_id = 'execute'",
+    ).run();
+  } finally {
+    db.close();
+  }
+  w.setClock(120_001);
+
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({
+    ok: false,
+    error: {
+      code: "reconciliation_uncertain",
+      details: { issues: [{ bindingId: "execute", code: "successor_abandon_required" }] },
+    },
+  });
+  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual({
+    attemptId: claim.token,
+    state: "uncertain",
+  });
+  expect(w.registry((registry) => value(registry.get("execute")).launchState)).toBe("uncertain");
+  expect(w.launches()).toBe(0);
 });
 
 test("an accepted dispatch with lost observation becomes uncertain and is never resent", async () => {
@@ -450,7 +735,10 @@ test("an accepted dispatch with lost observation becomes uncertain and is never 
   w.setRunHook(async () => w.disconnect());
   expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
   expect(w.launches()).toBe(1);
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "recovery_uncertain" } });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "successor_abandon_required" },
+  });
   expect(w.launches()).toBe(1);
   expect(w.registry((registry) => value(registry.get("execute")).launchState)).toBe("uncertain");
 });
@@ -524,7 +812,10 @@ test("stage-start settlement uses the intent captured before native observation"
     second,
   );
   expect(w.launches()).toBe(2);
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "recovery_uncertain" } });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "successor_abandon_required" },
+  });
   expect(w.launches()).toBe(2);
 });
 

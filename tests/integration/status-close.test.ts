@@ -3,6 +3,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@code-yeongyu/senpi";
 import { runCli } from "../../src/cli";
 import type {
   Binding,
@@ -474,6 +475,269 @@ test.each(["plan", "execute"])(
     }
   },
 );
+
+test("status/close: plan close refuses while its execute successor requires abandonment", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+
+    expect(await w.orchestrator.close("plan", false, true)).toMatchObject({
+      ok: false,
+      error: {
+        code: "successor_abandon_required",
+        details: { bindingId: "execute" },
+      },
+    });
+    expect(w.workspaces.has("childws")).toBe(true);
+    expect(value(w.registry.stageOf("execute"))).not.toBeNull();
+    expect(value(w.registry.get("execute")).launchState).toBe("uncertain");
+    expect(w.events.filter((event) => event === "workspace:childws")).toHaveLength(0);
+    expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(0);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test.each([
+  ["pane", "/another-binding/session.jsonl", false],
+  ["workspace", null, true],
+] as const)(
+  "status/close: uncertain successor refuses conflicting %s identity before retirement",
+  async (_kind, panePath, foreignWorkspace) => {
+    const w = await world();
+    try {
+      w.planned();
+      const db = new Database(w.path);
+      try {
+        db.query(
+          "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+        ).run();
+        db.query(
+          "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+        ).run();
+      } finally {
+        db.close();
+      }
+      if (panePath !== null) w.paneSessions.set("childws:execute", panePath);
+      w.workspaces.set("childws", {
+        workspaceId: "childws",
+        cwd: foreignWorkspace ? "/foreign/workspace" : w.root,
+        rootPaneId: "childws:execute",
+      });
+
+      const before = value(w.registry.get("execute"));
+      expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+        ok: false,
+        error: { code: "identity_mismatch" },
+      });
+      expect(value(w.registry.get("execute"))).toEqual(before);
+      expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(0);
+      expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(false);
+    } finally {
+      w.cleanup();
+    }
+  },
+);
+
+test("status/close: interrupted uncertain-successor retirement resumes without closing lineage", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+    const execute = value(w.registry.get("execute"));
+    if (execute.sessionPath === null) throw new Error("Missing execute session path");
+    const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+      id: execute.durableSessionId,
+    });
+    const header = manager.getHeader();
+    if (header === null) throw new Error("Missing execute session header");
+    await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+    w.setFault("after-terminate");
+    expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable" },
+    });
+    expect(value(w.registry.get("execute")).launchState).toBe("closing");
+
+    w.setFault("none");
+    expect(await w.orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
+    expect(value(w.registry.get("plan"))).toMatchObject({
+      launchState: "closed",
+      contactState: "cancelled",
+    });
+    expect(value(w.registry.stageOf("execute"))).toBeNull();
+    expect(w.workspaces.has("childws")).toBe(true);
+    expect(w.events.filter((event) => event === "workspace:childws")).toHaveLength(0);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test.each([
+  ["live TUI without a session path", true],
+  ["missing pane", false],
+] as const)(
+  "status/close: uncertain successor retires when its %s is already stopped or can be verified",
+  async (_case, liveWithoutPath) => {
+    const w = await world();
+    try {
+      w.planned();
+      const db = new Database(w.path);
+      try {
+        db.query(
+          "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+        ).run();
+        db.query(
+          "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+        ).run();
+      } finally {
+        db.close();
+      }
+      const execute = value(w.registry.get("execute"));
+      if (execute.sessionPath === null) throw new Error("Missing execute session path");
+      const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+        id: execute.durableSessionId,
+      });
+      const header = manager.getHeader();
+      if (header === null) throw new Error("Missing execute session header");
+      await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+      if (liveWithoutPath) w.paneSessions.set("childws:execute", "");
+      else {
+        w.paneSessions.delete("childws:execute");
+        w.agentPanes.delete("childws:execute");
+      }
+
+      expect(await w.orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
+      expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(
+        liveWithoutPath ? 1 : 0,
+      );
+      expect(value(w.registry.stageOf("execute"))).toBeNull();
+      expect(value(w.registry.get("plan"))).toMatchObject({
+        launchState: "closed",
+        contactState: "cancelled",
+      });
+    } finally {
+      w.cleanup();
+    }
+  },
+);
+
+test("status/close: resumed uncertain-successor close refuses a replacement TUI", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+    const execute = value(w.registry.get("execute"));
+    if (execute.sessionPath === null) throw new Error("Missing execute session path");
+    const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+      id: execute.durableSessionId,
+    });
+    const header = manager.getHeader();
+    if (header === null) throw new Error("Missing execute session header");
+    await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+
+    w.setFault("after-terminate");
+    expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable" },
+    });
+    expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(true);
+
+    w.setFault("none");
+    w.paneSessions.set("childws:execute", "/replacement/session.jsonl");
+    w.agentPanes.add("childws:execute");
+    const quitsBeforeRetry = w.events.filter((event) => event === "quit:childws:execute").length;
+    expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+      ok: false,
+      error: { code: "identity_mismatch" },
+    });
+    expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(
+      quitsBeforeRetry,
+    );
+    expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(true);
+    expect(value(w.registry.get("execute")).launchState).toBe("closing");
+    expect(value(w.registry.stageOf("execute"))).not.toBeNull();
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("status/close: uncertain local-only successor closes while its host is unreachable", async () => {
+  const w = await world();
+  try {
+    w.planned();
+    const db = new Database(w.path);
+    try {
+      db.query(
+        "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+      ).run();
+      db.query(
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+      ).run();
+    } finally {
+      db.close();
+    }
+    const execute = value(w.registry.get("execute"));
+    if (execute.sessionPath === null) throw new Error("Missing execute session path");
+    const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+      id: execute.durableSessionId,
+    });
+    const header = manager.getHeader();
+    if (header === null) throw new Error("Missing execute session header");
+    await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+    const hostUnavailable = Object.assign(new Error("connect ENOENT /missing/omo.sock"), {
+      code: "ENOENT",
+    });
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      terminateBinding: async () => {
+        throw hostUnavailable;
+      },
+    });
+
+    expect(await orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
+    expect(value(w.registry.get("plan"))).toMatchObject({
+      launchState: "closed",
+      contactState: "cancelled",
+    });
+    expect(value(w.registry.stageOf("execute"))).toBeNull();
+    expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(false);
+    expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(1);
+  } finally {
+    w.cleanup();
+  }
+});
 
 test("status/close: repeated interruptions finish closure with exactly one workspace removal", async () => {
   const w = await world();

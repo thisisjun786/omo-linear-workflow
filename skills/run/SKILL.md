@@ -154,6 +154,8 @@ live owner. Nothing from the original packet transfers: the execute brief carrie
 ID the execute stage reports under (`report:<packet-id>`). Only an explicit packet starts
 work.
 
+If `stage start` is interrupted and the execute binding becomes `uncertain`, do not resend, send the packet directly to its local-only TUI, or invent a new message ID. Neither `stage start` nor `reconcile` relaunches it, because native queued input may have existed only in the lost runtime's memory. Inspect the exact pane and checkout, then explicitly `close --binding <EXECUTE_BINDING>` (using `--discard` only after checking unpublished work). Close verifies the workspace, pane and durable session before stopping it, preserves the old session file, attempt history, workspace and checkout, and retires only the abandoned execute edge. It leaves the completed plan closed and non-contactable. Re-run the original `stage start` command to reserve a fresh execute binding at ordinal 2 in the existing generation. Do not close the plan as a substitute: an ordinary plan close cannot seed a replacement, and plan close is refused while its execute successor requires abandonment.
+
 When a child's report arrives, verify before integrating: compare the reported head and
 evidence against the criteria at that head, re-read the base, and merge into the project
 branch only when they hold. Return an in-scope correction to the same child with the violated

@@ -1805,7 +1805,9 @@ export class Orchestrator {
     if (handoff === null) return failure("handoff_missing", "Plan has no handoff");
     const chain = this.#withRegistry((registry) => registry.lineageFor(plan.value.id));
     if (!chain.ok) return chain;
-    const next = chain.value.stages.find((entry) => entry.ordinal === 1);
+    const next = [...chain.value.stages]
+      .filter((entry) => entry.stage === "execute" && entry.launchState !== "closed")
+      .sort((left, right) => right.ordinal - left.ordinal)[0];
     if (next !== undefined) {
       const successor = this.#binding(next.bindingId);
       if (!successor.ok) return successor;
@@ -1877,44 +1879,51 @@ export class Orchestrator {
     }
     if (head !== handoff.head)
       return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
-    if (plan.value.paneId === null || plan.value.workspaceId === null)
-      return failure("runtime_unavailable", "Plan has no Herdr pane or workspace");
+    if (plan.value.workspaceId === null)
+      return failure("runtime_unavailable", "Plan has no Herdr workspace");
     const context = await this.#context(plan.value);
     if (!context.ok) return context;
-    const herdr = this.#deps.createHerdrClient(plan.value.herdrSocket);
-    try {
-      const snapshot = await herdr.snapshot();
-      const pane = snapshot.panes.find(
-        (item) => item.paneId === plan.value.paneId && item.workspaceId === plan.value.workspaceId,
-      );
-      if (
-        !snapshot.workspaces.some(
-          (item) => item.workspaceId === plan.value.workspaceId && item.cwd === checkout.path,
-        ) ||
-        pane === undefined
-      )
-        return failure("runtime_unavailable", "Plan workspace or pane is missing");
-      // The retained native engine may still be open after its TUI has exited.
-      // Only the pane attachment determines whether another /quit is needed.
-      if (hasLiveTui(pane)) {
-        const native = await this.#deps.attachBinding(plan.value);
-        try {
-          const identity = await native.describe();
-          if (!identity.ok) return identity;
-          if (!matchesRuntime(plan.value, identity.value))
-            return failure("identity_mismatch", "Plan runtime identity changed");
-        } finally {
-          await native.close();
+    if (plan.value.launchState !== "closed") {
+      if (plan.value.paneId === null)
+        return failure("runtime_unavailable", "Plan has no Herdr pane");
+      const herdr = this.#deps.createHerdrClient(plan.value.herdrSocket);
+      try {
+        const snapshot = await herdr.snapshot();
+        const pane = snapshot.panes.find(
+          (item) =>
+            item.paneId === plan.value.paneId && item.workspaceId === plan.value.workspaceId,
+        );
+        if (
+          !snapshot.workspaces.some(
+            (item) => item.workspaceId === plan.value.workspaceId && item.cwd === checkout.path,
+          ) ||
+          pane === undefined
+        )
+          return failure("runtime_unavailable", "Plan workspace or pane is missing");
+        if (hasLiveTui(pane)) {
+          const native = await this.#deps.attachBinding(plan.value);
+          try {
+            const identity = await native.describe();
+            if (!identity.ok) return identity;
+            if (!matchesRuntime(plan.value, identity.value))
+              return failure("identity_mismatch", "Plan runtime identity changed");
+          } finally {
+            await native.close();
+          }
+          const stopped = await this.#stopStageSession(plan.value, herdr);
+          if (!stopped.ok) return stopped;
+        } else {
+          await this.#deps.terminateBinding(plan.value);
         }
-        const stopped = await this.#stopStageSession(plan.value, herdr);
-        if (!stopped.ok) return stopped;
-      } else {
-        await this.#deps.terminateBinding(plan.value);
+      } catch (cause) {
+        return failure(
+          "runtime_unavailable",
+          "Plan session could not be stopped",
+          messageOf(cause),
+        );
+      } finally {
+        herdr.close();
       }
-    } catch (cause) {
-      return failure("runtime_unavailable", "Plan session could not be stopped", messageOf(cause));
-    } finally {
-      herdr.close();
     }
     const finalPlan = await verifyPlan(true);
     if (!finalPlan.ok) return finalPlan;
@@ -2039,6 +2048,15 @@ export class Orchestrator {
           );
           return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
         }
+        if (sessionAbsent && observedIntent.value?.state === "uncertain")
+          return failure(
+            "successor_abandon_required",
+            "Execute delivery may have reached the local-only runtime. Inspect its pane, then close this binding and run stage start again to create a fresh successor.",
+            {
+              bindingId: binding.id,
+              recovery: "inspect_then_close_and_restart_stage",
+            },
+          );
         if (hasLiveTui(pane))
           return failure(
             "runtime_unavailable",
@@ -2378,6 +2396,12 @@ export class Orchestrator {
     if (!sender.ok) return sender;
     const host = await this.#checkHostProtocol(sender.value);
     if (host !== undefined) return host;
+    const target = this.#binding(input.toId);
+    if (!target.ok) return target;
+    if (target.value.launchState !== "ready")
+      return failure("not_ready", "Target role is not running");
+    if (target.value.contactState !== "active")
+      return failure("contact_paused", "Target role is not accepting contact");
     const context = await this.#context(sender.value);
     if (!context.ok) return context;
     return this.#deliver(sender.value, {
@@ -3224,7 +3248,52 @@ export class Orchestrator {
     if (target.value.assignment.role === "child") {
       const stage = this.#withRegistry((registry) => registry.stageOf(bindingId));
       if (!stage.ok) return stage;
-      if (stage.value !== null) return this.#closeLineage(target.value, confirmAbsent);
+      if (stage.value !== null) {
+        const intent = this.#withRegistry((registry) => registry.successorLaunchIntent(bindingId));
+        if (!intent.ok) return intent;
+        const retiring = this.#withRegistry((registry) =>
+          registry.uncertainSuccessorClosePending(bindingId),
+        );
+        if (!retiring.ok) return retiring;
+        if (
+          stage.value.stage === "execute" &&
+          ((target.value.launchState === "uncertain" && intent.value?.state === "uncertain") ||
+            retiring.value)
+        )
+          return withUnpushed(
+            await this.#closeUncertainSuccessor(target.value, confirmAbsent),
+            inspected.value,
+          );
+        if (stage.value.stage === "plan") {
+          const lineage = this.#withRegistry((registry) => registry.lineageFor(bindingId));
+          if (!lineage.ok) return lineage;
+          for (const member of lineage.value.stages.filter(
+            (entry) => entry.stage === "execute" && entry.launchState !== "closed",
+          )) {
+            const successor = this.#binding(member.bindingId);
+            if (!successor.ok) return successor;
+            const successorIntent = this.#withRegistry((registry) =>
+              registry.successorLaunchIntent(successor.value.id),
+            );
+            if (!successorIntent.ok) return successorIntent;
+            const successorRetiring = this.#withRegistry((registry) =>
+              registry.uncertainSuccessorClosePending(successor.value.id),
+            );
+            if (!successorRetiring.ok) return successorRetiring;
+            if (
+              (successor.value.launchState === "uncertain" &&
+                successorIntent.value?.state === "uncertain") ||
+              successorRetiring.value
+            )
+              return failure(
+                "successor_abandon_required",
+                `Close the uncertain execute binding first: olw close --binding ${successor.value.id}`,
+                { bindingId: successor.value.id },
+              );
+          }
+        }
+        return this.#closeLineage(target.value, confirmAbsent);
+      }
     }
     const closing = this.#withRegistry((registry) => registry.beginClose(bindingId));
     if (!closing.ok) return closing;
@@ -3316,6 +3385,90 @@ export class Orchestrator {
     } finally {
       herdr.close();
     }
+  }
+
+  async #closeUncertainSuccessor(
+    binding: Binding,
+    confirmAbsent: boolean,
+  ): Promise<Result<Binding>> {
+    const pending = this.#withRegistry((registry) =>
+      registry.uncertainSuccessorClosePending(binding.id),
+    );
+    if (!pending.ok) return pending;
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    try {
+      const snapshot = await herdr.snapshot();
+      const workspace = snapshot.workspaces.find(
+        (item) => item.workspaceId === binding.workspaceId,
+      );
+      const pane = snapshot.panes.find(
+        (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
+      );
+      if (workspace === undefined || workspace.cwd !== binding.cwd || binding.sessionPath === null)
+        return failure(
+          "identity_mismatch",
+          "Uncertain successor workspace or session identity does not match the binding",
+        );
+      try {
+        if (SessionManager.open(binding.sessionPath).getSessionId() !== binding.durableSessionId)
+          return failure(
+            "identity_mismatch",
+            "Uncertain successor durable session does not match the binding",
+          );
+      } catch (cause) {
+        if (!(confirmAbsent && pane === undefined))
+          return failure(
+            "identity_mismatch",
+            "Uncertain successor session identity could not be verified. After manually killing the pane, retry with olw close --binding <id> --confirm-absent",
+            messageOf(cause),
+          );
+      }
+      if (
+        pane !== undefined &&
+        pane.sessionPath !== null &&
+        pane.sessionPath !== "" &&
+        pane.sessionPath !== binding.sessionPath
+      )
+        return failure(
+          "identity_mismatch",
+          "Uncertain successor pane advertises a different session",
+        );
+
+      const closing = this.#withRegistry((registry) =>
+        registry.beginUncertainSuccessorClose(binding.id),
+      );
+      if (!closing.ok) return closing;
+      let localStopped = pane === undefined || !hasLiveTui(pane);
+      if (!localStopped) {
+        const stopped = await this.#stopStageSession(binding, herdr, false);
+        if (!stopped.ok) return stopped;
+        localStopped = true;
+      }
+      try {
+        await this.#deps.terminateBinding(binding);
+      } catch (cause) {
+        if (!localStopped || !this.#hostIsUnreachable(cause)) throw cause;
+      }
+      await removeReadiness(this.#root, binding.id);
+      return this.#withRegistry((registry) => registry.closeUncertainSuccessor(binding.id));
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Uncertain successor closure is incomplete; lineage remains held",
+        messageOf(cause),
+      );
+    } finally {
+      herdr.close();
+    }
+  }
+
+  #hostIsUnreachable(cause: unknown): boolean {
+    return (
+      cause instanceof NativeSessionAbsentError ||
+      (cause instanceof Error &&
+        "code" in cause &&
+        (cause.code === "ENOENT" || cause.code === "ECONNREFUSED"))
+    );
   }
 
   async #closeLineage(target: Binding, confirmAbsent: boolean): Promise<Result<Binding>> {
@@ -3421,7 +3574,11 @@ export class Orchestrator {
     }
   }
 
-  async #stopStageSession(binding: Binding, herdr: HerdrClient): Promise<Result<void>> {
+  async #stopStageSession(
+    binding: Binding,
+    herdr: HerdrClient,
+    terminateNative = true,
+  ): Promise<Result<void>> {
     if (binding.paneId === null) return failure("runtime_unavailable", "Stage has no Herdr pane");
     let stop: (() => void) | undefined;
     try {
@@ -3443,7 +3600,7 @@ export class Orchestrator {
       } finally {
         clearTimeout(timeout);
       }
-      await this.#deps.terminateBinding(binding);
+      if (terminateNative) await this.#deps.terminateBinding(binding);
       return ok(undefined);
     } finally {
       stop?.();
@@ -3524,6 +3681,28 @@ export class Orchestrator {
             issues.push({ bindingId: binding.id, ...launchIntent.error });
             continue;
           }
+          if (launchIntent.value?.state === "dispatching") {
+            const now = this.#deps.now();
+            const abandoned = this.#withRegistry((registry) =>
+              registry.abandonDeadSuccessorLaunch(
+                binding.id,
+                new Date(Date.parse(now) - LAUNCH_CLAIM_LEASE_MS).toISOString(),
+              ),
+            );
+            if (!abandoned.ok) {
+              issues.push({ bindingId: binding.id, ...abandoned.error });
+              continue;
+            }
+            if (!abandoned.value) continue;
+            issues.push({
+              bindingId: binding.id,
+              code: "successor_abandon_required",
+              message:
+                "Execute launch owner exited after dispatch. Inspect its pane, then close this binding and run stage start again to create a fresh successor.",
+            });
+            continue;
+          }
+          if (launchIntent.value?.state === "claimed") continue;
           if (launchIntent.value?.state === "uncertain") {
             let session: NativeSession | undefined;
             try {
@@ -3567,6 +3746,15 @@ export class Orchestrator {
               else observed += 1;
               continue;
             } catch (cause) {
+              if (cause instanceof NativeSessionAbsentError) {
+                issues.push({
+                  bindingId: binding.id,
+                  code: "successor_abandon_required",
+                  message:
+                    "Execute delivery may have reached the local-only runtime. Inspect its pane, then close this binding and run stage start again to create a fresh successor.",
+                });
+                continue;
+              }
               issues.push({
                 bindingId: binding.id,
                 code: "runtime_unavailable",
@@ -4104,7 +4292,9 @@ export class Orchestrator {
     const currentStage = latest?.bindingId === binding.id ? latest.stage : undefined;
     const predecessor =
       latest?.bindingId === binding.id && latest.ordinal > 0
-        ? lineage?.value.stages.find((stage) => stage.ordinal === latest.ordinal - 1)
+        ? [...(lineage?.value.stages ?? [])]
+            .reverse()
+            .find((stage) => stage.ordinal < latest.ordinal && stage.stage === "plan")
         : undefined;
     let planPath: string | undefined;
     let planHead: string | undefined;

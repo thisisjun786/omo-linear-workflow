@@ -69,7 +69,17 @@ function failure<T>(code: string, message: string, details?: unknown): Result<T>
 }
 
 export function publicRpcClient(socketPath: string): RpcPort {
-  return new RpcClient({ socketPath });
+  const client = new RpcClient({ socketPath });
+  return Object.assign(client, {
+    destroy: () => {
+      const transport = client as unknown as {
+        socket?: { destroy(): void } | null;
+        process?: { kill(signal: NodeJS.Signals): void } | null;
+      };
+      transport.socket?.destroy();
+      transport.process?.kill("SIGKILL");
+    },
+  });
 }
 
 export async function attachBinding(binding: Binding): Promise<NativeSession> {

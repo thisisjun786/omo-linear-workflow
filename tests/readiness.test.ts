@@ -1,9 +1,15 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Binding } from "../src/core/contracts";
-import { publishReadiness, subscribeReadiness } from "../src/readiness";
+import {
+  processStarttime,
+  proveTuiConnection,
+  publishReadiness,
+  subscribeReadiness,
+} from "../src/readiness";
 
 const binding: Binding = {
   id: "ready-supervisor",
@@ -62,6 +68,98 @@ test("rejects a receipt for the wrong checkout instead of accepting its path", a
     expect(await accepted).toBe(false);
   } finally {
     subscription.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("launch proof binds a live host peer to the nonce TUI PID, not an observer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-tui-proof-"));
+  const starttime = await processStarttime(process.pid);
+  const rows = (pid: number) =>
+    `u_str ESTAB 0 0 ${binding.omoSocket} 100 * 200 users:(("host",pid=999,fd=3))\nu_str ESTAB 0 0 * 200 * 100 users:(("tui",pid=${pid},fd=4))\n`;
+  try {
+    await publishReadiness(root, {
+      ...receipt,
+      launch: { nonce: "launch", pid: process.pid, starttime },
+    });
+    const allocated = { ...binding, sessionPath: receipt.sessionPath };
+    expect(
+      await proveTuiConnection(
+        root,
+        allocated,
+        "launch",
+        async () => true,
+        async () => rows(process.pid),
+      ),
+    ).toBe(true);
+    expect(
+      await proveTuiConnection(
+        root,
+        allocated,
+        "launch",
+        async () => true,
+        async () => rows(process.pid + 1),
+      ),
+    ).toBe(false);
+    await expect(
+      proveTuiConnection(
+        root,
+        allocated,
+        "stale",
+        async () => true,
+        async () => rows(process.pid),
+      ),
+    ).rejects.toMatchObject({ reason: "attachment_unverified" });
+    await expect(
+      proveTuiConnection(
+        root,
+        allocated,
+        "launch",
+        async () => false,
+        async () => rows(process.pid),
+      ),
+    ).rejects.toMatchObject({ reason: "attachment_unverified" });
+    await expect(
+      proveTuiConnection(
+        root,
+        allocated,
+        "launch",
+        async () => true,
+        async () => rows(process.pid).replace(/users:.*$/gm, ""),
+      ),
+    ).rejects.toMatchObject({ reason: "attachment_unverified" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("TUI process proof reads a real established Unix peer and notices disconnect", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-tui-peer-"));
+  const path = join(root, "host.sock");
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, resolve);
+  });
+  const connected = Promise.withResolvers<void>();
+  server.once("connection", () => connected.resolve());
+  const client = createConnection(path);
+  client.on("error", (cause) => connected.reject(cause));
+  try {
+    await connected.promise;
+    await publishReadiness(root, {
+      ...receipt,
+      launch: { nonce: "real", pid: process.pid, starttime: await processStarttime(process.pid) },
+    });
+    const allocated = { ...binding, sessionPath: receipt.sessionPath, omoSocket: path };
+    expect(await proveTuiConnection(root, allocated, "real", async () => true)).toBe(true);
+    const closed = new Promise<void>((resolve) => client.once("close", () => resolve()));
+    client.destroy();
+    await closed;
+    expect(await proveTuiConnection(root, allocated, "real", async () => true)).toBe(false);
+  } finally {
+    client.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -1,0 +1,35 @@
+Round5 base0dea9cb; assigned worktree only.
+
+bun test tests/transport/client.test.ts -t observation
+0pass/3fail: deadline list throw and post-release list throw expected
+TuiAttachmentUnverifiedError/attachment_unverified, received fallback; transient
+predeadline throw rejected instead of waiting next event.
+
+bun test tests/transport/client.test.ts -t 'fresh observation behind'
+0pass/1fail: event+deadline during deferred stale list, then stale1 snapshot resolves;
+expected new observation and success, received fallback. Test scheduler triggers
+deadline deterministically, not sleep. Fixed pending recheck and started-after-deadline.
+
+bun test tests/manage.test.ts tests/integration/successor-recovery.test.ts
+-t 'attachment observation failure preserves'
+0pass/5fail: new manager, reattach, parent, foreground and successor all lacked
+attachment_unverified outcome. Foreground generic failure also killed TUI.
+GREEN same5/0 after typed mapping+uncertain state and foreground preserve guard.
+
+Gate1 source/repro: aggregate observer+hold succeeds in0dea9cb with zero TUI.
+Added attributable predicate check and nonce/PID/starttime/socket peer proof.
+No static sharedHostEnabled or Proxy heuristic: pinned APIs expose intent, not
+selected runtime. Source investigation and kernel peer experiment confirm Linux
+socket ownership is observable without package modification. New observer-negative
+and exact nonce/PID tests plus real separate-process QA cover this boundary.
+
+Baseline function re-execution: extracted acquireLaunchSession from git show
+0dea9cb:src/transport/client.ts, transpiled without modifying any file. Fake exact
+native row attachments2 ->1, attributable TUI predicate false. Baseline confirmed
+success anyway. Observed {incorrectlyAccepted:true,remainingAttachments:1}.
+
+Self-review RED: omitted proveTui callback still allowed aggregate count success.
+bun test tests/transport/client.test.ts -t 'omitted TUI ownership':0pass/1fail,
+expected rejection but resolved. Final API fails attachment_unverified if proof
+is missing; production callers always supply nonce/PID/socket proof. Count-unit
+fixtures now explicitly supply true rather than silently bypassing attribution.

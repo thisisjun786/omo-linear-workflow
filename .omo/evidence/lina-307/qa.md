@@ -130,3 +130,17 @@ holdAttachments1, real adapter local fallback warning, typed refusal, stopped lo
 fixture and removed owned workspace, pending binding closed. Positive attach>=2
 then post-release>=1 still passed. Cleanup20 sessions/host/socket/root succeeded.
 Both allowed QA attempts passed; no third run.
+
+## PR19 round5 observer plus local-fallback TUI
+
+`bun scripts/qa-manager-idle.ts --local-fallback`,2026-09-28T12:26Z,attempt1 PASS.
+HostPID1327721, `/tmp/olw-manager-idle-jvnjpt`; observer/hold ownerPID1327687,
+separate TUI processPID1328939. Actual host row attachments2 (hold+observer).
+The separate TUI uses the real installed native adapter and emits its fallback
+warning from a missing socket. It publishes a nonce/PID/starttime-bound readiness.
+Kernel socket proof sees no exact peer owned by that TUI, despite observer count2.
+The orchestrator returns tui_local_fallback, stops the owned TUI process, closes
+the pending binding and fixture workspace; observer/hold are then closed and the
+native row disappears. Existing idle/busy/replay and same-ID retry also passed.
+Cleanup2 base sessions+observer+TUI+host/root/socket succeeded, exit0. Pane membership
+and workspace operations are fixture controlled, not a live Herdr UI.

@@ -21,6 +21,7 @@ import { publishReadiness } from "../../src/readiness";
 import {
   type NativeSession,
   NativeSessionAbsentError,
+  TuiAttachmentUnverifiedError,
   TuiLocalFallbackError,
 } from "../../src/transport";
 
@@ -484,6 +485,39 @@ test.each([true, false])(
     expect(w.launches()).toBe(0);
   },
 );
+
+test("successor attachment observation failure preserves live TUI and its recovery intent", async () => {
+  const w = await world({ executeInitialized: false, unprovisioned: true });
+  const closed: string[] = [];
+  w.setCreateTab(async () => ({ tabId: "workspace:execute", rootPaneId: "pane-execute" }));
+  Object.assign(w.dependencies.createHerdrClient("/herdr"), {
+    closeTab: async (id: string) => {
+      closed.push(id);
+    },
+  });
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiAttachmentUnverifiedError();
+      },
+      release: async () => {},
+    }),
+  });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "runtime_unavailable", details: { reason: "attachment_unverified" } },
+  });
+  expect(w.quits()).toBe(0);
+  expect(closed).toEqual([]);
+  expect(w.sends()).toBe(0);
+  expect(w.registry((r) => value(r.get(w.execute.id)))).toMatchObject({
+    launchState: "uncertain",
+    initialization: { state: "pending" },
+  });
+  expect(w.registry((r) => value(r.successorLaunchIntent(w.execute.id)))).toMatchObject({
+    state: "uncertain",
+  });
+});
 
 test("successor hold-only fallback is stopped before activation and its owned tab is closed", async () => {
   const w = await world({ executeInitialized: false, unprovisioned: true });

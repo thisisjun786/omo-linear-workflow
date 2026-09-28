@@ -24,7 +24,7 @@ import {
   resultSchema,
   workerRequestSchema,
 } from "../core/schema";
-import { publishReadiness } from "../readiness";
+import { processStarttime, publishReadiness } from "../readiness";
 import { type GoalPause, goalPauseSchema } from "./goal-pause";
 import { ManagerNoticeDeliveryError, type ManagerNoticeReply } from "./manager-notice-client";
 import { publishOperationalNotice, runtimeFailureClaim } from "./operational";
@@ -441,6 +441,15 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       sessionPath,
       cwd: ctx.cwd,
       paneId: binding.value.paneId,
+      ...(process.env["OMO_INITIATIVE_LAUNCH_NONCE"] === undefined
+        ? {}
+        : {
+            launch: {
+              nonce: process.env["OMO_INITIATIVE_LAUNCH_NONCE"],
+              pid: process.pid,
+              starttime: await processStarttime(process.pid),
+            },
+          }),
     });
   });
 

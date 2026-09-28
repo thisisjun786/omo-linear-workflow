@@ -1,0 +1,56 @@
+PR19 round5 base0dea9cb, assigned worktree only. Includes both added gate blockers.
+
+FINAL NORMAL FULL SUITE
+bun test:773 pass,0 fail,73 files,108.86s,exit0.
+
+FINAL HERDR-UNSET FULL SUITE
+env -u HERDR_ENV HERDR_SOCKET_PATH=/tmp/olw-lina307-r5-no-socket bun test
+773 pass,0 fail,73 files,153.50s,exit0.
+
+FINAL VALIDATORS
+bun run typecheck && bun run lint && bun run build && bun run release:check
+&& bun test tests/install.test.ts && bun dist/cli.js --help
+All exit0. Biome174 files0 errors/warnings (information diagnostics not suppressed).
+Build completed; release0.2.0/v0.2.0. Install smoke5/0,2.55s; CLI help printed.
+One earlier validator run found only src/transport/client.ts formatting; fixed
+without behavior change. Expected installer negative build exit7 test passed.
+LSP directories src49/tests50capped/integration3/transport1/scripts41: all0 errors.
+
+RED/GREEN
+round5-red.txt captures3 observation classification failures,1 deferred stale-check
+failure,5 lifecycle outcome failures, baseline observer/hold false success and the
+final omitted-proof regression. Focused lifecycle5/0, initial related125/0, current
+readiness+transport25/0 before the final omitted-proof regression was added.
+
+REAL SURFACE
+One disposable-host observer+fallback QA, PASS exit0, see qa.md. Host1327721,
+observer/hold1327687,TUI1328939, root/tmp/olw-manager-idle-jvnjpt. Exact native row
+attachments2 cannot satisfy nonce TUI socket proof. Actual native adapter fallback
+warning observed; pending binding closed only after proven TUI-peer absence and
+owned TUI stop. Native row and all resources removed. Independent ps/root checks
+passed. Real Unix socket positive+disconnect test also passed without clock polling.
+No full live Herdr UI interaction; pane membership and workspace lifecycle fixture.
+
+ATTRIBUTION DECISION
+Pinned Senpi sharedHostEnabled is registration intent, not live remote status.
+ExtensionContext does not expose RemoteInteractiveRuntime.isFallback. Core pi actions
+and session manager are initially bound locally. Using those as proof was rejected.
+Read-only source investigation found the native adapter's socket lives in TUI PID;
+startup fallback stops it before local session_start, runtime fallback also stops
+failed transport before rebind. Chosen proof: launch nonce+PID/starttime readiness,
+Herdr paneContainsProcess, kernel ESTAB Unix peer inode pair to exact host path.
+Checks before/after hold release; attachment count supportive only. Requires Linux
+/proc and iproute2 ss; missing/unreadable diagnostic state is unverified. Contract:
+OLW TUI startup must not open another persistent same-host RPC in that process.
+
+INVARIANTS / REVIEW
+All3 acquire sites mark attachment_unverified uncertain, no TUI/pane/tab/binding
+closure. Foreground generic-error kill excludes this reason. Successor intent stays
+uncertain. Only observed negative at a fresh post-deadline check can prove fallback.
+Events/deadline during an in-flight observation queue a recheck and stale result is
+discarded. Hard deadline/after-release failure unverified, no destructive cleanup.
+No status/doctor list additions, accepted/uncertain resend, upstream/patch/package
+or global edits, no live root/socket commands. Reply6 unposted. One new commit/no push.
+
+Earlier normal full run772/0 was clean, but its second mode was cancelled when the
+final omitted-proof bug was found. Final full results are recorded separately below.

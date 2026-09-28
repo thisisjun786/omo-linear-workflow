@@ -24,7 +24,11 @@ import {
 } from "../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
-import { type NativeSession, TuiLocalFallbackError } from "../src/transport";
+import {
+  type NativeSession,
+  TuiAttachmentUnverifiedError,
+  TuiLocalFallbackError,
+} from "../src/transport";
 import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
@@ -429,6 +433,76 @@ test.each(["new-manager", "reattach", "parent"] as const)(
         initialization: { state: "pending" },
       });
       expect(w.prompts.size).toBe(0);
+    }
+  },
+);
+
+test.each(["new-manager", "reattach", "parent", "foreground"] as const)(
+  "%s attachment observation failure preserves TUI and uncertain binding",
+  async (mode) => {
+    const w = await world();
+    const manager = mode === "reattach" ? value(await w.orchestrator.manage()).binding : undefined;
+    if (manager?.paneId) w.panes.delete(manager.paneId);
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    const exit = Promise.withResolvers<number>();
+    let stops = 0;
+    if (mode === "foreground") {
+      process.env["HERDR_ENV"] = "1";
+      process.env["HERDR_PANE_ID"] = "caller:p1";
+      w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+      w.panes.set("caller:p1", { workspaceId: "caller" });
+      Object.assign(w.deps, {
+        launchHere: () => ({
+          exited: exit.promise,
+          kill: () => {
+            stops++;
+            exit.resolve(0);
+          },
+        }),
+      });
+    }
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    Object.assign(herdr, {
+      sendKeys: async () => {
+        stops++;
+      },
+      closeTab: async () => {
+        stops++;
+      },
+      closeWorkspace: async () => {
+        stops++;
+      },
+    });
+    Object.assign(w.deps, {
+      acquireLaunchSession: async () => ({
+        confirmTuiAttachment: async () => {
+          throw new TuiAttachmentUnverifiedError();
+        },
+        release: async () => {},
+      }),
+    });
+    try {
+      const result =
+        mode === "parent"
+          ? await w.createParent("project", true)
+          : await w.orchestrator.manage(mode === "foreground" ? { here: true } : undefined);
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "runtime_unavailable", details: { reason: "attachment_unverified" } },
+      });
+      expect(stops).toBe(0);
+      const current = value(w.orchestrator.status()).at(-1);
+      expect(current?.launchState).toBe("uncertain");
+      expect(current?.initialization.state).toBe(manager ? "accepted" : "pending");
+    } finally {
+      exit.resolve(0);
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   },
 );

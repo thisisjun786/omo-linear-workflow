@@ -168,10 +168,136 @@ test("launch proof rejects a hold-only row even though native describe succeeds"
   const held = await acquireLaunchSession(binding, client);
   try {
     expect(await client.requestExtension("omo.initiative.describe")).toMatchObject({ ok: true });
-    await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+    await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
       reason: "tui_local_fallback",
     });
   } finally {
+    await held.release();
+  }
+});
+
+test("observer attachments cannot prove a local-fallback TUI attached", async () => {
+  const client = new FakeRpc();
+  client.listSessions = async () => client.sessions.map((row) => ({ ...row, attachments: 2 }));
+  const held = await acquireLaunchSession(binding, client);
+  try {
+    await expect(held.confirmTuiAttachment(0, async () => false)).rejects.toMatchObject({
+      reason: "tui_local_fallback",
+    });
+  } finally {
+    await held.release();
+  }
+});
+
+test("attachment count cannot bypass an omitted TUI ownership proof", async () => {
+  const client = new FakeRpc();
+  client.listSessions = async () => client.sessions.map((row) => ({ ...row, attachments: 2 }));
+  const held = await acquireLaunchSession(binding, client);
+  try {
+    await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+      reason: "attachment_unverified",
+    });
+  } finally {
+    await held.release();
+  }
+});
+
+test.each(["deadline", "after-release"] as const)(
+  "attachment observation failure is not local fallback: %s",
+  async (phase) => {
+    const client = new FakeRpc();
+    let heldOpen = true;
+    client.listSessions = async () => {
+      if (phase === "deadline" || !heldOpen)
+        throw new Error("list response lost while TUI attached");
+      return client.sessions.map((row) => ({ ...row, attachments: 2 }));
+    };
+    client.closeSession = async () => {
+      heldOpen = false;
+      client.closeSessionCalls++;
+    };
+    const held = await acquireLaunchSession(binding, client);
+    try {
+      await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
+        name: "TuiAttachmentUnverifiedError",
+        reason: "attachment_unverified",
+      });
+    } finally {
+      await held.release();
+    }
+  },
+);
+
+test("a transient attachment observation error waits for the next native event", async () => {
+  const client = new FakeRpc();
+  let listener: ((event: RpcClientEvent) => void) | undefined;
+  let reads = 0;
+  let attachments = 2;
+  client.onEvent = (cb) => {
+    listener = cb;
+    return () => {
+      listener = undefined;
+    };
+  };
+  client.listSessions = async () => {
+    reads++;
+    if (reads === 1) throw new Error("transient list failure");
+    return client.sessions.map((row) => ({ ...row, attachments }));
+  };
+  client.closeSession = async () => {
+    attachments--;
+  };
+  const held = await acquireLaunchSession(binding, client);
+  const proof = held.confirmTuiAttachment(1000, async () => true);
+  try {
+    // Drain the already-rejected list promise; no clock advancement or sleep.
+    await Promise.resolve();
+    listener?.({ type: "agent_start" });
+    await expect(proof).resolves.toBeUndefined();
+    expect(reads).toBe(3);
+    expect(attachments).toBe(1);
+  } finally {
+    await held.release();
+  }
+});
+
+test("attachment deadline and event queue a fresh observation behind a stale in-flight list", async () => {
+  const client = new FakeRpc();
+  const pending = Promise.withResolvers<Awaited<ReturnType<FakeRpc["listSessions"]>>>();
+  const entered = Promise.withResolvers<void>();
+  const timers: Array<() => void> = [];
+  let listener: ((event: RpcClientEvent) => void) | undefined;
+  let reads = 0;
+  let attachments = 2;
+  client.onEvent = (cb) => {
+    listener = cb;
+    return () => {};
+  };
+  client.listSessions = async () => {
+    reads++;
+    if (reads === 1) {
+      entered.resolve();
+      return pending.promise;
+    }
+    return client.sessions.map((row) => ({ ...row, attachments }));
+  };
+  client.closeSession = async () => {
+    attachments--;
+  };
+  const held = await acquireLaunchSession(binding, client, (callback) => {
+    timers.push(callback);
+    return () => {};
+  });
+  const proof = held.confirmTuiAttachment(1000, async () => true);
+  try {
+    await entered.promise;
+    listener?.({ type: "agent_start" });
+    timers[0]?.();
+    pending.resolve(client.sessions.map((row) => ({ ...row, attachments: 1 })));
+    await expect(proof).resolves.toBeUndefined();
+    expect(reads).toBe(3);
+  } finally {
+    pending.resolve([]);
     await held.release();
   }
 });
@@ -188,9 +314,9 @@ test("launch proof requires exact identity and surviving attachment after releas
     };
     const held = await acquireLaunchSession(binding, client);
     try {
-      if (survives) await held.confirmTuiAttachment(0);
+      if (survives) await held.confirmTuiAttachment(0, async () => true);
       else
-        await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+        await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
           reason: "tui_local_fallback",
         });
     } finally {
@@ -208,7 +334,7 @@ test.each(["durableSessionId", "sessionPath", "cwd"] as const)(
       client.sessions.map((row) => ({ ...row, [key]: "/other", attachments: 2 }));
     const held = await acquireLaunchSession(binding, client);
     try {
-      await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+      await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
         reason: "tui_local_fallback",
       });
     } finally {
@@ -237,7 +363,7 @@ test("launch proof rechecks on a native event without polling", async () => {
     client.closeSessionCalls++;
   };
   const held = await acquireLaunchSession(binding, client);
-  const proof = held.confirmTuiAttachment(1000);
+  const proof = held.confirmTuiAttachment(1000, async () => true);
   try {
     await observed.promise;
     attachments = 2;

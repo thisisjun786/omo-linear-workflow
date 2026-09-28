@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { RpcClient, SessionManager } from "@code-yeongyu/senpi";
 import { z } from "zod";
-import { createInteractiveHostRuntime } from "../node_modules/@code-yeongyu/senpi/dist/modes/interactive/interactive-host-runtime.js";
 import type { Binding, Designation, Envelope, Result, ScopeSnapshot } from "../src/core/contracts";
 import { deliveryRecordSchema, resultSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
@@ -18,7 +17,6 @@ import {
   runtimeCacheEnvironment,
 } from "../src/host-profile";
 import { Orchestrator } from "../src/orchestrator";
-import { publishReadiness } from "../src/readiness";
 import { acquireLaunchSession } from "../src/transport";
 
 const root = resolve(import.meta.dir, "..");
@@ -539,6 +537,8 @@ async function main(): Promise<void> {
       let listener: ((event: unknown) => void) | undefined;
       let stopped = false;
       let removed = false;
+      let tui: ReturnType<typeof Bun.spawn> | undefined;
+      let observer: Awaited<ReturnType<typeof openRetained>> | undefined;
       const unexpected = async (): Promise<never> => {
         throw new Error("Unexpected fallback QA operation");
       };
@@ -556,39 +556,35 @@ async function main(): Promise<void> {
         run: async (_pane, argv) => {
           const path = argv[argv.indexOf("--session") + 1];
           assert.ok(path);
-          const observer = new RpcClient({ socketPath: socket });
-          await observer.start();
-          try {
-            const row = (await observer.listSessions()).find((row) => row.sessionPath === path);
-            assert.ok(row);
-            assert.equal(row.attachments, 1);
-            const warnings: unknown[] = [];
-            // Minimal local sentinel is sufficient: the actual native adapter's
-            // connect fails before it accesses further local runtime methods.
-            const local = { session: { sessionFile: path }, cwd: scratch };
-            const runtime = await Reflect.apply(createInteractiveHostRuntime, undefined, [
-              local,
-              {
-                socket: join(scratch, "missing-tui.sock"),
-                ensureHost: async () => undefined,
-                onWarning: (warning: unknown) => warnings.push(warning),
-              },
-            ]);
-            assert.equal(runtime, local);
-            assert.equal(warnings.length, 1);
-            receipt("local-fallback-adapter", { holdAttachments: row.attachments, warnings });
-          } finally {
-            await observer.stop();
-          }
+          observer = await openRetained(socket, path, scratch);
+          const row = (await observer.client.listSessions()).find(
+            (row) => row.sessionPath === path,
+          );
+          assert.equal(row?.attachments, 2);
           const registry = openRegistry(join(state, "registry.sqlite"));
           try {
             const binding = value(registry.bySession(SessionManager.open(path).getSessionId()));
-            await publishReadiness(scratch, {
-              bindingId: binding.id,
-              durableSessionId: binding.durableSessionId,
-              sessionPath: path,
-              cwd: scratch,
-              paneId: "fallback-pane",
+            const nonce = argv
+              .find((arg) => arg.startsWith("OMO_INITIATIVE_LAUNCH_NONCE="))
+              ?.split("=")[1];
+            assert.ok(nonce);
+            tui = Bun.spawn(
+              [
+                process.execPath,
+                join(root, "scripts/qa-tui-fallback.ts"),
+                scratch,
+                binding.id,
+                binding.durableSessionId,
+                path,
+                "fallback-pane",
+                nonce,
+              ],
+              { stdin: "pipe", stdout: "inherit", stderr: "inherit" },
+            );
+            receipt("observer-plus-hold", {
+              attachments: row?.attachments,
+              observerPid: process.pid,
+              tuiPid: tui.pid,
             });
           } finally {
             registry.close();
@@ -596,6 +592,8 @@ async function main(): Promise<void> {
         },
         sendKeys: async (pane) => {
           assert.equal(pane, "fallback-pane");
+          tui?.kill();
+          await tui?.exited;
           stopped = true;
           listener?.({ event: "pane.exited", data: { pane_id: pane } });
         },
@@ -610,7 +608,7 @@ async function main(): Promise<void> {
         closeTab: unexpected,
         focusWorkspace: unexpected,
         focusPane: unexpected,
-        paneContainsProcess: unexpected,
+        paneContainsProcess: async (_pane, pid) => tui?.pid === pid && tui.exitCode === null,
         snapshot: unexpected,
         removeWorktree: unexpected,
       };
@@ -643,13 +641,23 @@ async function main(): Promise<void> {
         now: () => new Date().toISOString(),
         uuid: () => crypto.randomUUID(),
       });
-      const result = await orchestrator.createSupervisor({
-        initiativeId: "fallback",
-        scopeDigest: digest,
-        designationId: "fallback-designation",
-        execute: true,
-        fixture: true,
-      });
+      let result: Awaited<ReturnType<Orchestrator["createSupervisor"]>>;
+      try {
+        result = await orchestrator.createSupervisor({
+          initiativeId: "fallback",
+          scopeDigest: digest,
+          designationId: "fallback-designation",
+          execute: true,
+          fixture: true,
+        });
+      } finally {
+        tui?.kill();
+        await tui?.exited;
+        if (observer !== undefined) {
+          await observer.client.closeSession(observer.sessionId);
+          await observer.client.stop();
+        }
+      }
       assert.deepEqual(result.ok, false);
       if (result.ok) throw new Error("Local fallback activated");
       assert.equal(result.error.code, "runtime_unavailable");
@@ -658,15 +666,17 @@ async function main(): Promise<void> {
       assert.equal(removed, true);
       const binding = value(orchestrator.status({ initiativeId: "fallback" }))[0];
       assert.equal(binding?.launchState, "closed");
-      const observer = new RpcClient({ socketPath: socket });
-      await observer.start();
+      const cleanupObserver = new RpcClient({ socketPath: socket });
+      await cleanupObserver.start();
       try {
         assert.equal(
-          (await observer.listSessions()).some((row) => row.sessionPath === binding?.sessionPath),
+          (await cleanupObserver.listSessions()).some(
+            (row) => row.sessionPath === binding?.sessionPath,
+          ),
           false,
         );
       } finally {
-        await observer.stop();
+        await cleanupObserver.stop();
       }
       receipt("local-fallback-cleaned", { result, stopped, removed, binding });
     }
@@ -831,7 +841,12 @@ async function main(): Promise<void> {
           await tui.start();
           const attached = await tui.openSession({ sessionPath: heldPath, cwd: scratch });
           assert.equal(attached.attached, true);
-          await held.confirmTuiAttachment();
+          // This branch owns the exact RpcClient it just attached. The separate
+          // local-fallback scenario above exercises process-attributed proof.
+          await held.confirmTuiAttachment(
+            undefined,
+            async () => (await tui.getState()).sessionId === "qa-held-launch",
+          );
           await held.release();
           assert.equal((await tui.getState()).sessionId, "qa-held-launch");
           owned.push({ client: tui, sessionId: attached.sessionId });

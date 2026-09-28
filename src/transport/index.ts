@@ -7,5 +7,6 @@ export {
   NativeSessionNotReadyError,
   type NativeSessionProbe,
   probeBindingSession,
+  TuiAttachmentUnverifiedError,
   TuiLocalFallbackError,
 } from "./client";

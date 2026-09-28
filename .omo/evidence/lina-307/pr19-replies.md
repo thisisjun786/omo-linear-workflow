@@ -94,3 +94,30 @@ QA invokes the real native TUI adapter against an unavailable TUI socket while
 OLW holds the actual worker session: the fallback warning is observed, attachment
 count stays1, no verification/initialization occurs, local surface is stopped and
 the binding/native hold are removed. status/doctor were not changed.
+
+### 6. Separate observation failure from proven fallback - discussion_r4121925411
+
+A failed list is now TuiAttachmentUnverifiedError, never local-fallback evidence.
+Before the deadline, failures wait for a native event or the deadline observation.
+Failure at the deadline, hard timeout, or after hold release yields
+runtime_unavailable/reason attachment_unverified. All three launch paths preserve
+the TUI and its tabs/binding, record launchState uncertain, and leave reconciliation
+to the operator. Foreground manager error handling explicitly preserves this case.
+Proven successful negative observations retain the existing fallback cleanup path.
+
+Events and the deadline arriving during an in-flight list set a pending recheck.
+The stale result cannot reject; one fresh observation starts after the deadline
+before any negative decision. Deterministic deferred-promise tests cover this.
+
+Attachment count is now only supporting evidence. Each real launch passes a nonce
+only to its TUI. The local readiness receipt includes that nonce, PID and Linux
+process starttime. Confirmation checks pane PID ownership and a current Unix socket
+peer from that PID to the exact host socket, both before and after hold release.
+An observer in another process cannot satisfy it. Missing or unreadable evidence
+is unverified, not fallback. This uses actual transport ownership; sharedHostEnabled
+is merely configuration and was explicitly rejected as a runtime-state signal.
+
+The TUI extension must not independently open a persistent connection to that host
+socket during startup; otherwise process attribution would not identify its native
+adapter. Current OLW TUI startup does not do so. Linux /proc and iproute2 ss are
+required for this proof; unavailable diagnostics fail closed as unverified.

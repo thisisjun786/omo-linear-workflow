@@ -298,3 +298,51 @@ one new commit with evidence trailers, clean/SHA check, DoneClaim. No more QA ru
 
 Round4 second fullsuite completed760/0,174.38s,exit0. All checks complete. Commit
 staged single increment now, verify exactly1 new commit/clean worktree, DoneClaim.
+
+## PR19 round5 base0dea9cb, expanded by user
+
+Original: list failure -> unverified not fallback; all3 sites uncertain preserve TUI.
+Added gate1 observer aggregate spoof, gate2 dropped pending event/deadline check.
+One commit no push, fullboth suite/validators, max2 observer+fallback QA attempts.
+Goal objective original narrower but newest user+todos bind expanded scope.
+
+Implemented observation typed error, predeadline throw retry on event/deadline,
+pending recheck loop and rejection only on started-after-deadline observation.
+Three sites mark uncertain, foreground manage does not kill attachment_unverified.
+RED3 transport+1stale+5lifecycle, GREEN19transport/5lifecycle then125 across4files.
+
+Signal investigation child r5-tui-signal-audit READONLY concluded no public actual
+runtime flag. sharedHostEnabled intent, ctx sessionManager/core pi actions remain
+local even remote. Chose Linux kernel peer + nonce readiness process.pid/starttime
++Herdr paneContainsProcess, exact row attachment count supportive only. New
+proveTuiConnection uses ss -xHnp state connected rows: TUI-owned client inode peer
+to exact named server connection. Missing process metadata/command/read errors
+are unverified. No live root/socket. No upstream edits.
+
+Hold owns nonce -> argv env after env -u args, TUI session_start publishes launch
+nonce/pid/starttime. Orchestrator calls proveTuiConnection before and after release.
+Tests/readiness has nonce/stale/PID/metadata fixtures. New scripts/qa-tui-fallback.ts
+separate child loads real native adapter with missing socket, publishes attributed
+receipt and waits for owned kill. Main QA now opens observer PLUS hold2; real TUI
+is separate PID with no socket. QA attempt1 pending mon_R2ZP9F4MXBSW1E1W.
+Need inspect QA, complete tests/docs/reply6, format, validators/fullboth, review,
+one commit. Watch out proof missing sessionPath in older readiness test fixture
+fixed with allocated binding. No live QA more than2 attempts. No push.
+
+R5 QA first attemptPASS: host1327721,TUI1328939,observer1327687,attachments2 but
+separate TUI missing host peer; actual native adapter fallback, lifecycle cleanup,
+rootjvnjpt and PIDs independently gone. Real Unix peer test positive/disconnectPASS.
+Reply6 and docs updated, nonce argv inserted after env -u options. All3 paths
+unverified preserve TUI including foreground outer kill exclusion. Full normal772/0
+then cancelled second mode after self-review found optional proveTui bypass. Fixed
+missing proof=>unverified (RED0/1); tests supply explicit predicate. Final fullboth
+pending mon_0R14AJ8ZD1R2FM1J; validators pending mon_7TTGY6K39QQS32FY. No changes
+after these runs except evidence. Need final LSP/diff, fullresults, one commit.
+
+R5 finalnormal773/0,108.86s; no-Herdr pending same monitor. Final validators
+mon_3FMXTMS1CN2EKFRP PASS all exit0 after one format-only fix. LSP directories0.
+Production diff reviewed incl freshness and pre/post peer checks. All temp roots
+and PIDs gone, package/lock/patch unchanged. One new commit still not created.
+
+R5 no-Herdr773/0,153.50s,exit0. All requested+added criteria verified. Ready for
+one new commit, SHA/count/status check and DoneClaim. No further runs needed.

@@ -198,11 +198,20 @@ check, the held-open admission maps native `open_failed: too_many_sessions` to t
 same terminal capacity result before any TUI can fall back locally. Its unstarted
 binding is closed; a never-dispatched successor edge is retired. An initialized
 manager keeps its identity when reattachment is refused. Before identity activation,
-OLW requires at least two live attachments on the exact native session: its hold
-and the launched TUI. It then releases the hold and verifies at least one remains.
-The event/deadline check adds no probe attachment. An unproven TUI is stopped and
+OLW requires a nonce-bound readiness receipt from the launched TUI, verifies its
+PID/starttime and pane ownership, and checks that PID's live Unix peer to the exact
+host socket. Aggregate attachments are supporting evidence only: at least two
+before hold release and at least one afterward, with TUI peer proof repeated.
+This Linux check requires `/proc` and `ss` (iproute2). The TUI extension must not
+open an independent persistent connection to that socket during startup.
+The event/deadline check adds no probe attachment. A proven local fallback is stopped and
 returns `runtime_unavailable` with reason `tui_local_fallback` (or the capacity
 error when full); only its attempt-owned resources and pending binding are closed.
+An observation failure instead returns `runtime_unavailable` with reason
+`attachment_unverified`, marks the binding uncertain and preserves its TUI, pane,
+tab and workspace for reconciliation. Missing/stale nonce or unavailable diagnostics
+are observation failures. Events and deadline checks received during an in-flight
+observation queue a fresh check; a stale pre-deadline result cannot reject a TUI.
 Never retry accepted or uncertain delivery to work around capacity.
 
 Manager notices are admitted in the manager's own isolate. The receiving RPC reads

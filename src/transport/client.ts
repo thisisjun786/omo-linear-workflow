@@ -21,8 +21,17 @@ export class TuiLocalFallbackError extends Error {
   }
 }
 
+export class TuiAttachmentUnverifiedError extends Error {
+  readonly reason = "attachment_unverified";
+  constructor() {
+    super("Could not observe the launched TUI's native attachment; reconcile before retrying");
+    this.name = "TuiAttachmentUnverifiedError";
+  }
+}
+
 export interface LaunchSession {
-  confirmTuiAttachment(timeoutMs?: number): Promise<void>;
+  readonly nonce?: string;
+  confirmTuiAttachment(timeoutMs?: number, proveTui?: () => Promise<boolean>): Promise<void>;
   release(): Promise<void>;
 }
 
@@ -109,6 +118,10 @@ export function publicRpcClient(socketPath: string): RpcPort {
 export async function acquireLaunchSession(
   binding: Binding,
   client: RpcPort = publicRpcClient(binding.omoSocket),
+  schedule: (callback: () => void, ms: number) => () => void = (callback, ms) => {
+    const timer = setTimeout(callback, ms);
+    return () => clearTimeout(timer);
+  },
 ): Promise<LaunchSession> {
   if (binding.sessionPath === null) throw new Error("Launch requires a seeded session path");
   try {
@@ -125,7 +138,9 @@ export async function acquireLaunchSession(
       await client.closeSession(opened.sessionId);
     };
     return {
-      async confirmTuiAttachment(timeoutMs = 5_000) {
+      nonce: crypto.randomUUID(),
+      async confirmTuiAttachment(timeoutMs = 5_000, proveTui) {
+        if (proveTui === undefined) throw new TuiAttachmentUnverifiedError();
         const exact = (rows: Awaited<ReturnType<RpcPort["listSessions"]>>) =>
           rows.find(
             (row) =>
@@ -140,27 +155,39 @@ export async function acquireLaunchSession(
         await new Promise<void>((resolve, reject) => {
           let settled = false;
           let checking = false;
+          let pendingRecheck = false;
           let deadline = timeoutMs === 0;
           let count = 0;
           const finish = (cause?: unknown) => {
             if (settled) return;
             settled = true;
-            clearTimeout(timer);
-            clearTimeout(hardDeadline);
+            cancelDeadline();
+            cancelHardDeadline();
             stop();
             if (cause === undefined) resolve();
             else reject(cause);
           };
           const check = async () => {
-            if (settled || checking) return;
+            if (settled) return;
+            pendingRecheck = true;
+            if (checking) return;
             checking = true;
             try {
-              const rows = await client.listSessions({ include_workers: true });
-              count = rows.length;
-              if ((exact(rows)?.attachments ?? 0) >= 2) finish();
-              else if (deadline) finish(new TuiLocalFallbackError(count));
-            } catch {
-              finish(new TuiLocalFallbackError(count));
+              while (pendingRecheck && !settled) {
+                pendingRecheck = false;
+                const startedAfterDeadline = deadline;
+                try {
+                  const rows = await client.listSessions({ include_workers: true });
+                  count = rows.length;
+                  const tuiAttached = await proveTui();
+                  if (pendingRecheck) continue;
+                  if (tuiAttached && (exact(rows)?.attachments ?? 0) >= 2) finish();
+                  else if (startedAfterDeadline) finish(new TuiLocalFallbackError(count));
+                } catch {
+                  if (!pendingRecheck && startedAfterDeadline)
+                    finish(new TuiAttachmentUnverifiedError());
+                }
+              }
             } finally {
               checking = false;
             }
@@ -168,12 +195,12 @@ export async function acquireLaunchSession(
           const stop = client.onEvent(() => {
             void check();
           });
-          const timer = setTimeout(() => {
+          const cancelDeadline = schedule(() => {
             deadline = true;
             void check();
           }, timeoutMs);
-          const hardDeadline = setTimeout(
-            () => finish(new TuiLocalFallbackError(count)),
+          const cancelHardDeadline = schedule(
+            () => finish(new TuiAttachmentUnverifiedError()),
             timeoutMs + 5_000,
           );
           void check();
@@ -185,13 +212,14 @@ export async function acquireLaunchSession(
               await release();
               const rows = await client.listSessions({ include_workers: true });
               if ((exact(rows)?.attachments ?? 0) < 1) throw new TuiLocalFallbackError(rows.length);
+              if (!(await proveTui())) throw new TuiLocalFallbackError(rows.length);
             })(),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new TuiLocalFallbackError(0)), 5_000);
+              timer = setTimeout(() => reject(new TuiAttachmentUnverifiedError()), 5_000);
             }),
           ]);
         } catch (cause) {
-          throw cause instanceof TuiLocalFallbackError ? cause : new TuiLocalFallbackError(0);
+          throw cause instanceof TuiLocalFallbackError ? cause : new TuiAttachmentUnverifiedError();
         } finally {
           clearTimeout(timer);
         }

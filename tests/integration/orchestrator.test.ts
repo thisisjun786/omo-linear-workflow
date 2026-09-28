@@ -210,6 +210,9 @@ class FakeHerdr implements HerdrClient {
   async renameTab(tabId: string, label: string): Promise<void> {
     this.tabCalls.push({ method: "renameTab", tabId, label });
   }
+  async closeTab(tabId: string): Promise<void> {
+    this.tabCalls.push({ method: "closeTab", tabId });
+  }
   async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {
     this.tabCalls.push({ method: "sendKeys", paneId, text, keys });
     this.events.push(`sendKeys:${paneId}`);

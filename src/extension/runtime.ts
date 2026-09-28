@@ -175,6 +175,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly noticeSender?: Binding;
     readonly admissionDeadline?: number;
     readonly localManager?: boolean;
+    readonly nativeBoundary?: { mayHaveStarted: boolean };
     preDeliveryFailure?: string;
     used: boolean;
   }>();
@@ -706,6 +707,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         resultSchema(bindingSchema),
       );
       if (!sender.ok) return admissionFailed(sender.error);
+      const nativeBoundary = { mayHaveStarted: false };
       let result: Result<DeliveryRecord>;
       try {
         result = await deliver(
@@ -719,13 +721,17 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           ctx,
           false,
           true,
+          nativeBoundary,
         );
       } catch (cause) {
+        if (!nativeBoundary.mayHaveStarted)
+          return admissionFailed({ code: "admission_failed", message: messageOf(cause) });
         result = failure(
           "delivery_uncertain",
           `Manager delivery did not return: ${messageOf(cause)}`,
         );
       }
+      if (!result.ok && !nativeBoundary.mayHaveStarted) return admissionFailed(result.error);
       return {
         phase: "delivery_result",
         result,
@@ -745,6 +751,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     ctx: SessionContextPort,
     userAnswer: boolean,
     localManager = false,
+    nativeBoundary?: { mayHaveStarted: boolean },
   ): Promise<Result<DeliveryRecord>> {
     if (claim.target === null) return { ok: true, value: claim.record };
     const envelope = claim.record.envelope;
@@ -870,11 +877,15 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
             ? {}
             : { managerTarget: claim.target, admissionDeadline, noticeSender: sender }),
           localManager,
+          ...(nativeBoundary === undefined ? {} : { nativeBoundary }),
           used: false,
         },
         async () => {
           let result: { readonly details: unknown } | undefined;
           try {
+            // Until our guard runs, an opaque adapter failure may have executed
+            // native code. The guard restores proof while its authorization runs.
+            if (nativeBoundary !== undefined) nativeBoundary.mayHaveStarted = true;
             result = await port.executeTool("thread_send", input);
           } catch (cause) {
             if (dispatch.getStore()?.preDeliveryFailure === undefined) throw cause;
@@ -902,6 +913,8 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       );
       details = executed.details;
     } catch (cause) {
+      if (nativeBoundary !== undefined && !nativeBoundary.mayHaveStarted)
+        return failure("admission_failed", messageOf(cause));
       return uncertain(envelope.id, `Native send did not return: ${messageOf(cause)}`, nativeKey);
     }
     const detailsResult = z.strictObject({ result: z.unknown() }).safeParse(details);
@@ -967,6 +980,13 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     )
       return undefined;
     const permit = dispatch.getStore();
+    if (
+      toolName === "thread_send" &&
+      permit?.nativeBoundary !== undefined &&
+      !permit.used &&
+      permit.senderSessionId === ctx.sessionManager.getSessionId()
+    )
+      permit.nativeBoundary.mayHaveStarted = false;
     const rejectBeforeDelivery = (reason: string) => {
       if (
         toolName === "thread_send" &&
@@ -986,7 +1006,10 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       claimedSender === undefined
         ? await lookup(ctx.sessionManager.getSessionId())
         : { ok: true as const, value: claimedSender };
-    if (!sender.ok && sender.error.code === "not_found") return undefined;
+    if (!sender.ok && sender.error.code === "not_found") {
+      if (permit?.nativeBoundary !== undefined) permit.nativeBoundary.mayHaveStarted = true;
+      return undefined;
+    }
     if (!sender.ok) return rejectBeforeDelivery(sender.error.message);
     if (toolName === "ask_user_question" || toolName === "request_user_input") {
       return sender.value.assignment.role === "child" || sender.value.assignment.role === "parent"
@@ -1046,6 +1069,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
         return rejectBeforeDelivery("Direct thread_send identity is invalid");
       }
       permit.used = true;
+      if (permit.nativeBoundary !== undefined) permit.nativeBoundary.mayHaveStarted = true;
       return undefined;
     }
     if (envelope.data.fromBindingId !== sender.value.id) {
@@ -1076,6 +1100,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       }
     }
     permit.used = true;
+    if (permit.nativeBoundary !== undefined) permit.nativeBoundary.mayHaveStarted = true;
     return undefined;
   });
 }

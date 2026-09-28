@@ -109,6 +109,9 @@ async function world() {
       return { tabId: `${workspaceId}:t2`, rootPaneId: `${workspaceId}:p2` };
     },
     async renameTab() {},
+    async closeTab() {
+      throw new Error("unexpected closeTab");
+    },
     async focusWorkspace() {},
     async focusPane() {},
     async paneContainsProcess() {

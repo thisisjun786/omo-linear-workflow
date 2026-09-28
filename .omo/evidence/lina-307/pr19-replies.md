@@ -40,3 +40,32 @@ pending successor is token-fenced, closed, and its lineage edge retired. The hel
 attachment is also released before early-exit native cleanup.
 
 Evidence: `.omo/evidence/lina-307/round2-capacity-red.txt`, `qa.md`.
+
+### 3. Preserve proof through recipient persistence failure - discussion_r4120929903
+
+The recipient no longer treats entry into deliver() as native execution. It carries
+an attempt-local native boundary through setup, idle admission and tool-call guard
+authorization. Opaque executeTool failures are conservative until the guard provides
+proof; the guard marks possible delivery only when releasing native thread_send.
+If receipt persistence fails while that boundary still proves no native execution,
+the reply is admission_failed and the sender finishes a retryable rejection.
+
+Four RED-first regressions cover idle rejection plus finish failure, guard rejection
+plus finish failure, guard worker throw, and tool setup throw. Each now persists
+rejected with native count0, then the same-ID retry is accepted with exactly one
+native invocation and accepted replay adds none. Existing post-native finish-failure
+and lost-reply tests remain uncertain and do not resend. No wire format change.
+
+### 4. Close only the tab created by refused admission - discussion_r4121425307
+
+Successor launch now remembers the exact tab ID returned by this attempt's
+createTab. A native-capacity refusal awaits tab.close for that ID before the caller
+retires the unstarted binding. An existing pane never supplies that ownership proof
+and is not closed. The same leak existed in manager reattachment and is fixed there
+as well; accepted manager identity remains intact. Parent/child/new-manager creation
+uses the existing owned-workspace cleanup, while foreground user-owned workspaces
+remain untouched.
+
+RED-first tests assert both new-tab cleanup and existing-tab preservation, including
+cleanup before successor retirement. The Herdr adapter exercises exact tab.close
+RPC parameters over a fixture Unix socket; no live workspace is used.

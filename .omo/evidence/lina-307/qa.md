@@ -96,3 +96,14 @@ Additional real-surface observations:
   still alive, proving release does not dispose the TUI-owned session.
 - describe/idle/busy/dedup and raw overflow checks still passed.
 - Cleanup: twenty remaining sessions closed, host exit observed, socket/root removed.
+
+## PR19 round3 smoke
+
+2026-09-28T11:21-11:22Z: `bun scripts/qa-manager-idle.ts --capacity-race`
+PASS, exit0. Host PID272958, `/tmp/olw-manager-idle-eauTMx`.
+Updated runtime passed exact describe, idle/busy delivery, same-ID rejection retry
+(two attempts/one transcript), capacity19-to20 race with zero TUI launches and
+closed binding, and held-slot attach survival after admission release.
+Cleanup receipt: twenty sessions closed, host stopped, socket and root removed.
+The injected pre-native persistence failure and tab ownership are covered by
+round3 integration tests; this run is not represented as real Herdr tab UI QA.

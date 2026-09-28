@@ -421,6 +421,9 @@ async function world() {
     async renameTab(tabId, label) {
       tabCalls.push({ method: "renameTab", tabId, label });
     },
+    async closeTab(tabId) {
+      tabCalls.push({ method: "closeTab", tabId });
+    },
     async sendKeys(paneId, text, keys) {
       tabCalls.push({ method: "sendKeys", paneId, text, keys });
     },

@@ -564,6 +564,7 @@ async function main(): Promise<void> {
           createWorktree: unexpected,
           createTab: unexpected,
           renameTab: unexpected,
+          closeTab: unexpected,
           focusWorkspace: unexpected,
           focusPane: unexpected,
           paneContainsProcess: unexpected,

@@ -29,7 +29,13 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: boolean } = {}) {
+async function world(
+  options: {
+    executeInitialized?: boolean;
+    closeAwareHerdr?: boolean;
+    unprovisioned?: boolean;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "olw-successor-recovery-"));
   roots.push(root);
   await mkdir(join(root, ".omo/state"), { recursive: true });
@@ -149,8 +155,9 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
       "execute",
     ),
   );
-  const execute =
-    options.executeInitialized === false
+  const execute = options.unprovisioned
+    ? executeReservation
+    : options.executeInitialized === false
       ? await (async () => {
           const model = modelForLaunch("child", "execute");
           const manager = SessionManager.create(root, join(root, ".omo/state/sessions"), {
@@ -217,6 +224,9 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
       throw new Error("unexpected createTab");
     },
     renameTab: async () => {},
+    closeTab: async () => {
+      throw new Error("unexpected closeTab");
+    },
     focusWorkspace: async () => {},
     focusPane: async () => {},
     paneContainsProcess: async () => true,
@@ -445,6 +455,31 @@ test("successor capacity race retires only its unstarted attempt before TUI disp
   });
   expect(w.registry((registry) => value(registry.stageOf(w.execute.id)))).toBeNull();
 });
+
+test.each([true, false])(
+  "successor capacity closes only its newly created tab: new=%s",
+  async (unprovisioned) => {
+    const w = await world({ executeInitialized: false, unprovisioned });
+    const closed: string[] = [];
+    w.setCreateTab(async () => ({ tabId: "workspace:new-tab", rootPaneId: "workspace:new-pane" }));
+    Object.assign(w.dependencies.createHerdrClient("/herdr"), {
+      closeTab: async (tabId: string) => {
+        expect(w.registry((registry) => value(registry.get(w.execute.id))).launchState).not.toBe(
+          "closed",
+        );
+        closed.push(tabId);
+      },
+    });
+    Object.assign(w.dependencies, {
+      acquireLaunchSession: async () => {
+        throw new HostCapacityError(20);
+      },
+    });
+    expect(await w.start()).toMatchObject({ ok: false, error: { code: "host_session_capacity" } });
+    expect(closed).toEqual(unprovisioned ? ["workspace:new-tab"] : []);
+    expect(w.launches()).toBe(0);
+  },
+);
 
 test("capacity during initialized successor reattachment preserves accepted work and typed refusal", async () => {
   const w = await world();

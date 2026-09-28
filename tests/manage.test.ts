@@ -140,6 +140,11 @@ async function world(agent = "omo") {
       return tab;
     },
     async renameTab() {},
+    async closeTab(tabId) {
+      const match = /^(.*):tab(\d+)$/.exec(tabId);
+      if (match === null) throw new Error("unexpected closeTab");
+      panes.delete(`${match[1]}:tp${match[2]}`);
+    },
     async sendKeys() {},
     async focusWorkspace(workspaceId) {
       focused.push(workspaceId);
@@ -335,6 +340,43 @@ async function world(agent = "omo") {
 function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
+
+test.each([true, false])(
+  "manager reattachment capacity closes only its new tab: new=%s",
+  async (newTab) => {
+    const w = await world();
+    const manager = value(await w.orchestrator.manage()).binding;
+    if (manager.paneId === null || manager.workspaceId === null)
+      throw new Error("Missing manager workspace");
+    if (newTab) w.panes.delete(manager.paneId);
+    else {
+      w.panes.set(manager.paneId, { workspaceId: manager.workspaceId });
+      // Only a durable pending reattachment reuses the recorded plain shell.
+      const held = w.readRegistry((r) =>
+        value(r.beginReattach(manager.id, manager.paneId, w.hooks.now, "2020-01-01")),
+      );
+      if (!held.claimed) throw new Error("Missing reattachment claim");
+      w.readRegistry((r) => value(r.releaseReattach(manager.id, held.token)));
+    }
+    const closed: string[] = [];
+    Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+      closeTab: async (id: string) => {
+        closed.push(id);
+      },
+    });
+    Object.assign(w.deps, {
+      acquireLaunchSession: async () => {
+        throw new HostCapacityError(20);
+      },
+    });
+    expect(await w.orchestrator.manage()).toMatchObject({
+      ok: false,
+      error: { code: "host_session_capacity" },
+    });
+    expect(closed).toHaveLength(newTab ? 1 : 0);
+    expect(w.runs).toHaveLength(1);
+  },
+);
 
 test("manager reattachment capacity refusal preserves its initialized identity without another TUI", async () => {
   const w = await world();

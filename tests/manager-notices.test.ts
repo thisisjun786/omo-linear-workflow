@@ -574,6 +574,85 @@ test.each(["delivery_in_progress", "stale_attempt"] as const)(
   },
 );
 
+test.each(["idle", "guard", "guard-throw", "setup"] as const)(
+  "manager %s rejection survives recipient finish failure and retries once",
+  async (boundary) => {
+    await fixture(async ({ root, parent, digest }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager = linkReadyManager(registry, parent, root);
+        const sender = new Harness();
+        const recipient = new Harness();
+        let rejecting = true;
+        recipient.receipt = {
+          kind: "ok",
+          thread_id: manager.durableSessionId,
+          message_seq: 1,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: "retry-once" },
+        };
+        recipient.waitForIdle = async () => {
+          if (rejecting && boundary === "idle") throw new Error("idle admission refused");
+        };
+        const setActive = recipient.setActiveTools.bind(recipient);
+        recipient.setActiveTools = (tools) => {
+          if (rejecting && boundary === "setup") throw new Error("tool setup failed");
+          setActive(tools);
+        };
+        const exec = recipient.exec.bind(recipient);
+        recipient.exec = async (command, args, options) => {
+          const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
+          if (rejecting && request.action === "authorize" && boundary === "guard-throw")
+            throw new Error("guard worker transport failed");
+          if (
+            rejecting &&
+            (request.action === "finish" ||
+              (request.action === "authorize" && boundary === "guard"))
+          )
+            return {
+              stdout: "",
+              stderr: "injected pre-native persistence failure",
+              code: 1,
+              killed: false,
+            };
+          return exec(command, args, options);
+        };
+        sender.sendManagerNotice = async (_target, request) =>
+          managerNoticeReplySchema.parse(
+            await recipient.rpc("omo.initiative.admit-manager-notice")(request),
+          );
+        registerInitiativeRuntime(sender, { root, hostRuntime: true });
+        registerInitiativeRuntime(recipient, { root, hostRuntime: true });
+        await sender.start()(context(parent));
+        await recipient.start()(context(manager));
+        const send = sender.rpc("omo.initiative.send");
+        const message = envelope(
+          parent,
+          manager,
+          digest,
+          `pre-native-finish-${boundary}`,
+          "report",
+        );
+        const rejected = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(rejected.state).toBe("rejected");
+        expect(value(registry.delivery(message.id)).state).toBe("rejected");
+        expect(recipient.executeCount).toBe(0);
+        rejecting = false;
+        const accepted = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(accepted.state).toBe("accepted");
+        expect(accepted.attempts).toHaveLength(2);
+        expect(recipient.executeCount).toBe(1);
+        expect(value(resultSchema(deliveryRecordSchema).parse(await send(message)))).toEqual(
+          accepted,
+        );
+        expect(recipient.executeCount).toBe(1);
+      } finally {
+        registry.close();
+      }
+    });
+  },
+);
+
 test("manager post-native finish failure remains uncertain and never retries", async () => {
   await fixture(async ({ root, parent, digest }) => {
     const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));

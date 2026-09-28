@@ -242,3 +242,29 @@ Real race scenario max two failing attempts. One new commit only, no push.
 
 - Final Herdr-unset suite738/0 (107.86s), exit0. All requested verification complete.
   Commit one increment now; no push. No remaining QA processes/directories.
+
+## PR19 round3 - base48f2c8d
+
+Lead doing both fixes directly. Goal/todos reset; no child. CI baseline green.
+RED four pre-native paths returned uncertain instead of rejected. Fixed by tracking
+attempt-local nativeBoundary through deliver and onToolCall: setup/idle errors
+remain pre-native; executeTool opaque failures conservative; guard proves pre-native
+until returning permission. Recipient persistence errors preserve that proof back
+to sender. Focused manager28/0; post-native failure remains uncertain.
+
+RED new successor and reattachment tabs leaked on cap. Added required closeTab
+adapter, tracked only locally returned tab IDs, closed before capacity return and
+successor retirement. Existing panes never closed; parent/child/new-manager owned
+workspace path unchanged. Tabs8/0. Updated interface fixtures only as necessary.
+Draft replies3/4 ready. Still need final both-mode suite, static/build/release/smoke,
+diagnostics and one NEW commit/no push. All modifications in assigned worktree.
+
+Round3 final state: normal746/0,101.61s; Herdr-unset pending monitor
+mon_1MMERPZW8WJHAPXP. Typecheck/lint/build/release/smoke all exit0; install5/0.
+LSP directory scans0 errors. Real updated worker host QA PASS (PID272958/eauTMx),
+cleanup independently verified. Full production diff reviewed; no forbidden files.
+Native runner emitToolCall rethrows guard errors, validating pre-native throw proof.
+Remaining: record second suite, one new commit, SHA/status check, DoneClaim JSON.
+
+Herdr-unset final suite746/0,170.39s,exit0. All round3 checks complete;
+recorded in round3-verification.txt. Create one commit and verify SHA/clean status.

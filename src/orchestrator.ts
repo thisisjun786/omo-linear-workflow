@@ -1183,6 +1183,7 @@ export class Orchestrator {
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     let token: string | undefined;
     let launchSession: { release(): Promise<void> } | undefined;
+    let createdTab: string | undefined;
     try {
       const snapshot = await this.#whileForeground(herdr.snapshot(), here);
       if (here?.failure !== undefined) throw here.failure;
@@ -1318,11 +1319,16 @@ export class Orchestrator {
       if (!beforeTab.ok) return beforeTab;
       if (!beforeTab.value) return leaseLost();
       // A pending attempt's pane that is still a plain shell is reused instead of adding a tab.
-      const paneId =
+      let paneId =
         here?.paneId ??
         (pending.value && recordedPane !== undefined && recordedPane.agent === undefined
           ? recordedPane.paneId
-          : (await herdr.createTab(workspaceId, binding.cwd, "manager")).rootPaneId);
+          : undefined);
+      if (paneId === undefined) {
+        const tab = await herdr.createTab(workspaceId, binding.cwd, "manager");
+        createdTab = tab.tabId;
+        paneId = tab.rootPaneId;
+      }
       // The TUI publishes readiness for the binding's recorded pane, so record it before launch;
       // the pending claim keeps later calls from reporting this pane as focused until verified.
       const moved = this.#withRegistry((registry) =>
@@ -1390,12 +1396,14 @@ export class Orchestrator {
         modelSource: "existing",
       });
     } catch (cause) {
-      if (cause instanceof HostCapacityError)
+      if (cause instanceof HostCapacityError) {
+        if (createdTab !== undefined) await herdr.closeTab(createdTab);
         return failure(cause.code, cause.message, {
           count: cause.count,
           limit: cause.limit,
           action: cause.action,
         });
+      }
       if (cause instanceof ManagerInterrupted) {
         if (here !== undefined && this.#ownsForeground(here)) await here.tui?.exited;
         return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
@@ -2255,6 +2263,7 @@ export class Orchestrator {
     let stop: (() => void) | undefined;
     let stopReadiness: (() => void) | undefined;
     let launchSession: { release(): Promise<void> } | undefined;
+    let createdTab: string | undefined;
     try {
       const readySignal = Promise.withResolvers<string>();
       const outcome = readySignal.promise.then(
@@ -2283,7 +2292,9 @@ export class Orchestrator {
         const workspaceId = previous.value.workspaceId;
         // The predecessor's workspace is supplied by the caller when reservation has no pane yet.
         if (workspaceId === null) throw new Error("Successor workspace is missing");
-        paneId = (await herdr.createTab(workspaceId, checkout.path, "execute")).rootPaneId;
+        const tab = await herdr.createTab(workspaceId, checkout.path, "execute");
+        createdTab = tab.tabId;
+        paneId = tab.rootPaneId;
         const provisioned = this.#withRegistry((registry) =>
           registry.provisionSuccessorLaunch(current.id, owner, workspaceId, paneId ?? ""),
         );
@@ -2399,12 +2410,14 @@ export class Orchestrator {
       );
       return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
     } catch (cause) {
-      if (cause instanceof HostCapacityError)
+      if (cause instanceof HostCapacityError) {
+        if (createdTab !== undefined) await herdr.closeTab(createdTab);
         return failure(cause.code, cause.message, {
           count: cause.count,
           limit: cause.limit,
           action: cause.action,
         });
+      }
       return failure(
         "runtime_unavailable",
         dispatched

@@ -158,6 +158,7 @@ try {
           return client.createTab(workspace, cwd, label);
         },
         renameTab: (tab, label) => client.renameTab(tab, label),
+        closeTab: (tab) => client.closeTab(tab),
         focusWorkspace: (workspace) => client.focusWorkspace(workspace),
         focusPane: (pane) => client.focusPane(pane),
         paneContainsProcess: (pane, pid) => client.paneContainsProcess(pane, pid),

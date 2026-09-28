@@ -19,6 +19,12 @@ export class NativeSessionNotReadyError extends Error {
   }
 }
 
+export type NativeSessionProbe =
+  | { readonly state: "open" }
+  | { readonly state: "absent" }
+  | { readonly state: "present"; readonly status: "opening" | "closing" | "closed" }
+  | { readonly state: "unknown"; readonly reason: string };
+
 export interface NativeSession {
   configure(model: RoleModel): Promise<void>;
   hasUserMessage(text: string): Promise<boolean>;
@@ -35,6 +41,8 @@ export interface RpcPort {
   setThinkingLevel(level: RoleModel["thinking"]): Promise<unknown>;
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Emergency transport teardown for adapters whose graceful stop can stall. */
+  destroy?(): void;
   closeSession(sessionId?: string): Promise<void>;
   listSessions(): Promise<
     ReadonlyArray<{
@@ -61,11 +69,87 @@ function failure<T>(code: string, message: string, details?: unknown): Result<T>
 }
 
 export function publicRpcClient(socketPath: string): RpcPort {
-  return new RpcClient({ socketPath });
+  const client = new RpcClient({ socketPath });
+  return Object.assign(client, {
+    destroy: () => {
+      const transport = client as unknown as {
+        socket?: { destroy(): void } | null;
+        process?: { kill(signal: NodeJS.Signals): void } | null;
+      };
+      transport.socket?.destroy();
+      transport.process?.kill("SIGKILL");
+    },
+  });
 }
 
 export async function attachBinding(binding: Binding): Promise<NativeSession> {
   return attachBindingWithClient(binding, publicRpcClient(binding.omoSocket));
+}
+
+export async function probeBindingSession(binding: Binding): Promise<NativeSessionProbe> {
+  return probeBindingSessionWithClient(binding, publicRpcClient(binding.omoSocket));
+}
+
+export async function probeBindingSessionWithClient(
+  binding: Binding,
+  client: RpcPort,
+  timeoutMs = 5_000,
+  schedule: (expire: () => void, ms: number) => () => void = (expire, ms) => {
+    const timer = setTimeout(expire, ms);
+    return () => clearTimeout(timer);
+  },
+): Promise<NativeSessionProbe> {
+  if (binding.sessionPath === null)
+    return { state: "unknown", reason: "Binding has no observed native session path" };
+  let timedOut = false;
+  let cancel = () => {};
+  const timeout = new Promise<never>((_resolve, reject) => {
+    cancel = schedule(() => {
+      timedOut = true;
+      reject(new Error("Native session probe timed out"));
+    }, timeoutMs);
+  });
+  try {
+    const sessions = await Promise.race([
+      (async () => {
+        await client.start();
+        return client.listSessions();
+      })(),
+      timeout,
+    ]);
+    const matches = sessions.filter(
+      (session) =>
+        session.durableSessionId === binding.durableSessionId &&
+        session.sessionPath === binding.sessionPath &&
+        session.cwd === binding.cwd,
+    );
+    if (matches.length === 0) return { state: "absent" };
+    if (matches.length !== 1)
+      return { state: "unknown", reason: "Multiple native sessions claim the binding" };
+    const exact = matches[0];
+    if (exact === undefined) return { state: "unknown", reason: "Session probe was inconsistent" };
+    return exact.status === "open" ? { state: "open" } : { state: "present", status: exact.status };
+  } catch (cause) {
+    return {
+      state: "unknown",
+      reason: timedOut
+        ? "Native session probe timed out"
+        : cause instanceof Error
+          ? cause.message
+          : String(cause),
+    };
+  } finally {
+    cancel();
+    let cancelStopDeadline = () => {};
+    const stopDeadline = new Promise<void>((resolve) => {
+      cancelStopDeadline = schedule(() => {
+        client.destroy?.();
+        resolve();
+      }, timeoutMs);
+    });
+    await Promise.race([client.stop().catch(() => {}), stopDeadline]);
+    cancelStopDeadline();
+  }
 }
 
 export async function attachBindingWithClient(

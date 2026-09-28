@@ -16,7 +16,12 @@ import { modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Workspace } from "../../src/herdr";
 import { roleLabel } from "../../src/linear";
-import { Orchestrator } from "../../src/orchestrator";
+import {
+  Orchestrator,
+  promptBindingWithClient,
+  runtimeNoticeLookupCommand,
+} from "../../src/orchestrator";
+import { NativeSessionAbsentError } from "../../src/transport";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -92,6 +97,7 @@ async function world() {
   });
   const workspaces = new Map<string, Workspace>();
   const paneSessions = new Map<string, string>();
+  const agentPanes = new Set<string>();
   const engines = new Set<string>();
   const events: string[] = [];
   let listener: ((event: unknown) => void) | undefined;
@@ -141,6 +147,7 @@ async function world() {
         sessionPath,
         workspaceId: paneId.split(":")[0] ?? "",
         revision: 1,
+        ...(agentPanes.has(paneId) ? { agent: "omo" } : {}),
       })),
     }),
     closeWorkspace: async (id) => {
@@ -206,6 +213,7 @@ async function world() {
       label: roleLabel(binding.assignment, scope, binding.id),
     });
     paneSessions.set(pane, sessionPath);
+    agentPanes.add(pane);
     engines.add(binding.id);
     return value(registry.get(binding.id));
   };
@@ -226,6 +234,7 @@ async function world() {
       }),
     );
     paneSessions.delete("childws:plan");
+    agentPanes.delete("childws:plan");
     engines.delete("plan");
     const execute = value(registry.successorReservation("plan", input("execute"), "execute"));
     if (provision) ready(execute, "childws", "childws:execute");
@@ -242,6 +251,7 @@ async function world() {
     planned,
     workspaces,
     paneSessions,
+    agentPanes,
     engines,
     events,
     herdr,
@@ -741,6 +751,614 @@ test("status/close: status counts unanswered sent/received records, excludes ans
       stage: "execute",
       openQuestions: 2,
     });
+
+    const unavailable = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../../src/cli.ts"),
+        "--root",
+        w.root,
+        "--herdr-socket",
+        join(w.root, "missing-herdr.sock"),
+        "status",
+        "--json",
+      ],
+      {
+        env: {
+          ...process.env,
+          HERDR_ENV: undefined,
+          HERDR_PANE_ID: undefined,
+          HERDR_SOCKET_PATH: undefined,
+          HERDR_SOCKET: join(w.root, "also-missing-herdr.sock"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [unavailableExit, unavailableOut, unavailableErr] = await Promise.all([
+      unavailable.exited,
+      new Response(unavailable.stdout).text(),
+      new Response(unavailable.stderr).text(),
+    ]);
+    expect([unavailableExit, unavailableErr]).toEqual([0, ""]);
+    expect(JSON.parse(unavailableOut).value).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: execute.id,
+          runtimeState: "unknown",
+          runtimeStateReason: expect.stringContaining("Herdr"),
+        }),
+      ]),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("status is read-only while reconcile posts one host-loss notice and preserves runtime state", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    const prompts: Array<{ bindingId: string; text: string }> = [];
+    const healthySession = (binding: Binding) => ({
+      configure: async () => {},
+      hasUserMessage: async () => false,
+      describe: async () => ({
+        ok: true as const,
+        value: {
+          durableSessionId: binding.durableSessionId,
+          sessionPath: binding.sessionPath ?? "",
+          cwd: binding.cwd,
+          ...modelForRole(binding.assignment.role),
+          extensionProtocol: 2 as const,
+        },
+      }),
+      send: async () => {
+        throw new Error("Unexpected send");
+      },
+      deliverUserAnswer: async () => {
+        throw new Error("Unexpected answer");
+      },
+      onEvent: () => () => {},
+      close: async () => {},
+    });
+    const runtimeDependencies = {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "reachable" as const,
+      probeBindingSession: async (binding: Binding) =>
+        binding.id === child.id ? { state: "absent" as const } : { state: "open" as const },
+      attachBinding: async (binding: Binding) => {
+        if (binding.id === child.id) throw new NativeSessionAbsentError();
+        return healthySession(binding);
+      },
+      prompt: async (binding: Binding, text: string) => {
+        prompts.push({ bindingId: binding.id, text });
+      },
+    };
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", runtimeDependencies);
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const inspected = await orchestrator.statusWithRuntimeHealth();
+      expect(inspected.ok).toBe(true);
+      if (!inspected.ok) throw new Error(inspected.error.message);
+      expect(inspected.value.find((binding) => binding.id === child.id)).toMatchObject({
+        runtimeState: "unknown",
+        runtimeStateReason:
+          "Exact session not probed in read-only mode; run olw reconcile to verify",
+      });
+    }
+    expect(prompts).toHaveLength(0);
+    expect(value(w.registry.operationalNotices({}))).toHaveLength(0);
+    expect(
+      await runCli(
+        ["--root", w.root, "--herdr-socket", "/fake/herdr", "status", "--project", "p", "--json"],
+        runtimeDependencies,
+      ),
+    ).toBe(0);
+    expect(prompts).toHaveLength(0);
+    expect(value(w.registry.operationalNotices({}))).toHaveLength(0);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reconciled = await orchestrator.reconcile({ projectId: "p" });
+      expect(reconciled).toMatchObject({
+        ok: false,
+        error: {
+          code: "reconciliation_uncertain",
+          details: {
+            bindings: expect.arrayContaining([
+              expect.objectContaining({
+                id: child.id,
+                runtimeState: "unknown",
+                lastRuntimeIncident: expect.objectContaining({ state: "local_only" }),
+              }),
+            ]),
+          },
+        },
+      });
+    }
+    expect(await orchestrator.statusWithRuntimeHealth({ projectId: "p" })).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({
+          id: child.id,
+          launchState: "uncertain",
+          runtimeState: "unknown",
+          runtimeStateReason:
+            "Exact session not probed in read-only mode; run olw reconcile to verify",
+          lastRuntimeIncident: expect.objectContaining({ state: "local_only" }),
+        }),
+      ]),
+    });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.bindingId).toBe(w.parent.id);
+    expect(value(w.registry.operationalNotices({}))).toHaveLength(1);
+    expect(value(w.registry.operationalNotices({}))[0]).toMatchObject({
+      state: "uncertain",
+      receipt: null,
+      envelope: {
+        kind: "operational_notice",
+        operational: { failure: { source: "host_loss" } },
+      },
+    });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("stale readiness and pane session metadata do not prove a role TUI is live", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    w.agentPanes.delete("childws:p");
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    const reconciled = await orchestrator.statusWithRuntimeHealth({}, true);
+    expect(reconciled).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({
+          id: child.id,
+          runtimeState: "unknown",
+          runtimeStateReason: expect.stringContaining("agent"),
+        }),
+      ]),
+    });
+    expect(prompts).toEqual([]);
+    expect(
+      value(w.registry.operationalNotices({})).filter(
+        (notice) => notice.envelope.fromBindingId === child.id,
+      ),
+    ).toEqual([]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("slow initial prompts remain pending past the notice deadline and can still succeed", async () => {
+  const accepted = Promise.withResolvers<void>();
+  const promptEntered = Promise.withResolvers<void>();
+  const client = {
+    start: async () => {},
+    listSessions: async () => [
+      {
+        sessionId: "native-parent",
+        durableSessionId: "s-parent",
+        sessionPath: "/session.jsonl",
+        cwd: "/repo",
+        status: "open" as const,
+      },
+    ],
+    openSession: async () => ({ sessionId: "native-parent", attached: true }),
+    prompt: async () => {
+      promptEntered.resolve();
+      await accepted.promise;
+    },
+    stop: async () => {},
+  };
+  const operation = promptBindingWithClient(
+    {
+      id: "parent",
+      designationId: "d",
+      assignment: { role: "parent", initiativeId: null, projectId: "p", ownerBindingId: null },
+      durableSessionId: "s-parent",
+      cwd: "/repo",
+      checkout: null,
+      herdrSocket: "/herdr",
+      omoSocket: "/omo",
+      workspaceId: "workspace",
+      paneId: "pane",
+      sessionPath: "/session.jsonl",
+      launchState: "initializing",
+      contactState: "active",
+      initialization: { state: "sending", text: "brief" },
+    },
+    "brief",
+    client,
+  );
+  await promptEntered.promise;
+  const fiveSecondDeadline = Promise.withResolvers<"deadline">();
+  fiveSecondDeadline.resolve("deadline");
+  expect(
+    await Promise.race([operation.then(() => "completed" as const), fiveSecondDeadline.promise]),
+  ).toBe("deadline");
+  accepted.resolve();
+  await expect(operation).resolves.toBeUndefined();
+});
+
+test("concurrent reconciles allocate one runtime incident and one notice", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    const bothProbing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let probes = 0;
+    const dependencies = {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      probeBindingSession: async () => ({ state: "absent" as const }),
+      promptRuntimeNotice: async () => null,
+      uuid: () => `incident-${++probes}`,
+    };
+    const make = () => new Orchestrator(w.root, "/fake/herdr", dependencies);
+    dependencies.readHostReachabilityReadOnly = async () => {
+      probes += 1;
+      if (probes === 2) bothProbing.resolve();
+      await release.promise;
+      return "unreachable" as const;
+    };
+    const first = make().statusWithRuntimeHealth({}, true);
+    const second = make().statusWithRuntimeHealth({}, true);
+    await bothProbing.promise;
+    release.resolve();
+    await Promise.all([first, second]);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(1);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a failed notice claim retries the same pending incident exactly once", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    let failClaim = true;
+    let incidentSequence = 0;
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      openRegistry: (path, options) => {
+        const registry = openRegistry(path, options);
+        return {
+          ...registry,
+          claimRuntimeFailure: (...args) => {
+            if (failClaim) {
+              failClaim = false;
+              return { ok: false as const, error: { code: "storage_error", message: "injected" } };
+            }
+            return registry.claimRuntimeFailure(...args);
+          },
+        };
+      },
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      uuid: () => `incident-${++incidentSequence}`,
+    });
+    expect(await orchestrator.statusWithRuntimeHealth({}, true)).toMatchObject({
+      ok: false,
+      error: { code: "storage_error" },
+    });
+    const pending = value(w.registry.get(child.id));
+    expect(pending).toMatchObject({
+      runtimeIncidentId: "incident-1",
+      runtimeIncidentNoticeState: "pending",
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(1);
+    expect(childNotices[0]?.envelope.operational?.failure.sessionEntryId).toContain("incident-1");
+    expect(value(w.registry.get(child.id)).runtimeIncidentNoticeState).toBe("posted");
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("an unknown probe retains one active loss incident and notice", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    let reachability: "reachable" | "unknown" = "reachable";
+    let probe: "absent" | "unknown" = "absent";
+    let incidentSequence = 0;
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => reachability,
+      probeBindingSession: async () =>
+        probe === "absent"
+          ? { state: "absent" as const }
+          : { state: "unknown" as const, reason: "brief probe failure" },
+      uuid: () => `incident-${++incidentSequence}`,
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    probe = "unknown";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "unknown";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "reachable";
+    probe = "absent";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(1);
+    expect(value(w.registry.get(child.id))).toMatchObject({
+      runtimeIncidentId: "incident-1",
+      runtimeIncidentState: "local_only",
+      runtimeIncidentNoticeState: "posted",
+    });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("unscoped runtime notices suggest the unfiltered notices command", () => {
+  const manager: Binding = {
+    id: "manager-1",
+    designationId: "manager-designation",
+    assignment: { role: "manager" },
+    durableSessionId: "manager-session",
+    cwd: "/repo",
+    checkout: null,
+    herdrSocket: "/herdr",
+    omoSocket: "/omo",
+    workspaceId: "workspace",
+    paneId: "pane",
+    sessionPath: "/session.jsonl",
+    launchState: "ready",
+    contactState: "active",
+    initialization: { state: "accepted", text: "brief" },
+  };
+  expect(runtimeNoticeLookupCommand(manager)).toBe("olw notices");
+  expect(
+    runtimeNoticeLookupCommand({
+      ...manager,
+      assignment: { role: "supervisor", initiativeId: "initiative-1" },
+    }),
+  ).toBe("olw notices --initiative initiative-1");
+});
+
+test("runtime loss notices retain a real native receipt when one is returned", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    const receipt = {
+      kind: "ok" as const,
+      thread_id: w.parent.durableSessionId,
+      message_seq: 41,
+      deduplicated: false,
+      delivery: { kind: "started" as const, turn_id: "native-turn-41" },
+    };
+    const db = new Database(w.path);
+    try {
+      const row = db
+        .query<{ json: string }, [string]>("SELECT json FROM bindings WHERE id = ?")
+        .get(w.parent.id);
+      if (row === null) throw new Error("Missing parent fixture");
+      db.query("UPDATE bindings SET json = ? WHERE id = ?").run(
+        JSON.stringify({ ...JSON.parse(row.json), sessionPath: null }),
+        w.parent.id,
+      );
+    } finally {
+      db.close();
+    }
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      promptRuntimeNotice: async () => receipt,
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    expect(
+      value(w.registry.operationalNotices({})).find(
+        (notice) => notice.envelope.fromBindingId === child.id,
+      ),
+    ).toMatchObject({ state: "accepted", receipt });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("runtime loss notices distinguish classification and restored-host episodes", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    let reachability: "reachable" | "unreachable" = "reachable";
+    let probe: "absent" | "open" = "absent";
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => reachability,
+      probeBindingSession: async () => ({ state: probe }),
+      prompt: async () => {},
+      uuid: (() => {
+        let sequence = 0;
+        return () => `incident-${++sequence}`;
+      })(),
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "unreachable";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "reachable";
+    probe = "open";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "unreachable";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(3);
+    expect(new Set(childNotices.map((notice) => notice.envelope.id)).size).toBe(3);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a child with an unverified owner pane posts host loss to the local inbox", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    w.paneSessions.delete("parentws:p");
+    w.agentPanes.delete("parentws:p");
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    expect(prompts).toEqual([]);
+    expect(value(w.registry.operationalNotices({}))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          state: "posted",
+          envelope: expect.objectContaining({ fromBindingId: child.id, toBindingId: null }),
+        }),
+      ]),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("read-only runtime health reports unverified current state instead of stale persisted loss", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    value(w.registry.setRuntimeState(child.id, "host_lost", undefined, "old-incident"));
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "reachable" as const,
+      probeBindingSession: async () => {
+        throw new Error("Read-only status must not list native sessions");
+      },
+    });
+    expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({
+          id: child.id,
+          runtimeState: "unknown",
+          runtimeStateReason:
+            "Exact session not probed in read-only mode; run olw reconcile to verify",
+          lastRuntimeIncident: { state: "host_lost", incidentId: "old-incident" },
+        }),
+      ]),
+    });
+    expect(value(w.registry.get(child.id)).runtimeState).toBe("host_lost");
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("read-only runtime health never probes exact sessions or notifies", async () => {
+  const w = await world();
+  try {
+    const starting = w.ready(w.reserve("starting", "direct"), "starting-ws", "starting-ws:p");
+    const unknown = w.parent;
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "reachable" as const,
+      probeBindingSession: async () => {
+        throw new Error("Read-only status must not list native sessions");
+      },
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    const inspected = await orchestrator.statusWithRuntimeHealth();
+    expect(inspected.ok).toBe(true);
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    expect(inspected.value.find((binding) => binding.id === starting.id)).toMatchObject({
+      runtimeState: "unknown",
+      runtimeStateReason: "Exact session not probed in read-only mode; run olw reconcile to verify",
+    });
+    expect(inspected.value.find((binding) => binding.id === unknown.id)).toMatchObject({
+      runtimeState: "unknown",
+      runtimeStateReason: "Exact session not probed in read-only mode; run olw reconcile to verify",
+    });
+    expect(prompts).toEqual([]);
+    expect(value(w.registry.operationalNotices({}))).toEqual([]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("project reconciliation checks an affected manager outside display scope and posts locally", async () => {
+  const w = await world();
+  try {
+    const managerScope: ScopeSnapshot = {
+      version: 1,
+      source: "linear-export",
+      initiative: null,
+      projects: [],
+      decisionRefs: [],
+    };
+    const digest = value(w.registry.importScope(managerScope)).digest;
+    const manager = value(
+      w.registry.reserve({
+        bindingId: "manager",
+        durableSessionId: "s-manager",
+        designation: {
+          id: "manager-designation",
+          snapshotDigest: digest,
+          designatedBy: "user",
+          designatedAt: "now",
+          create: true,
+          execute: true,
+          contact: true,
+        },
+        snapshot: managerScope,
+        assignment: { role: "manager" },
+        cwd: w.root,
+        checkout: null,
+        herdrSocket: "/fake/herdr",
+        omoSocket: "/fake/omo",
+      }),
+    );
+    w.ready(manager, "manager-ws", "manager-ws:p");
+    value(w.registry.setOwner(w.parent.id, manager.id));
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "reachable" as const,
+      probeBindingSession: async () => ({ state: "absent" as const }),
+      attachBinding: async () => {
+        throw new NativeSessionAbsentError();
+      },
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    await orchestrator.reconcile({ projectId: "p" });
+    expect(prompts).toEqual([]);
+    expect(value(w.registry.operationalNotices({}))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          state: "posted",
+          envelope: expect.objectContaining({ fromBindingId: w.parent.id, toBindingId: null }),
+        }),
+      ]),
+    );
   } finally {
     w.cleanup();
   }

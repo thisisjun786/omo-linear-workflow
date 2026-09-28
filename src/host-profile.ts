@@ -13,6 +13,7 @@ const EXTENSIONS = [
 
 const hostStatusSchema = z.object({
   reachable: z.boolean(),
+  reachability: z.enum(["reachable", "unreachable", "unknown"]).optional(),
   socket: z.string(),
   generation: z.number().nullable(),
   launchProfile: z
@@ -264,7 +265,9 @@ export async function runBoundedHostCommand(
 }
 
 const protocolInfoSchema = z.object({
-  generation: z.number().optional(),
+  protocolVersion: z.number().int().positive(),
+  serverVersion: z.string().min(1),
+  generation: z.number().int().nonnegative().optional(),
   launch_profile: hostStatusSchema.shape.launchProfile.unwrap().optional(),
 });
 const pointerSchema = z.object({ instance_id: z.string() });
@@ -285,20 +288,27 @@ async function readJson(path: string): Promise<unknown> {
 
 async function probeProtocolInfoReadOnly(
   socket: string,
-): Promise<z.infer<typeof protocolInfoSchema> | undefined> {
+  timeoutMs: number,
+): Promise<{
+  readonly reachability: "reachable" | "unreachable" | "unknown";
+  readonly protocol?: z.infer<typeof protocolInfoSchema>;
+}> {
   const id = `olw-host-health-${crypto.randomUUID()}`;
   return new Promise((resolveProbe) => {
     const client = createConnection(socket);
     let buffer = "";
     let settled = false;
-    const finish = (value?: z.infer<typeof protocolInfoSchema>) => {
+    const finish = (
+      reachability: "reachable" | "unreachable" | "unknown",
+      protocol?: z.infer<typeof protocolInfoSchema>,
+    ) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       client.destroy();
-      resolveProbe(value);
+      resolveProbe(protocol === undefined ? { reachability } : { reachability, protocol });
     };
-    const timeout = setTimeout(() => finish(), HOST_STATUS_TIMEOUT_MS);
+    const timeout = setTimeout(() => finish("unknown"), timeoutMs);
     client.once("connect", () =>
       client.write(`${JSON.stringify({ id, type: "get_protocol_info" })}\n`),
     );
@@ -315,14 +325,16 @@ async function probeProtocolInfoReadOnly(
             .safeParse(JSON.parse(line));
           if (!response.success) continue;
           const parsed = protocolInfoSchema.safeParse(response.data.data);
-          return finish(parsed.success ? parsed.data : undefined);
+          return parsed.success ? finish("reachable", parsed.data) : finish("unknown");
         } catch {
           // Ignore unrelated lifecycle records and malformed lines until the bounded deadline.
         }
       }
     });
-    client.once("error", () => finish());
-    client.once("close", () => finish());
+    client.once("error", (cause: NodeJS.ErrnoException) =>
+      finish(cause.code === "ENOENT" || cause.code === "ECONNREFUSED" ? "unreachable" : "unknown"),
+    );
+    client.once("close", () => finish("unknown"));
   });
 }
 
@@ -348,20 +360,24 @@ async function readRssMb(pid: number | undefined): Promise<number | null> {
 export async function readHostStatusReadOnly(
   socket: string,
   agentDir: string,
+  timeoutMs = HOST_STATUS_TIMEOUT_MS,
 ): Promise<HostStatus> {
   const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(socket));
-  const [protocol, registration, envKeys] = await Promise.all([
-    probeProtocolInfoReadOnly(socket),
+  const [observation, registration, envKeys] = await Promise.all([
+    probeProtocolInfoReadOnly(socket, timeoutMs),
     readRegistration(daemonDir),
     readJson(join(daemonDir, "env-keys.json")),
   ]);
   const parsedEnvKeys = envKeysSchema.safeParse(envKeys);
   return hostStatusSchema.parse({
-    reachable: protocol !== undefined,
+    reachable: observation.reachability === "reachable",
+    reachability: observation.reachability,
     socket,
     generation:
-      protocol === undefined ? null : (protocol.generation ?? registration?.generation ?? null),
-    launchProfile: protocol?.launch_profile ?? null,
+      observation.protocol === undefined
+        ? null
+        : (observation.protocol.generation ?? registration?.generation ?? null),
+    launchProfile: observation.protocol?.launch_profile ?? null,
     sessions: {
       total: 0,
       interactive: 0,

@@ -121,6 +121,17 @@ export interface Binding {
   readonly ownedWorkspaceId?: string | undefined;
   readonly paneId: string | null;
   readonly sessionPath: string | null;
+  readonly runtimeState?:
+    | "connected"
+    | "starting"
+    | "local_only"
+    | "host_lost"
+    | "unknown"
+    | undefined;
+  readonly runtimeStateReason?: string | undefined;
+  readonly runtimeIncidentId?: string | undefined;
+  readonly runtimeIncidentState?: "local_only" | "host_lost" | undefined;
+  readonly runtimeIncidentNoticeState?: "pending" | "posted" | "uncertain" | undefined;
   readonly launchState:
     | "reserved"
     | "provisioning"
@@ -157,7 +168,7 @@ export interface InitializationClaim {
   readonly binding: Binding;
 }
 export interface RuntimeFailure {
-  readonly source: "turn_end";
+  readonly source: "turn_end" | "host_loss";
   readonly sessionEntryId: string;
   readonly durableSessionId: string;
   readonly sessionPath: string;
@@ -387,6 +398,23 @@ export interface Registry {
   finishSuccessorLaunch(id: string, token: string, state: "ready" | "uncertain"): Result<Binding>;
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;
   setLaunchState(id: string, state: Binding["launchState"]): Result<Binding>;
+  setRuntimeState(
+    id: string,
+    state: Binding["runtimeState"],
+    reason?: string,
+    incidentId?: string,
+  ): Result<Binding>;
+  transitionRuntimeState(
+    id: string,
+    state: NonNullable<Binding["runtimeState"]>,
+    reason: string | undefined,
+    proposedIncidentId: string,
+  ): Result<{ readonly binding: Binding; readonly notify: boolean; readonly incidentId?: string }>;
+  setRuntimeIncidentNoticeState(
+    id: string,
+    incidentId: string,
+    state: "posted" | "uncertain",
+  ): Result<Binding>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;
   setOwner(parentId: string, supervisorId: string | null): Result<Binding>;
   beginClose(id: string): Result<Binding>;
@@ -395,6 +423,11 @@ export interface Registry {
   finishInitialization(id: string, state: "accepted" | "rejected" | "uncertain"): Result<Binding>;
   authorize(senderSessionId: string, envelope: Envelope): Result<Binding>;
   claim(senderSessionId: string, envelope: Envelope | RuntimeFailureClaim): Result<ClaimResult>;
+  claimRuntimeFailure(
+    senderSessionId: string,
+    failure: RuntimeFailureClaim,
+    unavailableOwnerIds?: ReadonlySet<string>,
+  ): Result<ClaimResult>;
   finish(messageId: string, receipt: NativeReceipt, nativeKey?: string): Result<DeliveryRecord>;
   uncertain(messageId: string, reason: string, nativeKey?: string): Result<DeliveryRecord>;
   delivery(messageId: string): Result<DeliveryRecord>;

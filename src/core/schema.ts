@@ -87,6 +87,11 @@ export const bindingSchema = z.strictObject({
   ownedWorkspaceId: text.optional(),
   paneId: text.nullable(),
   sessionPath: text.nullable(),
+  runtimeState: z.enum(["connected", "starting", "local_only", "host_lost", "unknown"]).optional(),
+  runtimeStateReason: z.string().min(1).optional(),
+  runtimeIncidentId: z.string().min(1).optional(),
+  runtimeIncidentState: z.enum(["local_only", "host_lost"]).optional(),
+  runtimeIncidentNoticeState: z.enum(["pending", "posted", "uncertain"]).optional(),
   launchState: z.enum([
     "reserved",
     "provisioning",
@@ -104,7 +109,7 @@ export const bindingSchema = z.strictObject({
   ]),
 });
 export const runtimeFailureSchema = z.strictObject({
-  source: z.literal("turn_end"),
+  source: z.enum(["turn_end", "host_loss"]),
   sessionEntryId: text,
   durableSessionId: text,
   sessionPath: text,

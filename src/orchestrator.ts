@@ -14,8 +14,10 @@ import type {
   DeliveryRecord,
   Designation,
   Envelope,
+  NativeReceipt,
   Registry,
   Result,
+  RuntimeFailureClaim,
   ScopeFilter,
   ScopeSnapshot,
   StageHandoff,
@@ -34,6 +36,7 @@ import {
 } from "./core/policy";
 import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
+import { publishOperationalNotice } from "./extension/operational";
 import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { HostHandoffBusyError, withHostHandoffLock } from "./host-handoff-lock";
@@ -47,6 +50,8 @@ import {
   handoffHost,
   observeEmptyHostSessions,
   readHostStatus,
+  readHostStatusReadOnly,
+  resolveOmoAgentDir,
   runtimeCacheEnvironment,
   verifyHostAfterHandoff,
 } from "./host-profile";
@@ -62,7 +67,13 @@ import {
 } from "./repo/checkout";
 import { fetchMirror } from "./repo/mirror";
 import { mergePr, type OpenPrInput, openPr } from "./repo/pr";
-import { attachBinding, type NativeSession, NativeSessionAbsentError } from "./transport";
+import {
+  attachBinding,
+  type NativeSession,
+  NativeSessionAbsentError,
+  type NativeSessionProbe,
+  probeBindingSession,
+} from "./transport";
 import {
   checkUpdates,
   systemUpdateTimer,
@@ -144,6 +155,7 @@ export type CreateParentInput = z.infer<typeof createParentInputSchema>;
 export const MANAGER_DESIGNATION_ID = "manager";
 /** A launch claim older than this is presumed abandoned by a crashed owner. */
 const LAUNCH_CLAIM_LEASE_MS = 120_000;
+const RUNTIME_HEALTH_DEADLINE_MS = 5_000;
 const managerSnapshot: ScopeSnapshot = {
   version: 1,
   source: "linear-export",
@@ -258,6 +270,10 @@ export interface ListedQuestion {
   readonly answer: DeliveryRecord | null;
 }
 export type StatusBinding = Binding & {
+  readonly lastRuntimeIncident?: {
+    readonly state: "local_only" | "host_lost";
+    readonly incidentId: string;
+  };
   readonly mode?: ChildCreateMode;
   readonly stage?: ChildStage;
   readonly stageBindings?: ReadonlyArray<{
@@ -288,6 +304,10 @@ export interface OrchestratorDependencies {
   readonly openRegistry: (path: string, options?: { readonly readonly?: boolean }) => Registry;
   readonly createHerdrClient: (socket: string) => HerdrClient;
   readonly attachBinding: (binding: Binding) => Promise<NativeSession>;
+  readonly probeBindingSession?: (binding: Binding) => Promise<NativeSessionProbe>;
+  readonly readHostReachabilityReadOnly?: (
+    socket: string,
+  ) => Promise<"reachable" | "unreachable" | "unknown">;
   readonly terminateBinding: (binding: Binding) => Promise<void>;
   readonly resolveHerdrArtifact: (root: string) => Promise<{ readonly artifactDir: string }>;
   readonly ensureHost: (
@@ -313,6 +333,7 @@ export interface OrchestratorDependencies {
   readonly verifyHostAfterHandoff?: (root: string, status: HostStatus) => Promise<void>;
   readonly withHostHandoffLock?: <T>(path: string, operation: () => Promise<T>) => Promise<T>;
   readonly prompt: (binding: Binding, text: string) => Promise<void>;
+  readonly promptRuntimeNotice?: (binding: Binding, text: string) => Promise<NativeReceipt | null>;
   readonly republishHerdrState?: (binding: Binding, claimToken: string) => Promise<void>;
   readonly launchHere?: (
     argv: readonly string[],
@@ -357,6 +378,14 @@ export function planPathForIssueKey(key: string | undefined): Result<string> {
 }
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+export function runtimeNoticeLookupCommand(binding: Binding): string {
+  return binding.assignment.role === "parent" || binding.assignment.role === "child"
+    ? `olw notices --project ${binding.assignment.projectId}`
+    : binding.assignment.role === "supervisor"
+      ? `olw notices --initiative ${binding.assignment.initiativeId}`
+      : "olw notices";
 }
 type HostRecoveryPhase = "refused" | "status_unreadable" | "handoff_failed" | "verification_failed";
 
@@ -448,33 +477,59 @@ async function defaultEnsureHost(
   if (code !== 0) throw new Error(`omo host ensure failed (${code}): ${stderr.trim()}`);
 }
 
-async function defaultPrompt(binding: Binding, text: string): Promise<void> {
-  if (binding.sessionPath === null)
-    throw new Error("Cannot prompt a binding without a session path");
-  const client = new RpcClient({ socketPath: binding.omoSocket });
-  await client.start();
+interface PromptRpcClient {
+  start(): Promise<void>;
+  listSessions(): Promise<
+    ReadonlyArray<{
+      readonly sessionId: string;
+      readonly durableSessionId?: string;
+      readonly sessionPath?: string;
+      readonly cwd: string;
+      readonly status: "opening" | "open" | "closing" | "closed";
+    }>
+  >;
+  openSession(options: {
+    readonly sessionPath: string;
+    readonly cwd: string;
+    readonly retain_on_disconnect: true;
+  }): Promise<{ readonly sessionId: string; readonly attached?: boolean }>;
+  prompt(text: string): Promise<void>;
+  stop(): Promise<void>;
+}
+
+export async function promptBindingWithClient(
+  binding: Binding,
+  text: string,
+  client: PromptRpcClient,
+): Promise<void> {
+  const sessionPath = binding.sessionPath;
+  if (sessionPath === null) throw new Error("Cannot prompt a binding without a session path");
   try {
+    await client.start();
     const sessions = await client.listSessions();
     const found = sessions.find(
       (session) =>
         session.status === "open" &&
         session.durableSessionId === binding.durableSessionId &&
-        session.sessionPath === binding.sessionPath &&
+        session.sessionPath === sessionPath &&
         session.cwd === binding.cwd,
     );
     if (found === undefined) throw new Error("Exact durable native session is not open for prompt");
     const opened = await client.openSession({
-      sessionPath: binding.sessionPath,
+      sessionPath,
       cwd: binding.cwd,
       retain_on_disconnect: true,
     });
-    if (opened.sessionId !== found.sessionId || opened.attached !== true) {
+    if (opened.sessionId !== found.sessionId || opened.attached !== true)
       throw new Error("Native host did not attach the exact existing session for prompt");
-    }
     await client.prompt(text);
   } finally {
-    await client.stop();
+    await client.stop().catch(() => {});
   }
+}
+
+async function defaultPrompt(binding: Binding, text: string): Promise<void> {
+  return promptBindingWithClient(binding, text, new RpcClient({ socketPath: binding.omoSocket }));
 }
 
 async function defaultGitTip(repo: string, revision: string): Promise<string> {
@@ -572,6 +627,14 @@ const defaults: OrchestratorDependencies = {
   openRegistry,
   createHerdrClient,
   attachBinding,
+  probeBindingSession,
+  readHostReachabilityReadOnly: async (socket) => {
+    const status = await readHostStatusReadOnly(
+      socket,
+      resolveOmoAgentDir(process.env, process.cwd()),
+    );
+    return status.reachability ?? (status.reachable ? "reachable" : "unknown");
+  },
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
@@ -582,6 +645,10 @@ const defaults: OrchestratorDependencies = {
   verifyHostAfterHandoff,
   withHostHandoffLock,
   prompt: defaultPrompt,
+  promptRuntimeNotice: async (binding, text) => {
+    await defaultPrompt(binding, text);
+    return null;
+  },
   republishHerdrState,
   gitTip: defaultGitTip,
   now: () => new Date().toISOString(),
@@ -2776,8 +2843,9 @@ export class Orchestrator {
   }
 
   public status(filter: string | ScopeFilter = {}): Result<StatusBinding[]> {
+    if (!existsSync(this.#dbPath)) return ok([]);
     const scope = typeof filter === "string" ? { initiativeId: filter } : filter;
-    return this.#withRegistry((registry) => {
+    return this.#withReadonlyRegistry((registry) => {
       const listed = registry.list();
       if (!listed.ok) return listed;
       const questions = registry.questions({});
@@ -2830,6 +2898,259 @@ export class Orchestrator {
       }
       return ok(rows);
     });
+  }
+
+  public async statusWithRuntimeHealth(
+    filter: string | ScopeFilter = {},
+    notify = false,
+  ): Promise<Result<StatusBinding[]>> {
+    const listed = this.status(filter);
+    if (!listed.ok) return listed;
+    const all = this.status();
+    if (!all.ok) return all;
+    const candidates = all.value.filter(
+      (binding) =>
+        (binding.launchState === "ready" || binding.launchState === "uncertain") &&
+        binding.sessionPath !== null,
+    );
+    if (candidates.length === 0) return listed;
+    const states = new Map<
+      string,
+      { state: NonNullable<StatusBinding["runtimeState"]>; reason?: string }
+    >();
+    const projectObservation = (
+      binding: StatusBinding,
+      observed: { state: NonNullable<StatusBinding["runtimeState"]>; reason?: string } | undefined,
+    ): StatusBinding => {
+      if (observed === undefined) return binding;
+      const {
+        runtimeState: persistedState,
+        runtimeStateReason: _persistedReason,
+        runtimeIncidentId,
+        runtimeIncidentState,
+        runtimeIncidentNoticeState: _runtimeIncidentNoticeState,
+        ...current
+      } = binding;
+      const lastRuntimeIncident =
+        (persistedState === "local_only" || persistedState === "host_lost") &&
+        runtimeIncidentId !== undefined
+          ? {
+              state: runtimeIncidentState ?? persistedState,
+              incidentId: runtimeIncidentId,
+            }
+          : undefined;
+      return {
+        ...current,
+        runtimeState: observed.state,
+        ...(observed.reason === undefined ? {} : { runtimeStateReason: observed.reason }),
+        ...(lastRuntimeIncident === undefined ? {} : { lastRuntimeIncident }),
+      };
+    };
+    const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
+    let snapshot: Awaited<ReturnType<HerdrClient["snapshot"]>>;
+    try {
+      snapshot = await herdr.snapshot();
+    } catch (cause) {
+      const reason = `Herdr could not be observed: ${messageOf(cause)}`;
+      for (const binding of candidates) states.set(binding.id, { state: "unknown", reason });
+      if (notify) {
+        for (const binding of candidates) {
+          const saved = this.#withRegistry((registry) =>
+            registry.setRuntimeState(binding.id, "unknown", reason),
+          );
+          if (!saved.ok) return saved;
+        }
+      }
+      return ok(listed.value.map((binding) => projectObservation(binding, states.get(binding.id))));
+    } finally {
+      herdr.close();
+    }
+
+    const live: StatusBinding[] = [];
+    for (const binding of candidates) {
+      const pane = snapshot.panes.find(
+        (candidate) =>
+          candidate.paneId === binding.paneId && candidate.workspaceId === binding.workspaceId,
+      );
+      if (pane === undefined) {
+        states.set(binding.id, { state: "unknown", reason: "Recorded Herdr pane is missing" });
+      } else if (pane.agent !== "omo" && pane.agent !== "pi") {
+        states.set(binding.id, {
+          state: "unknown",
+          reason: "Herdr pane has no currently detected role agent",
+        });
+      } else {
+        live.push(binding);
+      }
+    }
+
+    const hostReachability = new Map<string, "reachable" | "unreachable" | "unknown">();
+    const readReachability =
+      this.#deps.readHostReachabilityReadOnly ??
+      (async (socket: string) => {
+        const status = await readHostStatusReadOnly(
+          socket,
+          resolveOmoAgentDir(process.env, process.cwd()),
+        );
+        return status.reachability ?? (status.reachable ? "reachable" : "unknown");
+      });
+    for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
+      try {
+        hostReachability.set(socket, await readReachability(socket));
+      } catch {
+        hostReachability.set(socket, "unknown");
+      }
+    }
+    for (const binding of live) {
+      const host = hostReachability.get(binding.omoSocket);
+      if (host === "unreachable") {
+        states.set(binding.id, { state: "host_lost" });
+      } else if (host !== "reachable") {
+        states.set(binding.id, {
+          state: "unknown",
+          reason: "Interactive host could not be observed",
+        });
+      } else if (!notify) {
+        states.set(binding.id, {
+          state: "unknown",
+          reason: "Exact session not probed in read-only mode; run olw reconcile to verify",
+        });
+      } else {
+        const probe = await (this.#deps.probeBindingSession ?? probeBindingSession)(binding);
+        states.set(
+          binding.id,
+          probe.state === "open"
+            ? { state: "connected" }
+            : probe.state === "absent"
+              ? { state: "local_only" }
+              : probe.state === "present"
+                ? { state: "starting" }
+                : { state: "unknown", reason: probe.reason },
+        );
+      }
+    }
+    const unavailable = new Set(
+      [...states].filter(([, observation]) => observation.state !== "connected").map(([id]) => id),
+    );
+    if (notify) {
+      for (const binding of candidates) {
+        const observed = states.get(binding.id);
+        if (observed === undefined) continue;
+        const transitioned = this.#withRegistry((registry) =>
+          registry.transitionRuntimeState(
+            binding.id,
+            observed.state,
+            observed.reason,
+            this.#deps.uuid(),
+          ),
+        );
+        if (!transitioned.ok) return transitioned;
+        if (transitioned.value.notify) {
+          if (
+            transitioned.value.incidentId === undefined ||
+            (observed.state !== "local_only" && observed.state !== "host_lost")
+          )
+            return failure("runtime_unavailable", "Runtime loss incident identity was not created");
+          const notified = await this.#notifyRuntimeLoss(
+            transitioned.value.binding,
+            observed.state,
+            unavailable,
+            transitioned.value.incidentId,
+          );
+          if (!notified.ok) return notified;
+          const settled = this.#withRegistry((registry) =>
+            registry.setRuntimeIncidentNoticeState(
+              binding.id,
+              transitioned.value.incidentId ?? "",
+              notified.value,
+            ),
+          );
+          if (!settled.ok) return settled;
+        }
+      }
+    }
+    return ok(listed.value.map((binding) => projectObservation(binding, states.get(binding.id))));
+  }
+
+  async #notifyRuntimeLoss(
+    binding: Binding,
+    state: "local_only" | "host_lost",
+    unavailable: ReadonlySet<string>,
+    incidentId: string,
+  ): Promise<Result<"posted" | "uncertain">> {
+    if (binding.sessionPath === null) return ok("posted");
+    const failure: RuntimeFailureClaim = {
+      version: 1,
+      kind: "runtime_failure",
+      failure: {
+        source: "host_loss",
+        sessionEntryId: `host-loss:${binding.id}:${state}:${incidentId}`,
+        durableSessionId: binding.durableSessionId,
+        sessionPath: binding.sessionPath,
+        cwd: binding.cwd,
+        provider: modelForBinding(binding).provider,
+        modelId: modelForBinding(binding).modelId,
+        timestamp: 0,
+        stopReason: "error",
+        errorMessage:
+          state === "local_only"
+            ? "Role TUI is alive in local fallback, but its bound host session is absent"
+            : "Role TUI is alive, but its bound interactive host is unavailable",
+      },
+    };
+    const claim = this.#withRegistry((registry) =>
+      registry.claimRuntimeFailure(binding.durableSessionId, failure, unavailable),
+    );
+    if (!claim.ok) return claim;
+    if (claim.value.disposition !== "new")
+      return ok(
+        claim.value.record.state === "uncertain" || claim.value.record.state === "sending"
+          ? "uncertain"
+          : "posted",
+      );
+    await publishOperationalNotice(this.#root, claim.value.record);
+    if (claim.value.target === null) return ok("posted");
+    const message = `[OLW] ${state}: role ${binding.id} has a live TUI without its bound host session. The active turn may be orphaned; press Esc in that pane before continuing. Details: ${runtimeNoticeLookupCommand(binding)}`;
+    try {
+      const receipt = await this.#boundedRuntimeOperation(
+        (
+          this.#deps.promptRuntimeNotice ??
+          (async (target, text) => {
+            await this.#deps.prompt(target, text);
+            return null;
+          })
+        )(claim.value.target, message),
+        "Host-loss notice timed out",
+      );
+      if (receipt === null) {
+        const uncertain = this.#withRegistry((registry) =>
+          registry.uncertain(
+            claim.value.record.envelope.id,
+            "Host-loss notice returned without a native receipt",
+          ),
+        );
+        if (!uncertain.ok) return uncertain;
+        await publishOperationalNotice(this.#root, uncertain.value);
+        return ok("uncertain");
+      } else {
+        const finished = this.#withRegistry((registry) =>
+          registry.finish(claim.value.record.envelope.id, receipt),
+        );
+        if (!finished.ok) return finished;
+        await publishOperationalNotice(this.#root, finished.value);
+        return ok(finished.value.state === "uncertain" ? "uncertain" : "posted");
+      }
+    } catch (cause) {
+      const uncertain = this.#withRegistry((registry) =>
+        registry.uncertain(
+          claim.value.record.envelope.id,
+          `Host-loss notice did not return: ${messageOf(cause)}`,
+        ),
+      );
+      if (!uncertain.ok) return uncertain;
+      await publishOperationalNotice(this.#root, uncertain.value);
+      return ok("uncertain");
+    }
   }
 
   public setPaused(bindingId: string, paused: boolean): Result<Binding> {
@@ -3131,8 +3452,8 @@ export class Orchestrator {
 
   public async reconcile(
     filter: string | ScopeFilter,
-  ): Promise<Result<{ readonly observed: number; readonly bindings: Binding[] }>> {
-    const listed = this.status(filter);
+  ): Promise<Result<{ readonly observed: number; readonly bindings: StatusBinding[] }>> {
+    const listed = await this.statusWithRuntimeHealth(filter, true);
     if (!listed.ok) return listed;
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {
@@ -3287,7 +3608,7 @@ export class Orchestrator {
           lost(binding, "runtime_unavailable", messageOf(cause));
         }
       }
-      const current = this.status(filter);
+      const current = await this.statusWithRuntimeHealth(filter);
       if (!current.ok) return current;
       return issues.length === 0
         ? ok({ observed, bindings: current.value })
@@ -3935,6 +4256,28 @@ export class Orchestrator {
     );
     if (!snapshot.ok) return snapshot;
     return ok({ designation: designation.value, snapshot: snapshot.value });
+  }
+
+  async #boundedRuntimeOperation<T>(operation: Promise<T>, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), RUNTIME_HEALTH_DEADLINE_MS);
+    });
+    try {
+      return await Promise.race([operation, deadline]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  #withReadonlyRegistry<T>(operation: (registry: Registry) => Result<T>): Result<T> {
+    if (!existsSync(this.#dbPath)) return failure("not_found", "Registry does not exist");
+    const registry = this.#deps.openRegistry(this.#dbPath, { readonly: true });
+    try {
+      return operation(registry);
+    } finally {
+      registry.close();
+    }
   }
 
   #withRegistry<T>(operation: (registry: Registry) => Result<T>): Result<T> {

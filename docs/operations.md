@@ -138,7 +138,13 @@ A paused manager blocks new native contact to itself, not parent-child work or e
 
 ### Operational notices
 
-Explicit native assistant errors create separate `operational_notice` records, not completion reports. `notices --project ID --json` reads all recorded operational outcomes without a live host. Healthy owners receive one claimed native notice; absent/paused routes remain visible locally without waking anyone. The notice preserves the original binding and error entry, while `ready` remains an identity/initialization status. Normal idle, cancellation and reload alone aren't errors. See [maintained runtime repairs](runtime-patches.md) for native patch ownership and verification boundaries.
+Explicit native assistant errors create separate `operational_notice` records, not completion reports. `notices --project ID --json` reads all recorded operational outcomes without a live host. Healthy owners receive one claimed native notice; absent/paused routes remain visible locally without waking anyone. The notice preserves the original binding and error entry, while `ready` remains an identity/initialization status. Normal idle, cancellation and reload alone aren't errors.
+
+`status`, `doctor`, and `reconcile` correlate each ready or uncertain binding with its Herdr pane and shared-host reachability. This per-binding runtime section is separate from doctor's host-level health check. Status and doctor use only a bounded, side-effect-free `get_protocol_info` request; they never run Senpi `host status`, list sessions, attach, prompt, or write runtime state. A missing socket or refused connection is `runtimeState: "host_lost"`; a protocol timeout or malformed response is `unknown`. Exact-session classification belongs to reconcile: no exact session is `local_only`, a session still opening or closing is `starting`, and an inconclusive session probe is `unknown`. Only reconcile stores state and posts one deterministic operational notice. A healthy owner is notified; if the owner is also affected, the notice is posted to the local user inbox. Repeated reconciles do not post or send it again.
+
+Senpi 2026.9.27 exposes `ExtensionContext.abort("system")`, and fallback rebinds local TUI extensions through a generic `session_start`. That event does not identify fallback or the turn that was active before transport loss. OLW therefore does not auto-abort: an asynchronous absence check can otherwise abort a legitimate reload, print-mode resume, or newer turn. After reconcile confirms the typed state, the operator may press Esc in the affected pane. No polling loop is used.
+
+See [maintained runtime repairs](runtime-patches.md) for native patch ownership and verification boundaries.
 
 ### Ignore the thread tools directory
 

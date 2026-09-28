@@ -1201,6 +1201,125 @@ export function openRegistry(
     });
   }
 
+  function setRuntimeState(
+    id: string,
+    state: Binding["runtimeState"],
+    reason?: string,
+    incidentId?: string,
+  ): Result<Binding> {
+    return transaction(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (state === undefined) {
+        const {
+          runtimeState: _runtimeState,
+          runtimeStateReason: _runtimeStateReason,
+          runtimeIncidentId: _runtimeIncidentId,
+          runtimeIncidentState: _runtimeIncidentState,
+          runtimeIncidentNoticeState: _runtimeIncidentNoticeState,
+          ...current
+        } = binding.value;
+        return saveBinding(current);
+      }
+      return saveBinding({
+        ...binding.value,
+        runtimeState: state,
+        ...(reason === undefined
+          ? { runtimeStateReason: undefined }
+          : { runtimeStateReason: reason }),
+        ...(incidentId === undefined
+          ? {
+              runtimeIncidentId: undefined,
+              runtimeIncidentState: undefined,
+              runtimeIncidentNoticeState: undefined,
+            }
+          : {
+              runtimeIncidentId: incidentId,
+              runtimeIncidentState:
+                state === "local_only" || state === "host_lost" ? state : undefined,
+              runtimeIncidentNoticeState: "posted",
+            }),
+      });
+    });
+  }
+
+  function transitionRuntimeState(
+    id: string,
+    state: NonNullable<Binding["runtimeState"]>,
+    reason: string | undefined,
+    proposedIncidentId: string,
+  ): Result<{ readonly binding: Binding; readonly notify: boolean; readonly incidentId?: string }> {
+    return transaction(() => {
+      const current = get(id);
+      if (!current.ok) return current;
+      const lost = state === "local_only" || state === "host_lost";
+      const incidentOpen =
+        current.value.runtimeIncidentId !== undefined &&
+        current.value.runtimeIncidentState !== undefined;
+      const recovered = state === "connected";
+      const changedLoss = lost && incidentOpen && current.value.runtimeIncidentState !== state;
+      const incidentId = lost
+        ? changedLoss
+          ? proposedIncidentId
+          : (current.value.runtimeIncidentId ?? proposedIncidentId)
+        : recovered
+          ? undefined
+          : current.value.runtimeIncidentId;
+      const incidentState = lost
+        ? changedLoss
+          ? state
+          : (current.value.runtimeIncidentState ?? state)
+        : recovered
+          ? undefined
+          : current.value.runtimeIncidentState;
+      const noticeState = lost
+        ? changedLoss
+          ? "pending"
+          : (current.value.runtimeIncidentNoticeState ?? "pending")
+        : recovered
+          ? undefined
+          : current.value.runtimeIncidentNoticeState;
+      const saved = saveBinding({
+        ...current.value,
+        runtimeState: state,
+        ...(reason === undefined
+          ? { runtimeStateReason: undefined }
+          : { runtimeStateReason: reason }),
+        ...(incidentId === undefined
+          ? {
+              runtimeIncidentId: undefined,
+              runtimeIncidentState: undefined,
+              runtimeIncidentNoticeState: undefined,
+            }
+          : {
+              runtimeIncidentId: incidentId,
+              runtimeIncidentState: incidentState,
+              runtimeIncidentNoticeState: noticeState,
+            }),
+      });
+      if (!saved.ok) return saved;
+      return ok({
+        binding: saved.value,
+        notify: lost && (!incidentOpen || changedLoss || noticeState === "pending"),
+        ...(incidentId === undefined ? {} : { incidentId }),
+      });
+    });
+  }
+
+  function setRuntimeIncidentNoticeState(
+    id: string,
+    incidentId: string,
+    state: "posted" | "uncertain",
+  ): Result<Binding> {
+    return transaction(() => {
+      const current = get(id);
+      if (!current.ok) return current;
+      if (current.value.runtimeIncidentId !== incidentId)
+        return error("stale_incident", "Runtime incident was replaced before notice settlement");
+      return saveBinding({ ...current.value, runtimeIncidentNoticeState: state });
+    });
+  }
+
   function setContactState(id: string, state: Binding["contactState"]): Result<Binding> {
     return transaction(() => {
       const binding = get(id);
@@ -1406,7 +1525,11 @@ export function openRegistry(
   }
 
   // Called inside claim's transaction: observation identity is independent of owner changes.
-  function claimFailure(senderSessionId: string, input: RuntimeFailureClaim): Result<ClaimResult> {
+  function claimRuntimeFailure(
+    senderSessionId: string,
+    input: RuntimeFailureClaim,
+    unavailableOwnerIds: ReadonlySet<string> = new Set(),
+  ): Result<ClaimResult> {
     const parsed = runtimeFailureClaimSchema.safeParse(input);
     if (!parsed.success)
       return error("invalid_failure", "Runtime failure evidence is invalid", parsed.error.issues);
@@ -1440,7 +1563,11 @@ export function openRegistry(
     }
     const approval = designationFor(sender.value.designationId);
     if (!approval.ok) return approval;
-    const target = operationalTarget(sender.value);
+    const candidate = operationalTarget(sender.value);
+    const target =
+      candidate.ok && unavailableOwnerIds.has(candidate.value.id)
+        ? error<Binding>("owner_host_lost", "Owner is also detached from the native host")
+        : candidate;
     if (
       !target.ok &&
       (target.error.code === "storage_corrupt" || target.error.code === "storage_error")
@@ -1685,7 +1812,7 @@ export function openRegistry(
   ): Result<ClaimResult> {
     return transaction(() => {
       if (envelopeValue.kind === "runtime_failure")
-        return claimFailure(senderSessionId, envelopeValue);
+        return claimRuntimeFailure(senderSessionId, envelopeValue);
       if (envelopeValue.kind === "operational_notice")
         return error(
           "route_denied",
@@ -2201,6 +2328,9 @@ export function openRegistry(
     finishSuccessorLaunch,
     activate,
     setLaunchState,
+    setRuntimeState,
+    transitionRuntimeState,
+    setRuntimeIncidentNoticeState,
     setContactState,
     setOwner,
     post,
@@ -2216,6 +2346,8 @@ export function openRegistry(
     finishInitialization,
     authorize,
     claim,
+    claimRuntimeFailure: (senderSessionId, failure, unavailableOwnerIds) =>
+      transaction(() => claimRuntimeFailure(senderSessionId, failure, unavailableOwnerIds)),
     finish,
     uncertain,
     delivery(messageId: string): Result<DeliveryRecord> {

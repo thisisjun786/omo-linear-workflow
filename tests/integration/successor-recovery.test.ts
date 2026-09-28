@@ -467,6 +467,22 @@ test("close then stage start creates a fresh successor and preserves old attempt
   if (oldIntent === null) throw new Error("Missing uncertain attempt");
 
   expect(await w.orchestrator().close("execute", false, true)).toMatchObject({ ok: true });
+  expect(w.registry((registry) => value(registry.get("plan")))).toMatchObject({
+    launchState: "closed",
+    contactState: "cancelled",
+  });
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({ ok: true });
+  const sendsBeforePlanContact = w.sends();
+  expect(
+    await w.orchestrator().send({
+      fromId: "parent",
+      toId: "plan",
+      kind: "instruction",
+      text: "are you there?",
+      messageId: "contact-retired-plan",
+    }),
+  ).toMatchObject({ ok: false, error: { code: "not_ready" } });
+  expect(w.sends()).toBe(sendsBeforePlanContact);
   await Bun.write(join(w.root, "plan.md"), "plan");
   const planSha = new Bun.CryptoHasher("sha256").update("plan").digest("hex");
   const deliveryDb = new Database(join(w.root, ".omo/state/registry.sqlite"));
@@ -517,7 +533,7 @@ test("close then stage start creates a fresh successor and preserves old attempt
   if (!fresh.ok) throw new Error(fresh.error.message);
   expect(fresh.value.binding.id).not.toBe("execute");
   expect(w.registry((registry) => value(registry.stageOf(fresh.value.binding.id)))).toMatchObject({
-    ordinal: 1,
+    ordinal: 2,
     previousBindingId: "plan",
   });
   const history = new Database(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
@@ -657,6 +673,61 @@ test("a stale token cannot mutate a newer claimed attempt", async () => {
   expect(
     w.registry((registry) => value(registry.ownsSuccessorLaunch("execute", second.token))),
   ).toBe(true);
+  const attempts = new Database(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
+  try {
+    expect(
+      attempts
+        .query<{ owner: string; state: string }, []>(
+          "SELECT owner, state FROM successor_launch_attempts WHERE binding_id = 'execute' ORDER BY attempt_number",
+        )
+        .all(),
+    ).toEqual([
+      { owner: first.token, state: "superseded" },
+      { owner: second.token, state: "claimed" },
+    ]);
+  } finally {
+    attempts.close();
+  }
+});
+
+test("reconcile marks an expired dispatch from a dead owner uncertain without retrying", async () => {
+  const w = await world();
+  const claim = value(
+    w.registry((registry) =>
+      registry.beginSuccessorLaunch(
+        "execute",
+        "pane-execute",
+        "2026-09-27T00:00:00.000Z",
+        "2026-09-26T23:58:00.000Z",
+      ),
+    ),
+  );
+  if (!claim.claimed) throw new Error("claim missing");
+  value(w.registry((registry) => registry.prepareSuccessorLaunch("execute", claim.token)));
+  value(w.registry((registry) => registry.dispatchSuccessorLaunch("execute", claim.token)));
+  const db = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    db.query(
+      "UPDATE successor_launch SET owner_pid = 2147483647, owner_starttime = '1' WHERE binding_id = 'execute'",
+    ).run();
+  } finally {
+    db.close();
+  }
+  w.setClock(120_001);
+
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({
+    ok: false,
+    error: {
+      code: "reconciliation_uncertain",
+      details: { issues: [{ bindingId: "execute", code: "successor_abandon_required" }] },
+    },
+  });
+  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual({
+    attemptId: claim.token,
+    state: "uncertain",
+  });
+  expect(w.registry((registry) => value(registry.get("execute")).launchState)).toBe("uncertain");
+  expect(w.launches()).toBe(0);
 });
 
 test("an accepted dispatch with lost observation becomes uncertain and is never resent", async () => {

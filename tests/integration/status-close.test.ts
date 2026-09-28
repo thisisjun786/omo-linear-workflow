@@ -550,8 +550,8 @@ test("status/close: interrupted uncertain-successor retirement resumes without c
     w.setFault("none");
     expect(await w.orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
     expect(value(w.registry.get("plan"))).toMatchObject({
-      launchState: "ready",
-      contactState: "active",
+      launchState: "closed",
+      contactState: "cancelled",
     });
     expect(value(w.registry.stageOf("execute"))).toBeNull();
     expect(w.workspaces.has("childws")).toBe(true);
@@ -560,6 +560,55 @@ test("status/close: interrupted uncertain-successor retirement resumes without c
     w.cleanup();
   }
 });
+
+test.each([
+  ["live TUI without a session path", true],
+  ["missing pane", false],
+] as const)(
+  "status/close: uncertain successor retires when its %s is already stopped or can be verified",
+  async (_case, liveWithoutPath) => {
+    const w = await world();
+    try {
+      w.planned();
+      const db = new Database(w.path);
+      try {
+        db.query(
+          "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+        ).run();
+        db.query(
+          "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+        ).run();
+      } finally {
+        db.close();
+      }
+      const execute = value(w.registry.get("execute"));
+      if (execute.sessionPath === null) throw new Error("Missing execute session path");
+      const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+        id: execute.durableSessionId,
+      });
+      const header = manager.getHeader();
+      if (header === null) throw new Error("Missing execute session header");
+      await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
+      if (liveWithoutPath) w.paneSessions.set("childws:execute", "");
+      else {
+        w.paneSessions.delete("childws:execute");
+        w.agentPanes.delete("childws:execute");
+      }
+
+      expect(await w.orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
+      expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(
+        liveWithoutPath ? 1 : 0,
+      );
+      expect(value(w.registry.stageOf("execute"))).toBeNull();
+      expect(value(w.registry.get("plan"))).toMatchObject({
+        launchState: "closed",
+        contactState: "cancelled",
+      });
+    } finally {
+      w.cleanup();
+    }
+  },
+);
 
 test("status/close: resumed uncertain-successor close refuses a replacement TUI", async () => {
   const w = await world();
@@ -646,8 +695,8 @@ test("status/close: uncertain local-only successor closes while its host is unre
 
     expect(await orchestrator.close("execute", false, true)).toMatchObject({ ok: true });
     expect(value(w.registry.get("plan"))).toMatchObject({
-      launchState: "ready",
-      contactState: "active",
+      launchState: "closed",
+      contactState: "cancelled",
     });
     expect(value(w.registry.stageOf("execute"))).toBeNull();
     expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(false);

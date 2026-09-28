@@ -216,16 +216,37 @@ export function openRegistry(
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
     state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain')),
     claimed_at TEXT NOT NULL,
-    owner TEXT NOT NULL
+    owner TEXT NOT NULL,
+    owner_pid INTEGER,
+    owner_starttime TEXT
   )`);
+    const successorLaunchColumns = db
+      .query<{ readonly name: string }, []>("PRAGMA table_info(successor_launch)")
+      .all();
+    if (!successorLaunchColumns.some((column) => column.name === "owner_pid"))
+      db.run("ALTER TABLE successor_launch ADD COLUMN owner_pid INTEGER");
+    if (!successorLaunchColumns.some((column) => column.name === "owner_starttime"))
+      db.run("ALTER TABLE successor_launch ADD COLUMN owner_starttime TEXT");
+    const attemptsSql = db
+      .query<{ readonly sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'successor_launch_attempts'",
+      )
+      .get()?.sql;
+    if (attemptsSql !== undefined && !attemptsSql.includes("'superseded'")) {
+      db.run("ALTER TABLE successor_launch_attempts RENAME TO successor_launch_attempts_old");
+    }
     db.run(`CREATE TABLE IF NOT EXISTS successor_launch_attempts (
     binding_id TEXT NOT NULL REFERENCES bindings(id),
     attempt_number INTEGER NOT NULL,
     owner TEXT NOT NULL UNIQUE,
-    state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain','failed')),
+    state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain','failed','superseded')),
     claimed_at TEXT NOT NULL,
     PRIMARY KEY (binding_id, attempt_number)
   )`);
+    if (attemptsSql !== undefined && !attemptsSql.includes("'superseded'")) {
+      db.run("INSERT INTO successor_launch_attempts SELECT * FROM successor_launch_attempts_old");
+      db.run("DROP TABLE successor_launch_attempts_old");
+    }
     db.run(`CREATE TABLE IF NOT EXISTS successor_close (
     binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
     mode TEXT NOT NULL CHECK(mode = 'retire-edge')
@@ -622,7 +643,10 @@ export function openRegistry(
       if (priorStage?.handoff === null || priorStage === null)
         return error("handoff_missing", "Previous stage has no handoff");
       if (
-        previous.value.launchState !== "ready" ||
+        !(
+          previous.value.launchState === "ready" ||
+          (previous.value.launchState === "closed" && previous.value.contactState === "cancelled")
+        ) ||
         previous.value.assignment.role !== "child" ||
         parsed.data.assignment.role !== "child" ||
         ownershipKey(previous.value.assignment) !== ownershipKey(parsed.data.assignment) ||
@@ -642,10 +666,12 @@ export function openRegistry(
           .get(previousBindingId) !== null
       )
         return error("stage_in_flight", "Previous stage has an unresolved delivery");
-      const closing = beginCloseInTransaction(previousBindingId);
-      if (!closing.ok) return closing;
-      const closed = finishCloseInTransaction(previousBindingId);
-      if (!closed.ok) return closed;
+      if (previous.value.launchState === "ready") {
+        const closing = beginCloseInTransaction(previousBindingId);
+        if (!closing.ok) return closing;
+        const closed = finishCloseInTransaction(previousBindingId);
+        if (!closed.ok) return closed;
+      }
       const successor = reserveInTransaction(parsed.data, scope.value, digest);
       if (!successor.ok) return successor;
       const generation = lineage.generationNumber(previousBindingId);
@@ -653,7 +679,7 @@ export function openRegistry(
         successor.value.id,
         priorStage.issueId,
         nextStage,
-        priorStage.ordinal + 1,
+        lineage.nextOrdinal(previousBindingId),
         previousBindingId,
         generation,
       );
@@ -914,7 +940,7 @@ export function openRegistry(
   function appendSuccessorAttempt(
     id: string,
     owner: string,
-    state: "claimed" | "dispatching" | "ready" | "uncertain" | "failed",
+    state: "claimed" | "dispatching" | "ready" | "uncertain" | "failed" | "superseded",
     claimedAt: string,
   ): void {
     db.query(
@@ -925,7 +951,7 @@ export function openRegistry(
   function settleSuccessorAttempt(
     id: string,
     owner: string,
-    state: "dispatching" | "ready" | "uncertain" | "failed",
+    state: "dispatching" | "ready" | "uncertain" | "failed" | "superseded",
   ): void {
     db.query(
       "UPDATE successor_launch_attempts SET state = ? WHERE binding_id = ? AND owner = ?",
@@ -936,6 +962,8 @@ export function openRegistry(
     readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
     readonly claimed_at: string;
     readonly owner: string;
+    readonly owner_pid: number | null;
+    readonly owner_starttime: string | null;
   } | null {
     return db
       .query<
@@ -943,9 +971,13 @@ export function openRegistry(
           readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
           readonly claimed_at: string;
           readonly owner: string;
+          readonly owner_pid: number | null;
+          readonly owner_starttime: string | null;
         },
         [string]
-      >("SELECT state, claimed_at, owner FROM successor_launch WHERE binding_id = ?")
+      >(
+        "SELECT state, claimed_at, owner, owner_pid, owner_starttime FROM successor_launch WHERE binding_id = ?",
+      )
       .get(id);
   }
 
@@ -974,12 +1006,36 @@ export function openRegistry(
         (held.state !== "claimed" || held.claimed_at >= staleBefore)
       )
         return ok({ claimed: false, binding: binding.value, state: held.state });
+      if (held !== null) settleSuccessorAttempt(id, held.owner, "superseded");
       const token = randomUUID();
       db.query(
-        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES (?, 'claimed', ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state = 'claimed', claimed_at = excluded.claimed_at, owner = excluded.owner",
-      ).run(id, claimedAt, token);
+        "INSERT INTO successor_launch (binding_id, state, claimed_at, owner, owner_pid, owner_starttime) VALUES (?, 'claimed', ?, ?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state = 'claimed', claimed_at = excluded.claimed_at, owner = excluded.owner, owner_pid = excluded.owner_pid, owner_starttime = excluded.owner_starttime",
+      ).run(id, claimedAt, token, process.pid, processStarttime(process.pid));
       appendSuccessorAttempt(id, token, "claimed", claimedAt);
       return ok({ claimed: true, binding: binding.value, token });
+    });
+  }
+
+  function abandonDeadSuccessorLaunch(id: string, staleBefore: string): Result<boolean> {
+    return transaction(() => {
+      const held = successorLaunchClaim(id);
+      if (
+        held === null ||
+        held.state !== "dispatching" ||
+        held.claimed_at >= staleBefore ||
+        held.owner_pid === null ||
+        processAlive(held.owner_pid, held.owner_starttime)
+      )
+        return ok(false);
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const saved = saveBinding({ ...binding.value, launchState: "uncertain" });
+      if (!saved.ok) return saved;
+      db.query(
+        "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ? AND state = 'dispatching'",
+      ).run(id, held.owner);
+      settleSuccessorAttempt(id, held.owner, "uncertain");
+      return ok(true);
     });
   }
 
@@ -1534,8 +1590,8 @@ export function openRegistry(
       if (!closed.ok) return closed;
       const restored = saveBinding({
         ...predecessor.value,
-        launchState: "ready",
-        contactState: "active",
+        launchState: "closed",
+        contactState: "cancelled",
       });
       if (!restored.ok) return restored;
       lineage.retire(id);
@@ -2425,6 +2481,7 @@ export function openRegistry(
     authorizeHerdrRepublish,
     beginSuccessorLaunch,
     successorLaunchIntent,
+    abandonDeadSuccessorLaunch,
     ownsSuccessorLaunch,
     provisionSuccessorLaunch,
     prepareSuccessorLaunch,

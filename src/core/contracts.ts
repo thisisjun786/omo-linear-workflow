@@ -382,9 +382,11 @@ export interface Registry {
   prepareSuccessorLaunch(id: string, token: string): Result<Binding>;
   observeSuccessorSession(id: string, token: string, sessionPath: string): Result<Binding>;
   activateSuccessorLaunch(id: string, token: string, identity: RuntimeIdentity): Result<Binding>;
-  /** Record dispatch before herdr.run; dispatching can never be taken over by elapsed time. */
+  /** Record dispatch before herdr.run; only reconcile may abandon an expired, provably dead owner. */
   dispatchSuccessorLaunch(id: string, token: string): Result<Binding>;
   successorLaunchIntent(id: string): Result<SuccessorLaunchIntent | null>;
+  /** Mark an expired dispatch uncertain only when its recorded owner process is provably dead. */
+  abandonDeadSuccessorLaunch(id: string, staleBefore: string): Result<boolean>;
   /** Settle only the exact attempt/state whose native session the caller observed. */
   reconcileSuccessorLaunch(
     id: string,

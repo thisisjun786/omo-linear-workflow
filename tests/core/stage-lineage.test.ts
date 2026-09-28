@@ -144,7 +144,7 @@ test("closing an uncertain successor retires its lineage and preserves launch hi
         "execute",
       ),
     );
-    expect(value(registry.stageOf(replacement.id))).toMatchObject({ ordinal: 1 });
+    expect(value(registry.stageOf(replacement.id))).toMatchObject({ ordinal: 2 });
     const db = new Database(path, { readonly: true });
     try {
       expect(

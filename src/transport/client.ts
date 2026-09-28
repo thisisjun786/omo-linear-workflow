@@ -91,6 +91,34 @@ export function publicRpcClient(socketPath: string): RpcPort {
   });
 }
 
+/** Own a native slot until the TUI has attached; a count observation cannot reserve it. */
+export async function acquireLaunchSession(
+  binding: Binding,
+  client: RpcPort = publicRpcClient(binding.omoSocket),
+): Promise<{ release(): Promise<void> }> {
+  if (binding.sessionPath === null) throw new Error("Launch requires a seeded session path");
+  try {
+    await client.start();
+    const opened = await client.openSession({
+      sessionPath: binding.sessionPath,
+      cwd: binding.cwd,
+      retain_on_disconnect: false,
+    });
+    return {
+      async release() {
+        try {
+          await client.closeSession(opened.sessionId);
+        } finally {
+          await client.stop();
+        }
+      },
+    };
+  } catch (cause) {
+    await client.stop();
+    throw mapOpenSessionError(cause);
+  }
+}
+
 export async function attachBinding(binding: Binding): Promise<NativeSession> {
   return attachBindingWithClient(binding, publicRpcClient(binding.omoSocket));
 }

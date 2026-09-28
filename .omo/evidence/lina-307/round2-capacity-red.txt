@@ -1,0 +1,38 @@
+Command: bun test tests/integration/orchestrator.test.ts -t 'capacity race'
+Baseline production: bb93fbc
+Expected: terminal host_session_capacity with count20/limit20/action,
+native-open-refused before run, closed pending-initialization binding.
+Actual: generic runtime_unavailable from native identity verification after run.
+error: expect(received).toMatchObject(expected)
+(fail) orchestrator startup > capacity race after a passing guard closes the unstarted role without a local TUI [91.39ms]
+0 pass, 1 fail, exit 1.
+
+Command: bun test tests/transport/client.test.ts -t 'launch admission'
+SyntaxError: Export named 'acquireLaunchSession' not found.
+0 pass, 1 fail, 1 error; exit 1 (API absent before implementation).
+
+Command: bun test tests/manage.test.ts tests/integration/successor-recovery.test.ts -t 'capacity'
+(pass) manager reattachment capacity refusal preserves its initialized identity without another TUI
+(fail) successor capacity race retires only its unstarted attempt before TUI dispatch
+Expected launchState closed, received provisioning; native launch count0, send count0.
+1 pass, 1 fail; exit 1. Added token-fenced closeUnstartedSuccessor for claimed,
+pending-initialization attempts only; settles failed attempt and retires lineage.
+
+GREEN: bun test tests/transport/client.test.ts tests/integration/successor-recovery.test.ts tests/manage.test.ts tests/integration/orchestrator.test.ts
+116 pass, 0 fail, 4 files, 33.48s, exit 0.
+
+Sibling RED: bun test tests/integration/successor-recovery.test.ts -t 'initialized successor reattachment'
+Expected host_session_capacity; received invalid_transition because initialized
+successor was incorrectly sent to unstarted retirement. 0 pass, 1 fail, exit1.
+Fix restricts retirement to pending initialization; accepted work retains identity.
+GREEN capacity sibling tests: 2 pass, 0 fail, exit0.
+
+Resource-order RED: bun test tests/manage.test.ts -t 'foreground exit before readiness'
+With an actual launch-slot lifetime injected, terminateBinding observed the slot
+still held. Expected foreground exit37, received generic runtime exit3; 0 pass/1 fail.
+Fix releases the held attachment before terminating native state. GREEN 1 pass/0 fail.
+
+Compatibility RED: bun test tests/host-profile.test.ts -t 'phase-tagged'
+Expected previous WORKER_ADMISSION_1 host to be rejected; promise resolved.
+0 pass/1 fail. Bumped marker to WORKER_ADMISSION_2 because admission replies now
+carry explicit before-native versus possibly-delivered phase proof.

@@ -108,7 +108,7 @@ describe("host profile", () => {
         OMO_NATIVE: "1",
         OMO_INITIATIVE_HOST: "1",
         OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
-        OMO_INITIATIVE_WORKER_ADMISSION_1: "1",
+        OMO_INITIATIVE_WORKER_ADMISSION_2: "1",
         OMO_INITIATIVE_ROOT: root,
         OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
         [RUNTIME_CACHE_MARKER]: "1",
@@ -779,6 +779,74 @@ describe("orchestrator startup", () => {
       },
     });
     expect(events).not.toContain("run");
+  });
+
+  test("capacity race after a passing guard closes the unstarted role without a local TUI", async () => {
+    const root = await ownedRoot("olw-capacity-race-");
+    const events: string[] = [];
+    const herdr = new FakeHerdr(events);
+    let checks = 0;
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async () => ({ artifactDir: join(root, ".managed-herdr") }),
+      ensureHost: async () => {},
+      checkHostProfile: async () => {},
+      assertHostCapacity: async () => {
+        checks++;
+        events.push("capacity-available");
+      },
+      gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
+      now: () => "2026-09-28T00:00:00.000Z",
+      uuid: () => crypto.randomUUID(),
+      attachBinding: async () => {
+        throw new Error("Native session absent after local fallback");
+      },
+      terminateBinding: async () => {},
+      prompt: async () => {
+        throw new Error("An unstarted role must never be prompted");
+      },
+    };
+    Object.assign(dependencies, {
+      acquireLaunchSession: async () => {
+        expect(checks).toBe(1);
+        events.push("native-open-refused");
+        throw new HostCapacityError(20);
+      },
+    });
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+      projects: [],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const result = await orchestrator.createSupervisor({
+      initiativeId: "initiative",
+      scopeDigest: imported.value.digest,
+      designationId: "designation",
+      execute: true,
+      fixture: true,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "host_session_capacity",
+        details: { count: 20, limit: 20, action: "close_an_existing_role" },
+      },
+    });
+    expect(events).toContain("native-open-refused");
+    expect(events).not.toContain("run");
+    expect(events).toContain("close-workspace:ws");
+    expect(orchestrator.status()).toMatchObject({
+      ok: true,
+      value: [{ launchState: "closed", initialization: { state: "pending" } }],
+    });
   });
 
   test("fails role startup before reservation when the managed Herdr artifact is unavailable", async () => {

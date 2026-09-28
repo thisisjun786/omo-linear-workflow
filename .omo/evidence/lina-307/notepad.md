@@ -173,3 +173,72 @@ All 20 live todo items remain open; list mirrors the steps above.
   script absent; no live runtime commands ever issued.
 - Now: commit the single coupled runtime/profile/delivery fix with evidence trailers.
 - Todo: commit, verify SHA/status/trailers, report DoneClaim JSON and stop.
+
+## PR 19 round 2 - 2026-09-28
+
+Baseline bb93fbc, clean worktree. Gate report read in full from
+/home/jun/.omo/evidence/lina-307-gate-review.md. CI validate already PASS, verified
+with gh pr checks; no external comment or push authorized.
+
+Plan: red-first capacity-race launch test; replace observational-only capacity
+admission with an actual native open held across TUI attachment. The TUI attaches
+an already-owned path, so it cannot lose the last slot and fall back locally.
+Cover new roles, successor dispatch, and manager reattachment. A native refusal
+before TUI launch is typed terminal capacity, with no local process to kill; close
+the unstarted reservation while preserving existing initialized manager identity.
+
+Parallel lane r2-manager-delivery owns only extension runtime/client and related
+tests, fixes proven pre-native versus uncertain failures, and audits requestExtension
+siblings. Lead owns orchestrator/transport slot acquisition, deterministic and real
+disposable-host race QA, docs/reply drafts, final two-mode verification and one commit.
+
+Criteria: guard passes at 19, competing open fills20, actual native launch open
+refuses before pane launch; terminal host_session_capacity count/limit/action,
+unstarted binding closed. Successful held open lets TUI attach even at cap. No native
+or local TUI leak. Manager admission refusal finishes rejected and same-ID retry
+delivers once; sent request with lost reply stays uncertain and never retries.
+
+Invariants remain: no live root/socket, global config, upstream or patch mutation;
+no read-only list_sessions; no accepted/uncertain resend; all /tmp resources cleaned.
+Real race scenario max two failing attempts. One new commit only, no push.
+
+### Round 2 capacity implementation and evidence
+
+- acquireLaunchSession opens the exact seeded native path and holds its attachment
+  across TUI verification. Guard19/competing20 now fails before TUI run; no local
+  fallback can be created. New-role binding closed, owned workspace removed.
+- Siblings: manager reattachment typed capacity preserves accepted identity;
+  successor admission before dispatch closes only pending unstarted attempt,
+  settles history and retires edge under owner token. Initialized successors keep
+  identity. Early foreground exit releases held attachment before native cleanup.
+- Red-first tests captured in round2-capacity-red.txt. Focused first pass116/0;
+  initialized-successor and early-exit deltas each red then green.
+- Real QA `bun scripts/qa-manager-idle.ts --capacity-race`, attempt1 PASS, PID3452500,
+  /tmp/olw-manager-idle-jVPsez. Actual guard19 -> competitor20 -> real native refusal
+  -> host_session_capacity count20/limit20/action, TUI launches0, closed binding.
+  Twenty sessions/host/socket/root cleaned and independently checked. qa.md updated.
+- Manager lane review found generic returned worker_failed could follow native
+  acceptance. Required phase-tagged RPC proof instead of error-code blacklist;
+  WORKER_ADMISSION_2 marker makes mixed old/new runtime incompatible via handoff.
+
+### Round 2 integration verification
+
+- Manager lane finished: target-owned admission_failed/delivery_result union;
+  before_request transport error typed separately from request_uncertain. Native
+  finish-worker failures remain uncertain; known response survives cleanup failure.
+- Audited every sendManagerNotice/requestExtension site, documented in
+  round2-sibling-audit.md. Reply drafts for both requested discussion IDs are ready,
+  not posted. No accepted or uncertain retry widened.
+- Integrated real QA PASS at 10:49Z: missing manager -> rejected -> reopen ->
+  same-ID accepted, two attempt records and one transcript occurrence. Race19/20
+  still yields typed terminal with no TUI; held slot attaches at cap and survives
+  release. PID3667385/rootH1V6Z3 removed and independently verified.
+- Normal full suite738/0 (174.74s). Herdr-unset full suite pending monitor
+  mon_RA38EEKWP4X4JR2Q. Final static/build/release/install-smoke all exit0, smoke5/0;
+  directory LSP zero errors. No code changes after these tests began (QA formatting only).
+- Self-review read all production diff, native slot ownership/release, owner-fenced
+  successor retirement, initialized identity preservation, phase proof and uncertain
+  semantics. Stop after second full suite result, one new commit and SHA/status check.
+
+- Final Herdr-unset suite738/0 (107.86s), exit0. All requested verification complete.
+  Commit one increment now; no push. No remaining QA processes/directories.

@@ -17,6 +17,7 @@ import { openRegistry } from "../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../src/herdr";
 import { HostHandoffBusyError } from "../src/host-handoff-lock";
 import {
+  HostCapacityError,
   HostProfileMismatchError,
   HostSessionsPresentError,
   runtimeCacheEnvironment,
@@ -334,6 +335,30 @@ async function world(agent = "omo") {
 function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
+
+test("manager reattachment capacity refusal preserves its initialized identity without another TUI", async () => {
+  const w = await world();
+  const manager = value(await w.orchestrator.manage()).binding;
+  if (manager.paneId === null) throw new Error("Missing manager pane");
+  const pane = w.panes.get(manager.paneId);
+  if (pane === undefined) throw new Error("Missing manager pane");
+  w.panes.set(manager.paneId, { workspaceId: pane.workspaceId });
+  Object.assign(w.deps, {
+    acquireLaunchSession: async () => {
+      throw new HostCapacityError(20);
+    },
+  });
+  expect(await w.orchestrator.manage()).toMatchObject({
+    ok: false,
+    error: { code: "host_session_capacity" },
+  });
+  expect(w.runs).toHaveLength(1);
+  expect(w.readRegistry((registry) => value(registry.get(manager.id)))).toMatchObject({
+    id: manager.id,
+    launchState: "ready",
+    initialization: { state: "accepted" },
+  });
+});
 
 test("bare entry cannot displace a live reattachment owner after its lease expires", async () => {
   const w = await world();
@@ -1199,6 +1224,7 @@ test("foreground exit before readiness returns its code and releases the singlet
   process.env["HERDR_ENV"] = "1";
   process.env["HERDR_PANE_ID"] = "caller:p1";
   let child: ReturnType<typeof Bun.spawn> | undefined;
+  let held = false;
   const deadline = Promise.withResolvers<never>();
   const timer = setTimeout(
     () => deadline.reject(new Error("Foreground exit was not observed")),
@@ -1208,6 +1234,18 @@ test("foreground exit before readiness returns its code and releases the singlet
     const code = await Promise.race([
       runCli(["--root", w.root], {
         ...w.deps,
+        acquireLaunchSession: async () => {
+          held = true;
+          return {
+            release: async () => {
+              held = false;
+            },
+          };
+        },
+        terminateBinding: async (binding) => {
+          expect(held).toBe(false);
+          await w.deps.terminateBinding(binding);
+        },
         launchHere: () => {
           child = Bun.spawn([process.execPath, "--eval", "process.exit(37)"], {
             stdin: "ignore",

@@ -52,3 +52,47 @@ instead of the assigned worktree. Lead found this before running it and moved th
 single new file into the assigned worktree with apply_patch. No live host command,
 socket request or restart was performed. The live file no longer exists. This was
 a temporary filesystem scope violation, not a live runtime change.
+
+## PR 19 round 2: actual native admission race
+
+Command: `bun scripts/qa-manager-idle.ts --capacity-race`.
+2026-09-28T10:34Z, attempt 1 PASS, exit 0. Disposable host PID 3452500,
+root `/tmp/olw-manager-idle-jVPsez`. Real Senpi worker host and native RpcClient;
+workspace operations are an in-memory fixture that fails if run is reached.
+
+The actual Orchestrator.createSupervisor path passes assertHostCapacity at 19.
+The fixture then opens a competing real session, filling slot20. The orchestrator's
+new acquireLaunchSession performs the real native open before TUI dispatch. Native
+refusal is mapped to this terminal result:
+
+```json
+{"ok":false,"error":{"code":"host_session_capacity","message":"Native host session capacity is 20/20; close an existing role before launching another","details":{"count":20,"limit":20,"action":"close_an_existing_role"}}}
+```
+
+Observed `tuiLaunches:0`, owned workspace removed, binding closed with initialization
+still pending and text null. No local fallback exists because no TUI was launched.
+The same run also passed two-worker describe/idle/busy/dedup and existing-path
+attach-at-cap. No model request left the local fake provider.
+
+Cleanup receipt: 20 native sessions closed, host stopped, socket/root removed.
+Independent `ps -p 3452500` and directory absence checks passed. No live host access.
+
+### Final integrated run
+
+`bun run typecheck && bun run build && bun scripts/qa-manager-idle.ts --capacity-race`
+at 2026-09-28T10:49Z: PASS, exit0. PID3667385, `/tmp/olw-manager-idle-H1V6Z3`.
+This rerun followed the phase-tagged manager admission change, not a failing race
+retry (both race runs passed).
+
+Additional real-surface observations:
+- Closed the exact manager session before a report. Its sending claim became
+  rejected, not stuck. Reopened the same durable manager and resent the same logical
+  ID/payload: accepted with two attempt records and exactly one transcript occurrence.
+  Accepted replay returned the identical record without another occurrence.
+- Guard19/competing20 still returned typed host_session_capacity with TUI launches0
+  and a closed unstarted binding.
+- Freed one slot, acquired a real launch-session hold, attached the same path at
+  full capacity, then released the admission hold. The attached native session was
+  still alive, proving release does not dispose the TUI-owned session.
+- describe/idle/busy/dedup and raw overflow checks still passed.
+- Cleanup: twenty remaining sessions closed, host exit observed, socket/root removed.

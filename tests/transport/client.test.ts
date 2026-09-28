@@ -4,6 +4,7 @@ import { RpcCommandError } from "../../node_modules/@code-yeongyu/senpi/dist/mod
 import type { Binding, DeliveryRecord, Envelope } from "../../src/core/contracts";
 import { HostCapacityError } from "../../src/host-profile";
 import {
+  acquireLaunchSession,
   attachBindingWithClient,
   NativeSessionNotReadyError,
   probeBindingSessionWithClient,
@@ -137,6 +138,30 @@ class FakeRpc implements RpcPort {
     return () => {};
   }
 }
+
+test("launch admission preserves native capacity refusal and never hands a local fallback to the caller", async () => {
+  const client = new FakeRpc();
+  client.openSession = async () => {
+    throw new RpcCommandError("open_failed: too_many_sessions", undefined, undefined);
+  };
+  await expect(acquireLaunchSession(binding, client)).rejects.toMatchObject({
+    code: "host_session_capacity",
+    count: 20,
+    limit: 20,
+    action: "close_an_existing_role",
+  });
+  expect(client.stopped).toBe(1);
+});
+
+test("launch admission holds the actual slot until explicit release", async () => {
+  const client = new FakeRpc();
+  const held = await acquireLaunchSession(binding, client);
+  expect(client.stopped).toBe(0);
+  expect(client.closeSessionCalls).toBe(0);
+  await held.release();
+  expect(client.closeSessionCalls).toBe(1);
+  expect(client.stopped).toBe(1);
+});
 
 describe("native session client", () => {
   test("attaches only an exact existing durable id, path, and cwd", async () => {

@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { Binding, Designation, Envelope, Result, ScopeSnapshot } from "../src/core/contracts";
 import { modelForRole } from "../src/core/policy";
-import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
+import { managerNoticeReplySchema } from "../src/extension/manager-notice-client";
 import {
   type RuntimePort,
   registerInitiativeRuntime,
@@ -316,7 +316,7 @@ export class Harness implements RuntimePort {
         this.toolCall = priorGuard;
       }
     };
-    return resultSchema(deliveryRecordSchema).parse(
+    return managerNoticeReplySchema.parse(
       await recipient.rpc("omo.initiative.admit-manager-notice")(request),
     );
   }

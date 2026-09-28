@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Hold native session admission across TUI attachment so a last-slot capacity race returns a typed refusal without local fallback. Finish proven pre-native manager admission failures as same-ID retryable rejections, while lost replies and post-send storage failures remain uncertain; phase-tagged admission requires the normal worker-profile handoff.
 - Reclaim closed sessions' extension allocations and loopback servers with worker isolates, admit manager notices in the receiving isolate with a final synchronous idle check, and report the native 20-session capacity before role launch. Existing in-process hosts require the normal idle-host profile handoff; worker mode is not process-fatal OOM containment.
 - Detect crash-restarted shared hosts that lost OLW's launch profile, preserve the existing idle-host handoff on the next OLW entry, and make `olw doctor` report endpoint generation, profile match, RSS threshold warnings, seven-day daemon crash history, and the exact scoped recovery environment and command without invoking session APIs that reconcile daemon state.
 - Detect ready or uncertain OLW roles whose Herdr TUI survives shared-host loss. Read-only status/doctor use only side-effect-free protocol probing; reconcile performs bounded exact-session classification, persists `local_only`, `host_lost`, `starting`, or `unknown`, and posts one durable owner or user-inbox notice. OLW does not auto-abort on generic session rebinds because Senpi exposes no fallback-specific turn identity.

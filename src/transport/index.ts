@@ -1,4 +1,5 @@
 export {
+  acquireLaunchSession,
   attachBinding,
   type NativeSession,
   NativeSessionAbsentError,

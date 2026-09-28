@@ -100,7 +100,7 @@ export const RUNTIME_CACHE_MARKER = `OMO_INITIATIVE_CACHE_V1_${runtimeNamespace(
   import.meta.resolve("@code-yeongyu/senpi"),
 ).toUpperCase()}`;
 export const EXTENSION_PROTOCOL_MARKER = "OMO_INITIATIVE_EXTENSION_PROTOCOL_2";
-export const WORKER_ADMISSION_MARKER = "OMO_INITIATIVE_WORKER_ADMISSION_1";
+export const WORKER_ADMISSION_MARKER = "OMO_INITIATIVE_WORKER_ADMISSION_2";
 export const DEFAULT_HOST_RSS_WARNING_MB = 8 * 1024;
 export const NATIVE_HOST_SESSION_LIMIT = 20;
 
@@ -612,7 +612,7 @@ function hostProfileCompatibility(status: HostStatus, required: readonly string[
       ? ["runtime_cache_isolation"]
       : []),
     ...(!status.env_keys.includes(EXTENSION_PROTOCOL_MARKER) ? ["olw_extension_protocol_2"] : []),
-    ...(!status.env_keys.includes(WORKER_ADMISSION_MARKER) ? ["worker_admission_1"] : []),
+    ...(!status.env_keys.includes(WORKER_ADMISSION_MARKER) ? ["worker_admission_2"] : []),
     ...(core !== undefined && core.session_runtime !== "worker" ? ["worker_session_runtime"] : []),
   ];
   return {
@@ -719,7 +719,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
       OMO_NATIVE: "1",
       OMO_INITIATIVE_HOST: "1",
       OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
-      OMO_INITIATIVE_WORKER_ADMISSION_1: "1",
+      OMO_INITIATIVE_WORKER_ADMISSION_2: "1",
       OMO_INITIATIVE_ROOT: root,
       OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
       [RUNTIME_CACHE_MARKER]: "1",

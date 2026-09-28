@@ -26,6 +26,7 @@ import {
 } from "../core/schema";
 import { publishReadiness } from "../readiness";
 import { type GoalPause, goalPauseSchema } from "./goal-pause";
+import { ManagerNoticeDeliveryError, type ManagerNoticeReply } from "./manager-notice-client";
 import { publishOperationalNotice, runtimeFailureClaim } from "./operational";
 
 export interface SessionContextPort {
@@ -67,7 +68,7 @@ export interface RuntimePort {
   sendManagerNotice(
     target: Binding,
     request: { readonly messageId: string; readonly nativeKey: string },
-  ): Promise<Result<DeliveryRecord>>;
+  ): Promise<ManagerNoticeReply>;
   onTurnEnd(handler: (message: unknown, ctx: SessionContextPort) => Promise<void>): void;
   notifyOperational(message: string, ctx: SessionContextPort): void;
   onResourcesDiscover(handler: () => { readonly skillPaths: string[] }): void;
@@ -631,65 +632,109 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
 
   const admittedManagerAttempts = new Set<string>();
   port.handleRpc("omo.initiative.admit-manager-notice", async (raw) => {
+    const admissionFailed = (cause: {
+      readonly code: string;
+      readonly message: string;
+      readonly details?: unknown;
+    }): ManagerNoticeReply => ({ phase: "admission_failed", cause });
     const request = z
       .strictObject({ messageId: z.string().min(1), nativeKey: z.string().min(1) })
       .safeParse(raw);
-    if (!request.success) return failure("invalid_input", "Invalid manager admission request");
+    if (!request.success)
+      return admissionFailed({
+        code: "invalid_input",
+        message: "Invalid manager admission request",
+      });
     const key = request.data.nativeKey;
     if (admittedManagerAttempts.has(key))
-      return failure("delivery_in_progress", "Manager attempt is already being admitted");
+      return {
+        phase: "delivery_result",
+        result: failure("delivery_in_progress", "Manager attempt is already being admitted"),
+      } satisfies ManagerNoticeReply;
     // Reserve before the first await. Terminal state lives in the registry; this
     // set holds only in-flight RPCs, not every historical notice for the session.
     admittedManagerAttempts.add(key);
     try {
       const ctx = await contextWhenStarted();
       if (ctx === undefined)
-        return failure("session_unavailable", "Manager session has not started");
+        return admissionFailed({
+          code: "session_unavailable",
+          message: "Manager session has not started",
+        });
       const record = await worker(
         "lookup-delivery",
         { messageId: request.data.messageId },
         resultSchema(deliveryRecordSchema),
       );
-      if (!record.ok) return record;
+      if (!record.ok) return admissionFailed(record.error);
       const envelope = record.value.envelope;
       if (
         (record.value.attempts?.at(-1)?.nativeKey ?? envelope.id) !== key ||
         record.value.state !== "sending"
       )
-        return failure("stale_attempt", "Manager admission requires the current sending attempt");
+        return {
+          phase: "delivery_result",
+          result: failure(
+            "stale_attempt",
+            "Manager admission requires the current sending attempt",
+          ),
+        } satisfies ManagerNoticeReply;
       if (
         envelope.fromBindingId === null ||
         envelope.toBindingId === null ||
         (envelope.kind !== "report" && envelope.kind !== "question")
       )
-        return failure("route_denied", "Only claimed manager notices use this admission path");
+        return admissionFailed({
+          code: "route_denied",
+          message: "Only claimed manager notices use this admission path",
+        });
       const target = await lookup(ctx.sessionManager.getSessionId());
-      if (!target.ok) return target;
+      if (!target.ok) return admissionFailed(target.error);
       if (
         target.value.assignment.role !== "manager" ||
         target.value.id !== envelope.toBindingId ||
         target.value.cwd !== ctx.cwd ||
         target.value.sessionPath !== ctx.sessionManager.getSessionFile()
       )
-        return failure("identity_mismatch", "Manager admission addressed a different runtime");
+        return admissionFailed({
+          code: "identity_mismatch",
+          message: "Manager admission addressed a different runtime",
+        });
       const sender = await worker(
         "lookup-binding",
         { bindingId: envelope.fromBindingId },
         resultSchema(bindingSchema),
       );
-      if (!sender.ok) return sender;
-      return await deliver(
-        {
-          disposition: "new",
-          record: record.value,
-          target: target.value,
-          noticeSender: sender.value,
-          nativeKey: key,
-        },
-        ctx,
-        false,
-        true,
-      );
+      if (!sender.ok) return admissionFailed(sender.error);
+      let result: Result<DeliveryRecord>;
+      try {
+        result = await deliver(
+          {
+            disposition: "new",
+            record: record.value,
+            target: target.value,
+            noticeSender: sender.value,
+            nativeKey: key,
+          },
+          ctx,
+          false,
+          true,
+        );
+      } catch (cause) {
+        result = failure(
+          "delivery_uncertain",
+          `Manager delivery did not return: ${messageOf(cause)}`,
+        );
+      }
+      return {
+        phase: "delivery_result",
+        result,
+      } satisfies ManagerNoticeReply;
+    } catch (cause) {
+      return admissionFailed({
+        code: "admission_failed",
+        message: `Manager admission did not complete: ${messageOf(cause)}`,
+      });
     } finally {
       admittedManagerAttempts.delete(key);
     }
@@ -706,8 +751,56 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     const nativeKey = claim.nativeKey ?? envelope.id;
     if (claim.noticeSender !== undefined && !localManager) {
       try {
-        return await port.sendManagerNotice(claim.target, { messageId: envelope.id, nativeKey });
+        const reply = await port.sendManagerNotice(claim.target, {
+          messageId: envelope.id,
+          nativeKey,
+        });
+        if (reply.phase === "admission_failed") {
+          return worker(
+            "finish",
+            {
+              messageId: envelope.id,
+              nativeKey,
+              receipt: {
+                kind: "error",
+                error: {
+                  code: "turn_conflict_before_delivery",
+                  details: "idle_admission_failed",
+                  message: `Manager admission rejected before delivery: ${reply.cause.message}`,
+                  next_action: "Retry this same ID after the manager is available.",
+                },
+              },
+            },
+            resultSchema(deliveryRecordSchema),
+          );
+        }
+        const result = reply.result;
+        if (result.ok) return result;
+        return uncertain(
+          envelope.id,
+          `Manager delivery outcome is ambiguous: ${result.error.code}: ${result.error.message}`,
+          nativeKey,
+        );
       } catch (cause) {
+        if (cause instanceof ManagerNoticeDeliveryError && cause.phase === "before_request") {
+          return worker(
+            "finish",
+            {
+              messageId: envelope.id,
+              nativeKey,
+              receipt: {
+                kind: "error",
+                error: {
+                  code: "turn_conflict_before_delivery",
+                  details: "idle_admission_failed",
+                  message: `Manager admission failed before delivery: ${cause.message}`,
+                  next_action: "Retry this same ID after the manager is available.",
+                },
+              },
+            },
+            resultSchema(deliveryRecordSchema),
+          );
+        }
         return uncertain(
           envelope.id,
           `Manager admission did not return: ${messageOf(cause)}`,

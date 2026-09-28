@@ -15,6 +15,7 @@ import type {
 import { modelForLaunch, modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot } from "../../src/herdr";
+import { HostCapacityError } from "../../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
 import { type NativeSession, NativeSessionAbsentError } from "../../src/transport";
@@ -426,6 +427,40 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
     registry: withRegistry,
   };
 }
+
+test("successor capacity race retires only its unstarted attempt before TUI dispatch", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setVisibility(false);
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => {
+      throw new HostCapacityError(20);
+    },
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "host_session_capacity" } });
+  expect(w.launches()).toBe(0);
+  expect(w.sends()).toBe(0);
+  expect(w.registry((registry) => value(registry.get(w.execute.id)))).toMatchObject({
+    launchState: "closed",
+    initialization: { state: "pending" },
+  });
+  expect(w.registry((registry) => value(registry.stageOf(w.execute.id)))).toBeNull();
+});
+
+test("capacity during initialized successor reattachment preserves accepted work and typed refusal", async () => {
+  const w = await world();
+  w.setVisibility(false);
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => {
+      throw new HostCapacityError(20);
+    },
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "host_session_capacity" } });
+  expect(w.launches()).toBe(0);
+  expect(w.registry((registry) => value(registry.get(w.execute.id)))).toMatchObject({
+    initialization: { state: "accepted" },
+  });
+  expect(w.registry((registry) => value(registry.stageOf(w.execute.id)))).not.toBeNull();
+});
 
 test("stage start refuses an uncertain local-only successor without changing it", async () => {
   const w = await world({ executeInitialized: false, closeAwareHerdr: true });

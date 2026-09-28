@@ -256,7 +256,7 @@ test("rejects a worker host missing target-side admission capability", async () 
   expect(result).toMatchObject({
     name: "HostProfileMismatchError",
     details: {
-      missingCapabilities: ["worker_admission_1"],
+      missingCapabilities: ["worker_admission_2"],
       recovery: { automatic: false },
     },
   });
@@ -270,6 +270,21 @@ test("writes a launch spec accepted by Senpi's real loader", async () => {
   expect(loaded.policy.coldStart).toBe("persistent");
   expect(loaded.env[EXTENSION_PROTOCOL_MARKER]).toBe("1");
   expect(loaded.env[WORKER_ADMISSION_MARKER]).toBe("1");
+});
+
+test("phase-tagged admission refuses the previous worker RPC generation", async () => {
+  const { root, status } = await fixture();
+  const old = {
+    ...status,
+    env_keys: [
+      ...status.env_keys.filter((key) => key !== WORKER_ADMISSION_MARKER),
+      "OMO_INITIATIVE_WORKER_ADMISSION_1",
+    ],
+  };
+  await expect(createHostProfile(root, old)).rejects.toMatchObject({
+    name: "HostProfileMismatchError",
+    details: { missingCapabilities: ["worker_admission_2"] },
+  });
 });
 
 test("rejects the old in-process host for normal automatic handoff when idle", async () => {
@@ -323,7 +338,7 @@ test("rejects a reused host without cache isolation and supplies scoped handoff 
       missingCapabilities: [
         "runtime_cache_isolation",
         "olw_extension_protocol_2",
-        "worker_admission_1",
+        "worker_admission_2",
       ],
       recovery: {
         automatic: false,

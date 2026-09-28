@@ -190,18 +190,29 @@ TUI still owns live state; idle is not close. Native safe eviction keeps its exi
 30-minute window and does not evict session-owned background work.
 
 The native cap is 20 sessions, including workers opening or closing. New role
-creation checks capacity before launching its pane and returns `host_session_capacity`
+creation opens and holds the exact native session before launching its TUI and returns `host_session_capacity`
 with `count`, `limit`, and `action: "close_an_existing_role"`. Close an unused role
 and wait for teardown before retrying creation. Attaching an existing session is
-allowed at capacity. A raced native open returns `open_failed: too_many_sessions`.
+allowed at capacity. If another open takes the last slot after the initial count
+check, the held-open admission maps native `open_failed: too_many_sessions` to the
+same terminal capacity result before any TUI can fall back locally. Its unstarted
+binding is closed; a never-dispatched successor edge is retired. An initialized
+manager keeps its identity when reattachment is refused. The admission attachment
+is released after launch verification, leaving the TUI's attachment in place.
 Never retry accepted or uncertain delivery to work around capacity.
 
 Manager notices are admitted in the manager's own isolate. The receiving RPC reads
 the claimed envelope and native key from the registry, reauthorizes the original
 sender, and synchronously checks its own live `isIdle()` before native self-delivery.
 It uses neither shared `globalThis` nor a copied idle flag. Existing in-process hosts
-and workers without `OMO_INITIATIVE_WORKER_ADMISSION_1` require the normal handoff
+and workers without `OMO_INITIATIVE_WORKER_ADMISSION_2` require the normal handoff
 below; the socket, durable bindings, receipt rules and persistent policy stay intact.
+
+Admission replies explicitly distinguish failure before native execution from a
+delivery result. A missing manager, refused attachment, or rejected admission is
+finished as a proven pre-delivery rejection and can retry the same logical ID with
+the same payload. A lost admission reply, concurrent/stale attempt, or failure to
+store a receipt after native execution remains uncertain and must not be resent.
 
 Worker isolation is not an RSS limit or process-fatal OOM containment: all isolates
 share one Bun PID, and a live runaway can exhaust it. Reproduce the lifecycle fix

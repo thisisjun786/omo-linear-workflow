@@ -10,15 +10,21 @@ import { z } from "zod";
 import type { Binding, Designation, Envelope, Result, ScopeSnapshot } from "../src/core/contracts";
 import { deliveryRecordSchema, resultSchema, runtimeIdentitySchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
+import type { HerdrClient } from "../src/herdr";
 import {
   assertHostCapacity,
   HostCapacityError,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
+import { Orchestrator } from "../src/orchestrator";
+import { acquireLaunchSession } from "../src/transport";
 
 const root = resolve(import.meta.dir, "..");
 const runCapacity = process.argv.slice(2).includes("--capacity");
-const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--capacity");
+const runRace = process.argv.slice(2).includes("--capacity-race");
+const unknownArgs = process.argv
+  .slice(2)
+  .filter((arg) => arg !== "--capacity" && arg !== "--capacity-race");
 if (unknownArgs.length > 0) throw new Error(`Unknown arguments: ${unknownArgs.join(" ")}`);
 
 const MODEL = "anthropic/claude-opus-5-5";
@@ -363,7 +369,7 @@ async function main(): Promise<void> {
       OMO_NATIVE: "1",
       OMO_INITIATIVE_HOST: "1",
       OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
-      OMO_INITIATIVE_WORKER_ADMISSION_1: "1",
+      OMO_INITIATIVE_WORKER_ADMISSION_2: "1",
       OMO_INITIATIVE_ROOT: scratch,
       OMO_RPC_SOCKET: socket,
       ...runtimeCacheEnvironment(scratch),
@@ -419,7 +425,7 @@ async function main(): Promise<void> {
     owned.push(managerOpen);
     const parentOpen = await openRetained(socket, parentPath, scratch);
     owned.push(parentOpen);
-    const managerClient = managerOpen.client;
+    let managerClient = managerOpen.client;
     const parentClient = parentOpen.client;
     await Promise.all([idleNowOrSettled(managerClient), idleNowOrSettled(parentClient)]);
     const [managerIdentityRaw, parentIdentityRaw] = await Promise.all([
@@ -486,10 +492,140 @@ async function main(): Promise<void> {
       transcriptOccurrences: 1,
     });
 
-    if (runCapacity) {
-      for (let index = owned.length; index < CAPACITY; index++) {
+    // A proven pre-request failure must settle the claim, then allow a same-ID
+    // successor attempt when the exact manager becomes available again.
+    await managerClient.closeSession(managerOpen.sessionId);
+    await managerClient.stop();
+    owned.splice(owned.indexOf(managerOpen), 1);
+    const retryMessage = envelope(
+      fixture.parent,
+      fixture.manager,
+      fixture.digest,
+      "qa-admission-retry",
+    );
+    const rejected = value(
+      resultSchema(deliveryRecordSchema).parse(
+        await parentClient.requestExtension("omo.initiative.send", retryMessage),
+      ),
+    );
+    assert.equal(rejected.state, "rejected");
+    const reopened = await openRetained(socket, managerPath, scratch);
+    owned.push(reopened);
+    managerClient = reopened.client;
+    const retried = value(
+      resultSchema(deliveryRecordSchema).parse(
+        await parentClient.requestExtension("omo.initiative.send", retryMessage),
+      ),
+    );
+    assert.equal(retried.state, "accepted");
+    assert.equal(retried.attempts?.length, 2);
+    assert.equal(await occurrence(managerClient, retryMessage.id), 1);
+    assert.deepEqual(await parentClient.requestExtension("omo.initiative.send", retryMessage), {
+      ok: true,
+      value: retried,
+    });
+    assert.equal(await occurrence(managerClient, retryMessage.id), 1);
+    receipt("admission-retry", {
+      first: rejected.state,
+      retry: retried.state,
+      attempts: retried.attempts?.length,
+      transcriptOccurrences: 1,
+    });
+
+    if (runCapacity || runRace) {
+      for (let index = owned.length; index < (runRace ? CAPACITY - 1 : CAPACITY); index++) {
         const path = await writeSession(sessions, scratch, `qa-capacity-${index}`);
         owned.push(await openRetained(socket, path, scratch));
+      }
+      if (runRace) {
+        let launches = 0;
+        let removedWorkspace = false;
+        const unexpected = async (): Promise<never> => {
+          throw new Error("Unexpected QA control-plane operation");
+        };
+        // Only the workspace boundary is a fixture. Capacity observation and
+        // slot acquisition use the real disposable native host.
+        const herdr: HerdrClient = {
+          createWorkspace: async (cwd) => ({
+            workspaceId: "race-workspace",
+            rootPaneId: "race-pane",
+            cwd,
+          }),
+          closeWorkspace: async (id) => {
+            assert.equal(id, "race-workspace");
+            removedWorkspace = true;
+          },
+          run: async () => {
+            launches++;
+            throw new Error("Refused admission must not launch a local TUI");
+          },
+          subscribe: async () => () => {},
+          close() {},
+          createWorktree: unexpected,
+          createTab: unexpected,
+          renameTab: unexpected,
+          focusWorkspace: unexpected,
+          focusPane: unexpected,
+          paneContainsProcess: unexpected,
+          sendKeys: unexpected,
+          snapshot: unexpected,
+          removeWorktree: unexpected,
+        };
+        const scope: ScopeSnapshot = {
+          version: 1,
+          source: "fixture",
+          initiative: { id: "race-initiative", url: "linear://race", revision: "1" },
+          projects: [],
+          decisionRefs: [],
+        };
+        const registry = openRegistry(join(state, "registry.sqlite"));
+        let digest: string;
+        try {
+          digest = value(registry.importScope(scope)).digest;
+        } finally {
+          registry.close();
+        }
+        const orchestrator = new Orchestrator(scratch, join(scratch, "unused-herdr.sock"), {
+          openRegistry,
+          createHerdrClient: () => herdr,
+          resolveHerdrArtifact: async () => ({ artifactDir: scratch }),
+          ensureHost: async () => {},
+          checkHostProfile: async () => {},
+          assertHostCapacity: async (path, sessionPath) => {
+            await assertHostCapacity(path, sessionPath);
+            receipt("race-precheck", { openSessions: owned.length, passed: true });
+            const competing = await writeSession(sessions, scratch, "race-last-slot");
+            owned.push(await openRetained(socket, competing, scratch));
+          },
+          acquireLaunchSession,
+          attachBinding: unexpected,
+          terminateBinding: unexpected,
+          prompt: unexpected,
+          gitTip: unexpected,
+          now: () => new Date().toISOString(),
+          uuid: () => crypto.randomUUID(),
+        });
+        const result = await orchestrator.createSupervisor({
+          initiativeId: "race-initiative",
+          scopeDigest: digest,
+          designationId: "race-designation",
+          execute: true,
+          fixture: true,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) throw new Error("Race unexpectedly launched");
+        assert.equal(result.error.code, "host_session_capacity");
+        assert.deepEqual(result.error.details, {
+          count: 20,
+          limit: 20,
+          action: "close_an_existing_role",
+        });
+        assert.equal(launches, 0);
+        assert.equal(removedWorkspace, true);
+        const binding = value(orchestrator.status({ initiativeId: "race-initiative" }))[0];
+        assert.equal(binding?.launchState, "closed");
+        assert.equal(binding?.initialization.state, "pending");
+        receipt("race-launch", { result, tuiLaunches: launches, removedWorkspace, binding });
       }
       const overflowPath = await writeSession(sessions, scratch, "qa-capacity-overflow");
       const capacity = await assertHostCapacity(socket, overflowPath).then(
@@ -538,13 +674,43 @@ async function main(): Promise<void> {
         refusal: refused,
         attachAtCap: { sessionId: attached.sessionId, attached: attached.attached },
       });
+      if (runRace) {
+        const competing = owned.pop();
+        assert.ok(competing);
+        await competing.client.closeSession(competing.sessionId);
+        await competing.client.stop();
+        const heldPath = await writeSession(sessions, scratch, "qa-held-launch");
+        const heldBinding = {
+          ...fixture.manager,
+          durableSessionId: "qa-held-launch",
+          sessionPath: heldPath,
+        };
+        const held = await acquireLaunchSession(heldBinding);
+        const tui = new RpcClient({ socketPath: socket });
+        try {
+          await tui.start();
+          const attached = await tui.openSession({ sessionPath: heldPath, cwd: scratch });
+          assert.equal(attached.attached, true);
+          await held.release();
+          assert.equal((await tui.getState()).sessionId, "qa-held-launch");
+          owned.push({ client: tui, sessionId: attached.sessionId });
+          receipt("held-launch", { attachedAtCapacity: true, aliveAfterAdmissionRelease: true });
+        } catch (cause) {
+          await tui.stop();
+          throw cause;
+        }
+      }
     } else {
       receipt("capacity", {
         skipped: true,
         invocation: "bun scripts/qa-manager-idle.ts --capacity",
       });
     }
-    receipt("result", { status: "PASS", capacity: runCapacity ? "verified" : "skipped" });
+    receipt("result", {
+      status: "PASS",
+      capacity: runCapacity || runRace ? "verified" : "skipped",
+      race: runRace ? "verified" : "skipped",
+    });
   } catch (cause) {
     failure = cause;
     receipt("result", { status: "FAIL", error: cause instanceof Error ? cause.stack : cause });

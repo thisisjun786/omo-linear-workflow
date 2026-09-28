@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
+import { managerNoticeReplySchema } from "../src/extension/manager-notice-client";
 import { registerInitiativeRuntime } from "../src/extension/runtime";
 import { context, envelope, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
 
@@ -37,7 +38,9 @@ test.each(["idle", "busy", "race"] as const)(
         };
         Object.assign(sender, {
           sendManagerNotice: async (_target: unknown, request: unknown) =>
-            recipient.rpc("omo.initiative.admit-manager-notice")(request),
+            managerNoticeReplySchema.parse(
+              await recipient.rpc("omo.initiative.admit-manager-notice")(request),
+            ),
         });
         registerInitiativeRuntime(sender, { root, hostRuntime: true });
         registerInitiativeRuntime(recipient, { root, hostRuntime: true });
@@ -92,8 +95,8 @@ test("recipient rejects wrong keys and concurrent admission without another nati
       value(registry.claim(parent.durableSessionId, message));
       const admit = recipient.rpc("omo.initiative.admit-manager-notice");
       expect(await admit({ messageId: message.id, nativeKey: "wrong" })).toMatchObject({
-        ok: false,
-        error: { code: "stale_attempt" },
+        phase: "delivery_result",
+        result: { ok: false, error: { code: "stale_attempt" } },
       });
       const pending = admit({ messageId: message.id, nativeKey: message.id });
       const timer = setTimeout(
@@ -106,18 +109,52 @@ test("recipient rejects wrong keys and concurrent admission without another nati
         clearTimeout(timer);
       }
       expect(await admit({ messageId: message.id, nativeKey: message.id })).toMatchObject({
-        ok: false,
-        error: { code: "delivery_in_progress" },
+        phase: "delivery_result",
+        result: { ok: false, error: { code: "delivery_in_progress" } },
       });
       release.resolve();
-      expect(value(resultSchema(deliveryRecordSchema).parse(await pending)).state).toBe("accepted");
+      const completed = managerNoticeReplySchema.parse(await pending);
+      if (completed.phase !== "delivery_result")
+        throw new Error(`Unexpected manager admission phase: ${completed.phase}`);
+      expect(value(resultSchema(deliveryRecordSchema).parse(completed.result)).state).toBe(
+        "accepted",
+      );
       expect(await admit({ messageId: message.id, nativeKey: message.id })).toMatchObject({
-        ok: false,
-        error: { code: "stale_attempt" },
+        phase: "delivery_result",
+        result: { ok: false, error: { code: "stale_attempt" } },
       });
       expect(recipient.executeCount).toBe(1);
     } finally {
       release.resolve();
+      registry.close();
+    }
+  }));
+
+test("recipient proves a thrown pre-native worker failure as admission_failed", async () =>
+  fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const recipient = new Harness();
+      registerInitiativeRuntime(recipient, { root, hostRuntime: true });
+      await recipient.start()(context(manager));
+      recipient.exec = async () => {
+        throw new Error("registry worker transport failed");
+      };
+      const message = envelope(parent, manager, digest, "pre-native-worker-throw", "report");
+      value(registry.claim(parent.durableSessionId, message));
+
+      expect(
+        await recipient.rpc("omo.initiative.admit-manager-notice")({
+          messageId: message.id,
+          nativeKey: message.id,
+        }),
+      ).toMatchObject({
+        phase: "admission_failed",
+        cause: { code: "admission_failed", message: expect.stringContaining("worker transport") },
+      });
+      expect(recipient.executeCount).toBe(0);
+    } finally {
       registry.close();
     }
   }));

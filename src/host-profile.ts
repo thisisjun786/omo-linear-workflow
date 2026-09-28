@@ -359,7 +359,8 @@ export async function readHostStatusReadOnly(
   return hostStatusSchema.parse({
     reachable: protocol !== undefined,
     socket,
-    generation: protocol?.generation ?? registration?.generation ?? null,
+    generation:
+      protocol === undefined ? null : (protocol.generation ?? registration?.generation ?? null),
     launchProfile: protocol?.launch_profile ?? null,
     sessions: {
       total: 0,

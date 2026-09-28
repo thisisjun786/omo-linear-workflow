@@ -12,6 +12,7 @@ import {
   inspectHostHealth,
   observeEmptyHostSessions,
   RUNTIME_CACHE_MARKER,
+  readHostStatusReadOnly,
   resolveOmoAgentDir,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
@@ -19,6 +20,31 @@ import {
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+test("an unreachable host reports no generation even when its registration remains", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-dead-host-"));
+  roots.push(root);
+  const socket = join(root, "absent.sock");
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(socket));
+  await mkdir(join(daemonDir, "generations/dead"), { recursive: true });
+  await writeFile(
+    join(daemonDir, "host.pid"),
+    JSON.stringify({ layout: 2, instance_id: "dead", generation_dir: "generations/dead" }),
+  );
+  await writeFile(
+    join(daemonDir, "generations/dead/host.pid"),
+    JSON.stringify({ pid: 2_147_483_647, processStartTime: "1", generation: 7 }),
+  );
+
+  const status = await readHostStatusReadOnly(socket, agentDir);
+
+  expect(status.reachable).toBe(false);
+  expect(status.generation).toBeNull();
 });
 
 async function fixture() {

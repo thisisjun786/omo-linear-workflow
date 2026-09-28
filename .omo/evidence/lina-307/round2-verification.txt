@@ -1,0 +1,48 @@
+PR19 round2, base bb93fbc, worktree /home/jun/code/olw-wt/lina-307-host-memory.
+
+NORMAL FULL SUITE
+bun test
+738 pass, 0 fail
+Ran 738 tests across 73 files. [174.74s]
+Exit0. No skipped/disabled/weakened tests added.
+
+HERDR-UNSET FULL SUITE
+env -u HERDR_ENV HERDR_SOCKET_PATH=/tmp/olw-lina307-r2-no-socket bun test
+738 pass, 0 fail
+Ran 738 tests across 73 files. [107.86s]
+Exit0.
+
+STATIC / BUILD / RELEASE / SMOKE
+bun run typecheck && bun run lint && bun run build && bun run release:check
+&& bun test tests/install.test.ts && bun dist/cli.js --help
+Exit0. tsc clean; Biome checked173 files, errors0/warnings0 (375 information
+diagnostics not suppressed); build completed; release check version0.2.0/v0.2.0.
+Install smoke5 pass/0 fail, real pnpm+build+quoted-path launcher, 2.46s.
+Built CLI help returned usage and command map.
+
+LSP
+src49, tests50 capped, tests/integration3, tests/runtime4, tests/transport1,
+scripts40: zero errors in each directory scan.
+
+REAL SURFACE
+bun scripts/qa-manager-idle.ts --capacity-race
+Two successful runs, zero failing race attempts. Final run uses integrated
+phase-tagged admission. guard19 -> competing20 -> actual open refusal before TUI
+launch -> host_session_capacity count20/limit20/action, closed unstarted binding.
+Held-slot success path attaches at capacity and survives hold release.
+Manager absent -> rejected -> same-ID retry after reopen -> accepted, attempts2,
+transcript delivery1. Existing idle/busy/replay still pass. See appended qa.md.
+
+HYGIENE / SELF REVIEW
+No changes to package.json, pnpm-lock.yaml, patches or installed dependencies.
+No bun.lock. No live root or live socket use in this round. No global config edits.
+All QA roots/PIDs/sockets removed. No readonly status/doctor session-list mutations.
+No accepted/uncertain resend; receiver phase proof, native keys and registry state
+retain exact-once policy. Scope remains worker lifecycle follow-up, no sharding.
+Reply drafts exist in pr19-replies.md and were not posted. No push.
+One new commit required; no amend/rebase.
+
+Sibling review: round2-sibling-audit.md. Red evidence: round2-capacity-red.txt and
+round2-manager-red.txt. Initial manager RED accidentally included a live-checkout
+test file in its command glob; it ran fixture tests only, did not edit that tree
+or connect to any live host. Subsequent checks use explicit worktree CWD/paths.

@@ -1,0 +1,46 @@
+bun test v1.4.0 (34cbb9a40)
+
+code/omo-linear-workflow/tests/manager-notices.test.ts:
+(pass) reports defaults to posted user inbox; --all explicitly includes manager delivery states [356.22ms]
+(pass) manager report carries authorized sender data through a failed lookup boundary and same-ID replay sends once [685.36ms]
+(pass) manager question carries authorized sender data through a failed lookup boundary and same-ID replay sends once [757.51ms]
+(pass) manager-bound report retries the same ID after authorization fails before native delivery [932.97ms]
+(pass) manager-bound question retries the same ID after authorization fails before native delivery [914.58ms]
+(pass) parent-bound report retries the same ID after authorization fails before native delivery [1041.71ms]
+(pass) parent-bound question retries the same ID after authorization fails before native delivery [1044.02ms]
+(pass) manager report waits for idle, sends one-line notice and preserves its envelope [698.11ms]
+(pass) manager question waits for idle, sends one-line notice and preserves its envelope [672.20ms]
+(pass) manager admission rechecks synchronous idle state and waits for the next event without sending [708.53ms]
+(pass) preflight idle rejection remains proven pre-delivery even when executeTool throws [759.99ms]
+(pass) a failure after native execution remains uncertain and never resends [704.23ms]
+(pass) manager idle rejection permits same-ID retry; uncertain never resends [838.00ms]
+
+code/olw-wt/lina-307-host-memory/tests/manager-notice-client.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+SyntaxError: Export named 'ManagerNoticeDeliveryError' not found in module '/home/jun/code/olw-wt/lina-307-host-memory/src/extension/manager-notice-client.ts'.
+-------------------------------
+
+
+code/olw-wt/lina-307-host-memory/tests/manager-notices.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+SyntaxError: Export named 'ManagerNoticeDeliveryError' not found in module '/home/jun/code/olw-wt/lina-307-host-memory/src/extension/manager-notice-client.ts'.
+-------------------------------
+
+
+code/olw-wt/lina-307-host-memory/tests/manager-isolation.test.ts:
+(pass) manager owns admission without shared contexts: idle [952.62ms]
+(pass) manager owns admission without shared contexts: busy [791.45ms]
+(pass) manager owns admission without shared contexts: race [882.67ms]
+(pass) recipient rejects wrong keys and concurrent admission without another native call [877.36ms]
+
+ 17 pass
+ 2 fail
+ 2 errors
+ 117 expect() calls
+Ran 19 tests across 4 files. [29.89s]
+
+Command exited with code 1

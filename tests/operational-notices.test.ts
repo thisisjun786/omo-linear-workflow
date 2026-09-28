@@ -197,6 +197,9 @@ class Harness implements RuntimePort {
   isIdle() {
     return true;
   }
+  async sendManagerNotice(): Promise<never> {
+    throw new Error("This fixture has a supervisor, not a manager");
+  }
   onToolCall(handler: Parameters<RuntimePort["onToolCall"]>[0]) {
     this.toolCall = handler;
   }

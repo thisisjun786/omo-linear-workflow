@@ -77,7 +77,7 @@ Here-mode requires the effective socket to match `HERDR_SOCKET_PATH` and Herdr's
 
 `manage` without `--here` keeps the separate-workspace launch and new-tab reattachment behavior. Neither path adopts an unrelated OMO session. Parents created while the manager is ready link to it unless `parent create --no-manager` is passed. Both entries run an update check and put it in the manager brief. The manager remains a normal assistant outside OLW message handling; management is a role, not a launcher identity.
 
-Parent reports and questions wait for event-driven idle admission before reaching the manager. A compact one-line `[OLW]` notice precedes the unchanged envelope. `olw reports --project ID` defaults to posted user-inbox records only. Read full reports including manager-addressed records in any delivery state with `olw reports --all --project ID`, and questions with `olw questions --project ID`. After admission and asynchronous tool authorization, OLW synchronously checks the target's live shared-host `isIdle()` before releasing `thread_send` with `auto`. If another turn started, it waits for the next idle event within the same 25-second admission budget; it does not use the native `follow_up` polling mailbox. Accepted limitation: a turn that starts in the instant between the idle check and native acceptance may receive the one-line notice mid-turn; delivery is still exactly once. The installed native API has no idle-only acceptance primitive; OLW keeps a single native key and never resends accepted or uncertain delivery. A bounded idle timeout is a proven pre-delivery rejection, allowing the same ID/payload to retry; accepted and uncertain attempts are never resent.
+Parent reports and questions wait for event-driven idle admission before reaching the manager. A compact one-line `[OLW]` notice precedes the unchanged envelope. `olw reports --project ID` defaults to posted user-inbox records only. Read full reports including manager-addressed records in any delivery state with `olw reports --all --project ID`, and questions with `olw questions --project ID`. After admission and asynchronous tool authorization, the manager's own isolate synchronously checks its live `isIdle()` before releasing `thread_send` with `auto`. If another turn started, it waits for the next idle event within the same 25-second admission budget; it does not use the native `follow_up` polling mailbox. Accepted limitation: a turn that starts in the instant between the idle check and native acceptance may receive the one-line notice mid-turn; delivery is still exactly once. The installed native API has no idle-only acceptance primitive; OLW keeps a single native key and never resends accepted or uncertain delivery. A bounded idle timeout is a proven pre-delivery rejection, allowing the same ID/payload to retry; accepted and uncertain attempts are never resent.
 
 ```sh
 bun run cli -- --root "$PWD" manage --json
@@ -182,6 +182,56 @@ and sessions. After handoff, OLW still requires a reachable successor with the m
 profile before manager entry continues.
 
 ### Shared-host health and crash recovery
+
+OLW launches the shared socket host with `session_runtime: "worker"`. Each session
+owns an isolate, so closing or safely parking it releases extension-created servers
+and retained allocations even when the extension omitted cleanup. An attached idle
+TUI still owns live state; idle is not close. Native safe eviction keeps its existing
+30-minute window and does not evict session-owned background work.
+
+The native cap is 20 sessions, including workers opening or closing. New role
+creation opens and holds the exact native session before launching its TUI and returns `host_session_capacity`
+with `count`, `limit`, and `action: "close_an_existing_role"`. Close an unused role
+and wait for teardown before retrying creation. Attaching an existing session is
+allowed at capacity. If another open takes the last slot after the initial count
+check, the held-open admission maps native `open_failed: too_many_sessions` to the
+same terminal capacity result before any TUI can fall back locally. Its unstarted
+binding is closed; a never-dispatched successor edge is retired. An initialized
+manager keeps its identity when reattachment is refused. Before identity activation,
+OLW requires a nonce-bound readiness receipt from the launched TUI, verifies its
+PID/starttime and pane ownership, and checks that PID's live Unix peer to the exact
+host socket. Aggregate attachments are supporting evidence only: at least two
+before hold release and at least one afterward, with TUI peer proof repeated.
+This Linux check requires `/proc` and `ss` (iproute2). The TUI extension must not
+open an independent persistent connection to that socket during startup.
+The event/deadline check adds no probe attachment. A proven local fallback is stopped and
+returns `runtime_unavailable` with reason `tui_local_fallback` (or the capacity
+error when full); only its attempt-owned resources and pending binding are closed.
+An observation failure instead returns `runtime_unavailable` with reason
+`attachment_unverified`, marks the binding uncertain and preserves its TUI, pane,
+tab and workspace for reconciliation. Missing/stale nonce or unavailable diagnostics
+are observation failures. Events and deadline checks received during an in-flight
+observation queue a fresh check; a stale pre-deadline result cannot reject a TUI.
+Never retry accepted or uncertain delivery to work around capacity.
+
+Manager notices are admitted in the manager's own isolate. The receiving RPC reads
+the claimed envelope and native key from the registry, reauthorizes the original
+sender, and synchronously checks its own live `isIdle()` before native self-delivery.
+It uses neither shared `globalThis` nor a copied idle flag. Existing in-process hosts
+and workers without `OMO_INITIATIVE_WORKER_ADMISSION_2` require the normal handoff
+below; the socket, durable bindings, receipt rules and persistent policy stay intact.
+
+Admission replies explicitly distinguish failure before native execution from a
+delivery result. A missing manager, refused attachment, or rejected admission is
+finished as a proven pre-delivery rejection and can retry the same logical ID with
+the same payload. A lost admission reply, concurrent/stale attempt, or failure to
+store a receipt after native execution remains uncertain and must not be resent.
+
+Worker isolation is not an RSS limit or process-fatal OOM containment: all isolates
+share one Bun PID, and a live runaway can exhaust it. Reproduce the lifecycle fix
+with `QA_MEMORY_LAYER=extension bun scripts/qa-host-memory.ts 10 64`; use
+`bun scripts/qa-host-memory.ts 10 64` for nested eval cleanup. Both print
+PID-attributed RSS/listener samples and cleanup receipts.
 
 `olw doctor --json` performs an on-demand, read-only shared-host inspection; OLW runs no polling daemon. It uses non-mutating RPC probes and reads daemon registration files without invoking Senpi's pruning `host status` command. The `host` object reports the current generation, whether the loaded extensions and environment markers match `omo-host.json`, RSS in MiB, endpoint-specific daemon crashes from the last seven days (at most ten), warnings, and the exact profile handoff argv and scoped environment. Doctor reports `sessions: null`: Senpi 2026.9.27's `list_sessions` reconciles reservation files and is therefore not safe for this read-only command; use `olw status` for per-binding state and an OLW entry attempt for guarded idle-handoff checks. Set `OLW_HOST_RSS_WARNING_MB` to a positive MiB value to change the default 8192 MiB warning threshold. A `SIGKILL` crash is labeled as a likely OOM because Senpi's crash record does not identify the sender; confirm with the kernel journal.
 

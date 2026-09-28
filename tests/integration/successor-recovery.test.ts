@@ -15,9 +15,15 @@ import type {
 import { modelForLaunch, modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot } from "../../src/herdr";
+import { HostCapacityError } from "../../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../../src/orchestrator";
 import { publishReadiness } from "../../src/readiness";
-import { type NativeSession, NativeSessionAbsentError } from "../../src/transport";
+import {
+  type NativeSession,
+  NativeSessionAbsentError,
+  TuiAttachmentUnverifiedError,
+  TuiLocalFallbackError,
+} from "../../src/transport";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -28,7 +34,13 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: boolean } = {}) {
+async function world(
+  options: {
+    executeInitialized?: boolean;
+    closeAwareHerdr?: boolean;
+    unprovisioned?: boolean;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "olw-successor-recovery-"));
   roots.push(root);
   await mkdir(join(root, ".omo/state"), { recursive: true });
@@ -148,8 +160,9 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
       "execute",
     ),
   );
-  const execute =
-    options.executeInitialized === false
+  const execute = options.unprovisioned
+    ? executeReservation
+    : options.executeInitialized === false
       ? await (async () => {
           const model = modelForLaunch("child", "execute");
           const manager = SessionManager.create(root, join(root, ".omo/state/sessions"), {
@@ -216,6 +229,9 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
       throw new Error("unexpected createTab");
     },
     renameTab: async () => {},
+    closeTab: async () => {
+      throw new Error("unexpected closeTab");
+    },
     focusWorkspace: async () => {},
     focusPane: async () => {},
     paneContainsProcess: async () => true,
@@ -426,6 +442,140 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
     registry: withRegistry,
   };
 }
+
+test("successor capacity race retires only its unstarted attempt before TUI dispatch", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setVisibility(false);
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => {
+      throw new HostCapacityError(20);
+    },
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "host_session_capacity" } });
+  expect(w.launches()).toBe(0);
+  expect(w.sends()).toBe(0);
+  expect(w.registry((registry) => value(registry.get(w.execute.id)))).toMatchObject({
+    launchState: "closed",
+    initialization: { state: "pending" },
+  });
+  expect(w.registry((registry) => value(registry.stageOf(w.execute.id)))).toBeNull();
+});
+
+test.each([true, false])(
+  "successor capacity closes only its newly created tab: new=%s",
+  async (unprovisioned) => {
+    const w = await world({ executeInitialized: false, unprovisioned });
+    const closed: string[] = [];
+    w.setCreateTab(async () => ({ tabId: "workspace:new-tab", rootPaneId: "workspace:new-pane" }));
+    Object.assign(w.dependencies.createHerdrClient("/herdr"), {
+      closeTab: async (tabId: string) => {
+        expect(w.registry((registry) => value(registry.get(w.execute.id))).launchState).not.toBe(
+          "closed",
+        );
+        closed.push(tabId);
+      },
+    });
+    Object.assign(w.dependencies, {
+      acquireLaunchSession: async () => {
+        throw new HostCapacityError(20);
+      },
+    });
+    expect(await w.start()).toMatchObject({ ok: false, error: { code: "host_session_capacity" } });
+    expect(closed).toEqual(unprovisioned ? ["workspace:new-tab"] : []);
+    expect(w.launches()).toBe(0);
+  },
+);
+
+test("successor attachment observation failure preserves live TUI and its recovery intent", async () => {
+  const w = await world({ executeInitialized: false, unprovisioned: true });
+  const closed: string[] = [];
+  w.setCreateTab(async () => ({ tabId: "workspace:execute", rootPaneId: "pane-execute" }));
+  Object.assign(w.dependencies.createHerdrClient("/herdr"), {
+    closeTab: async (id: string) => {
+      closed.push(id);
+    },
+  });
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiAttachmentUnverifiedError();
+      },
+      release: async () => {},
+    }),
+  });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "runtime_unavailable", details: { reason: "attachment_unverified" } },
+  });
+  expect(w.quits()).toBe(0);
+  expect(closed).toEqual([]);
+  expect(w.sends()).toBe(0);
+  expect(w.registry((r) => value(r.get(w.execute.id)))).toMatchObject({
+    launchState: "uncertain",
+    initialization: { state: "pending" },
+  });
+  expect(w.registry((r) => value(r.successorLaunchIntent(w.execute.id)))).toMatchObject({
+    state: "uncertain",
+  });
+});
+
+test("successor hold-only fallback is stopped before activation and its owned tab is closed", async () => {
+  const w = await world({ executeInitialized: false, unprovisioned: true });
+  const closed: string[] = [];
+  let released = false;
+  w.setCreateTab(async () => ({ tabId: "workspace:execute", rootPaneId: "pane-execute" }));
+  Object.assign(w.dependencies.createHerdrClient("/herdr"), {
+    closeTab: async (id: string) => {
+      closed.push(id);
+    },
+  });
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiLocalFallbackError(20);
+      },
+      release: async () => {
+        released = true;
+      },
+    }),
+  });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: {
+      code: "host_session_capacity",
+      details: {
+        reason: "tui_local_fallback",
+        count: 20,
+        limit: 20,
+        action: "close_an_existing_role",
+      },
+    },
+  });
+  expect(w.sends()).toBe(0);
+  expect(w.quits()).toBe(1);
+  expect(closed).toEqual(["workspace:execute"]);
+  expect(released).toBe(true);
+  expect(w.registry((r) => value(r.get(w.execute.id)))).toMatchObject({
+    launchState: "closed",
+    initialization: { state: "pending" },
+  });
+});
+
+test("capacity during initialized successor reattachment preserves accepted work and typed refusal", async () => {
+  const w = await world();
+  w.setVisibility(false);
+  Object.assign(w.dependencies, {
+    acquireLaunchSession: async () => {
+      throw new HostCapacityError(20);
+    },
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "host_session_capacity" } });
+  expect(w.launches()).toBe(0);
+  expect(w.registry((registry) => value(registry.get(w.execute.id)))).toMatchObject({
+    initialization: { state: "accepted" },
+  });
+  expect(w.registry((registry) => value(registry.stageOf(w.execute.id)))).not.toBeNull();
+});
 
 test("stage start refuses an uncertain local-only successor without changing it", async () => {
   const w = await world({ executeInitialized: false, closeAwareHerdr: true });

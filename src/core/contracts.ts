@@ -396,6 +396,8 @@ export interface Registry {
   ): Result<Binding>;
   /** Settle a failed owner: claimed is deleted; dispatching becomes uncertain. */
   failSuccessorLaunch(id: string, token: string): Result<Binding>;
+  /** Retire an owned pending successor: undispatched, or proven stopped local-only TUI. */
+  closeUnstartedSuccessor(id: string, token: string, localTuiStopped?: boolean): Result<Binding>;
   /** Settle a claimed/dispatching attempt without deleting its durable result. */
   finishSuccessorLaunch(id: string, token: string, state: "ready" | "uncertain"): Result<Binding>;
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;

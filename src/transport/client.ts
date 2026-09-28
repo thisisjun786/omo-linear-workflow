@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Binding, DeliveryRecord, Envelope, Result, RuntimeIdentity } from "../core/contracts";
 import type { RoleModel } from "../core/policy";
 import { envelopeSchema } from "../core/schema";
+import { HostCapacityError, NATIVE_HOST_SESSION_LIMIT } from "../host-profile";
 import { describeResultSchema, sendResultSchema } from "./schema";
 
 export class NativeSessionAbsentError extends Error {
@@ -10,6 +11,28 @@ export class NativeSessionAbsentError extends Error {
     super(message);
     this.name = "NativeSessionAbsentError";
   }
+}
+
+export class TuiLocalFallbackError extends Error {
+  readonly reason = "tui_local_fallback";
+  constructor(readonly count: number) {
+    super("TUI did not retain its own attachment to the exact native session");
+    this.name = "TuiLocalFallbackError";
+  }
+}
+
+export class TuiAttachmentUnverifiedError extends Error {
+  readonly reason = "attachment_unverified";
+  constructor() {
+    super("Could not observe the launched TUI's native attachment; reconcile before retrying");
+    this.name = "TuiAttachmentUnverifiedError";
+  }
+}
+
+export interface LaunchSession {
+  readonly nonce?: string;
+  confirmTuiAttachment(timeoutMs?: number, proveTui?: () => Promise<boolean>): Promise<void>;
+  release(): Promise<void>;
 }
 
 export class NativeSessionNotReadyError extends Error {
@@ -44,13 +67,14 @@ export interface RpcPort {
   /** Emergency transport teardown for adapters whose graceful stop can stall. */
   destroy?(): void;
   closeSession(sessionId?: string): Promise<void>;
-  listSessions(): Promise<
+  listSessions(options?: { include_workers: boolean }): Promise<
     ReadonlyArray<{
       readonly sessionId: string;
       readonly durableSessionId?: string;
       readonly sessionPath?: string;
       readonly cwd: string;
       readonly status: "opening" | "open" | "closing" | "closed";
+      readonly attachments?: number;
     }>
   >;
   openSession(options: {
@@ -68,6 +92,14 @@ function failure<T>(code: string, message: string, details?: unknown): Result<T>
     : { ok: false, error: { code, message, details } };
 }
 
+function mapOpenSessionError(cause: unknown): unknown {
+  return cause instanceof Error &&
+    cause.name === "RpcCommandError" &&
+    cause.message === "open_failed: too_many_sessions"
+    ? new HostCapacityError(NATIVE_HOST_SESSION_LIMIT)
+    : cause;
+}
+
 export function publicRpcClient(socketPath: string): RpcPort {
   const client = new RpcClient({ socketPath });
   return Object.assign(client, {
@@ -80,6 +112,130 @@ export function publicRpcClient(socketPath: string): RpcPort {
       transport.process?.kill("SIGKILL");
     },
   });
+}
+
+/** Own a native slot until the TUI has attached; a count observation cannot reserve it. */
+export async function acquireLaunchSession(
+  binding: Binding,
+  client: RpcPort = publicRpcClient(binding.omoSocket),
+  schedule: (callback: () => void, ms: number) => () => void = (callback, ms) => {
+    const timer = setTimeout(callback, ms);
+    return () => clearTimeout(timer);
+  },
+): Promise<LaunchSession> {
+  if (binding.sessionPath === null) throw new Error("Launch requires a seeded session path");
+  try {
+    await client.start();
+    const opened = await client.openSession({
+      sessionPath: binding.sessionPath,
+      cwd: binding.cwd,
+      retain_on_disconnect: false,
+    });
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await client.closeSession(opened.sessionId);
+    };
+    return {
+      nonce: crypto.randomUUID(),
+      async confirmTuiAttachment(timeoutMs = 5_000, proveTui) {
+        if (proveTui === undefined) throw new TuiAttachmentUnverifiedError();
+        const exact = (rows: Awaited<ReturnType<RpcPort["listSessions"]>>) =>
+          rows.find(
+            (row) =>
+              row.sessionId === opened.sessionId &&
+              row.durableSessionId === binding.durableSessionId &&
+              row.sessionPath === binding.sessionPath &&
+              row.cwd === binding.cwd &&
+              row.status === "open",
+          );
+        // Readiness may precede remote attachment. Check on native events and once
+        // at the deadline; no timer polling and no verification attachment added.
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          let checking = false;
+          let pendingRecheck = false;
+          let deadline = timeoutMs === 0;
+          let count = 0;
+          const finish = (cause?: unknown) => {
+            if (settled) return;
+            settled = true;
+            cancelDeadline();
+            cancelHardDeadline();
+            stop();
+            if (cause === undefined) resolve();
+            else reject(cause);
+          };
+          const check = async () => {
+            if (settled) return;
+            pendingRecheck = true;
+            if (checking) return;
+            checking = true;
+            try {
+              while (pendingRecheck && !settled) {
+                pendingRecheck = false;
+                const startedAfterDeadline = deadline;
+                try {
+                  const rows = await client.listSessions({ include_workers: true });
+                  count = rows.length;
+                  const tuiAttached = await proveTui();
+                  if (pendingRecheck) continue;
+                  if (tuiAttached && (exact(rows)?.attachments ?? 0) >= 2) finish();
+                  else if (startedAfterDeadline) finish(new TuiLocalFallbackError(count));
+                } catch {
+                  if (!pendingRecheck && startedAfterDeadline)
+                    finish(new TuiAttachmentUnverifiedError());
+                }
+              }
+            } finally {
+              checking = false;
+            }
+          };
+          const stop = client.onEvent(() => {
+            void check();
+          });
+          const cancelDeadline = schedule(() => {
+            deadline = true;
+            void check();
+          }, timeoutMs);
+          const cancelHardDeadline = schedule(
+            () => finish(new TuiAttachmentUnverifiedError()),
+            timeoutMs + 5_000,
+          );
+          void check();
+        });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            (async () => {
+              await release();
+              const rows = await client.listSessions({ include_workers: true });
+              if ((exact(rows)?.attachments ?? 0) < 1) throw new TuiLocalFallbackError(rows.length);
+              if (!(await proveTui())) throw new TuiLocalFallbackError(rows.length);
+            })(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new TuiAttachmentUnverifiedError()), 5_000);
+            }),
+          ]);
+        } catch (cause) {
+          throw cause instanceof TuiLocalFallbackError ? cause : new TuiAttachmentUnverifiedError();
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      async release() {
+        try {
+          await release();
+        } finally {
+          await client.stop();
+        }
+      },
+    };
+  } catch (cause) {
+    await client.stop();
+    throw mapOpenSessionError(cause);
+  }
 }
 
 export async function attachBinding(binding: Binding): Promise<NativeSession> {
@@ -171,11 +327,15 @@ export async function attachBindingWithClient(
     if (matches.length !== 1)
       throw new Error("Host must contain exactly one durable native session");
     if (exact.status !== "open") throw new NativeSessionNotReadyError(exact.status);
-    const opened = await client.openSession({
-      sessionPath: binding.sessionPath,
-      cwd: binding.cwd,
-      retain_on_disconnect: true,
-    });
+    const opened = await client
+      .openSession({
+        sessionPath: binding.sessionPath,
+        cwd: binding.cwd,
+        retain_on_disconnect: true,
+      })
+      .catch((cause: unknown) => {
+        throw mapOpenSessionError(cause);
+      });
     if (opened.attached !== true || opened.sessionId !== exact.sessionId) {
       if (opened.attached === false) await client.closeSession(opened.sessionId);
       throw new Error("Native host did not attach the exact existing session");

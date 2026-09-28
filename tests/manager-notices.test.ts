@@ -4,6 +4,10 @@ import { z } from "zod";
 import { runCli } from "../src/cli";
 import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
+import {
+  ManagerNoticeDeliveryError,
+  managerNoticeReplySchema,
+} from "../src/extension/manager-notice-client";
 import { registerInitiativeRuntime } from "../src/extension/runtime";
 import { context, envelope, fixture, Harness, linkReadyManager, value } from "./runtime-harness";
 
@@ -56,8 +60,16 @@ test.each(["report", "question"] as const)(
         let authorizedClaims = 0;
         let nativeAuthorizations = 0;
         harness.exec = async (command, args, options) => {
-          const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
-          if (request.action === "lookup-session") {
+          const request = z
+            .object({
+              action: z.string(),
+              input: z.object({ durableSessionId: z.string().optional() }).passthrough(),
+            })
+            .parse(JSON.parse(args[1] ?? "null"));
+          if (
+            request.action === "lookup-session" &&
+            request.input.durableSessionId === parent.durableSessionId
+          ) {
             failedLookups++;
             return {
               stdout: "",
@@ -417,6 +429,276 @@ test("manager idle rejection permits same-ID retry; uncertain never resends", as
       expect(uncertain.attempts).toHaveLength(2);
       await send(message);
       expect(harness.executeCount).toBe(1);
+    } finally {
+      registry.close();
+    }
+  });
+});
+
+test.each([
+  [
+    "returned admission error",
+    async () => ({
+      phase: "admission_failed" as const,
+      cause: { code: "identity_mismatch", message: "manager path changed" },
+    }),
+  ],
+  [
+    "pre-request transport error",
+    async () => {
+      throw new ManagerNoticeDeliveryError("before_request", "manager native session is not open");
+    },
+  ],
+] as const)("manager %s rejects terminally and same-ID retry sends once", async (_case, fail) => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const harness = new Harness();
+      let first = true;
+      const deliver = harness.sendManagerNotice.bind(harness);
+      harness.sendManagerNotice = async (target, request) => {
+        if (first) {
+          first = false;
+          return fail();
+        }
+        return deliver(target, request);
+      };
+      harness.receipt = {
+        kind: "ok",
+        thread_id: manager.durableSessionId,
+        message_seq: 1,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "retry" },
+      };
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const send = harness.rpc("omo.initiative.send");
+      const message = envelope(parent, manager, digest, `manager-terminal-${_case}`, "report");
+
+      const rejected = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+      expect(rejected).toMatchObject({
+        state: "rejected",
+        receipt: {
+          kind: "error",
+          error: {
+            code: "turn_conflict_before_delivery",
+            details: "idle_admission_failed",
+          },
+        },
+      });
+      expect(value(registry.delivery(message.id)).state).toBe("rejected");
+
+      const accepted = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+      expect(accepted.state).toBe("accepted");
+      expect(accepted.attempts).toHaveLength(2);
+      expect(harness.executeCount).toBe(1);
+      expect(value(resultSchema(deliveryRecordSchema).parse(await send(message)))).toEqual(
+        accepted,
+      );
+      expect(harness.executeCount).toBe(1);
+    } finally {
+      registry.close();
+    }
+  });
+});
+
+test("manager lost reply after requestExtension remains uncertain and never retries", async () => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const harness = new Harness();
+      harness.sendManagerNotice = async () => {
+        throw new ManagerNoticeDeliveryError(
+          "request_uncertain",
+          "manager admission reply was lost",
+        );
+      };
+      registerInitiativeRuntime(harness, { root, hostRuntime: true });
+      await harness.start()(context(parent));
+      const send = harness.rpc("omo.initiative.send");
+      const message = envelope(parent, manager, digest, "manager-lost-reply", "report");
+
+      const uncertain = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+      expect(uncertain.state).toBe("uncertain");
+      expect(value(registry.delivery(message.id)).state).toBe("uncertain");
+      expect(await send(message)).toMatchObject({
+        ok: false,
+        error: { code: "delivery_in_progress" },
+      });
+      expect(harness.executeCount).toBe(0);
+    } finally {
+      registry.close();
+    }
+  });
+});
+
+test.each(["delivery_in_progress", "stale_attempt"] as const)(
+  "manager ambiguous admission %s remains uncertain and never retries",
+  async (code) => {
+    await fixture(async ({ root, parent, digest }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager = linkReadyManager(registry, parent, root);
+        const harness = new Harness();
+        let admissionCalls = 0;
+        harness.sendManagerNotice = async () => {
+          admissionCalls++;
+          return {
+            phase: "delivery_result" as const,
+            result: {
+              ok: false as const,
+              error: { code, message: `manager admission returned ${code}` },
+            },
+          };
+        };
+        registerInitiativeRuntime(harness, { root, hostRuntime: true });
+        await harness.start()(context(parent));
+        const send = harness.rpc("omo.initiative.send");
+        const message = envelope(parent, manager, digest, `manager-ambiguous-${code}`, "report");
+
+        const uncertain = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(uncertain.state).toBe("uncertain");
+        expect(value(registry.delivery(message.id)).state).toBe("uncertain");
+        expect(await send(message)).toMatchObject({
+          ok: false,
+          error: { code: "delivery_in_progress" },
+        });
+        expect(admissionCalls).toBe(1);
+        expect(harness.executeCount).toBe(0);
+      } finally {
+        registry.close();
+      }
+    });
+  },
+);
+
+test.each(["idle", "guard", "guard-throw", "setup"] as const)(
+  "manager %s rejection survives recipient finish failure and retries once",
+  async (boundary) => {
+    await fixture(async ({ root, parent, digest }) => {
+      const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+      try {
+        const manager = linkReadyManager(registry, parent, root);
+        const sender = new Harness();
+        const recipient = new Harness();
+        let rejecting = true;
+        recipient.receipt = {
+          kind: "ok",
+          thread_id: manager.durableSessionId,
+          message_seq: 1,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: "retry-once" },
+        };
+        recipient.waitForIdle = async () => {
+          if (rejecting && boundary === "idle") throw new Error("idle admission refused");
+        };
+        const setActive = recipient.setActiveTools.bind(recipient);
+        recipient.setActiveTools = (tools) => {
+          if (rejecting && boundary === "setup") throw new Error("tool setup failed");
+          setActive(tools);
+        };
+        const exec = recipient.exec.bind(recipient);
+        recipient.exec = async (command, args, options) => {
+          const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
+          if (rejecting && request.action === "authorize" && boundary === "guard-throw")
+            throw new Error("guard worker transport failed");
+          if (
+            rejecting &&
+            (request.action === "finish" ||
+              (request.action === "authorize" && boundary === "guard"))
+          )
+            return {
+              stdout: "",
+              stderr: "injected pre-native persistence failure",
+              code: 1,
+              killed: false,
+            };
+          return exec(command, args, options);
+        };
+        sender.sendManagerNotice = async (_target, request) =>
+          managerNoticeReplySchema.parse(
+            await recipient.rpc("omo.initiative.admit-manager-notice")(request),
+          );
+        registerInitiativeRuntime(sender, { root, hostRuntime: true });
+        registerInitiativeRuntime(recipient, { root, hostRuntime: true });
+        await sender.start()(context(parent));
+        await recipient.start()(context(manager));
+        const send = sender.rpc("omo.initiative.send");
+        const message = envelope(
+          parent,
+          manager,
+          digest,
+          `pre-native-finish-${boundary}`,
+          "report",
+        );
+        const rejected = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(rejected.state).toBe("rejected");
+        expect(value(registry.delivery(message.id)).state).toBe("rejected");
+        expect(recipient.executeCount).toBe(0);
+        rejecting = false;
+        const accepted = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+        expect(accepted.state).toBe("accepted");
+        expect(accepted.attempts).toHaveLength(2);
+        expect(recipient.executeCount).toBe(1);
+        expect(value(resultSchema(deliveryRecordSchema).parse(await send(message)))).toEqual(
+          accepted,
+        );
+        expect(recipient.executeCount).toBe(1);
+      } finally {
+        registry.close();
+      }
+    });
+  },
+);
+
+test("manager post-native finish failure remains uncertain and never retries", async () => {
+  await fixture(async ({ root, parent, digest }) => {
+    const registry = openRegistry(join(root, ".omo/state/registry.sqlite"));
+    try {
+      const manager = linkReadyManager(registry, parent, root);
+      const sender = new Harness();
+      const recipient = new Harness();
+      recipient.receipt = {
+        kind: "ok",
+        thread_id: manager.durableSessionId,
+        message_seq: 1,
+        deduplicated: false,
+        delivery: { kind: "started", turn_id: "post-native-finish" },
+      };
+      const exec = recipient.exec.bind(recipient);
+      recipient.exec = async (command, args, options) => {
+        const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
+        if (request.action === "finish") {
+          return {
+            stdout: "",
+            stderr: "injected finish worker failure",
+            code: 1,
+            killed: false,
+          };
+        }
+        return exec(command, args, options);
+      };
+      sender.sendManagerNotice = async (_target, request) =>
+        managerNoticeReplySchema.parse(
+          await recipient.rpc("omo.initiative.admit-manager-notice")(request),
+        );
+      registerInitiativeRuntime(sender, { root, hostRuntime: true });
+      registerInitiativeRuntime(recipient, { root, hostRuntime: true });
+      await sender.start()(context(parent));
+      await recipient.start()(context(manager));
+      const send = sender.rpc("omo.initiative.send");
+      const message = envelope(parent, manager, digest, "manager-post-native-finish", "report");
+
+      const uncertain = value(resultSchema(deliveryRecordSchema).parse(await send(message)));
+      expect(uncertain.state).toBe("uncertain");
+      expect(recipient.executeCount).toBe(1);
+      expect(await send(message)).toMatchObject({
+        ok: false,
+        error: { code: "delivery_in_progress" },
+      });
+      expect(recipient.executeCount).toBe(1);
     } finally {
       registry.close();
     }

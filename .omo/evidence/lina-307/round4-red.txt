@@ -1,0 +1,12 @@
+PR19 round4 baseline46f17a2, worktree-only.
+
+bun test tests/transport/client.test.ts tests/integration/orchestrator.test.ts
+-t 'launch proof|local-only TUI'
+0 pass,3 fail,exit1.
+Orchestrator expected runtime_unavailable/tui_local_fallback; instead returned
+ready after attaching/describing OLW's hold. New confirmation API absent in the
+two transport tests. RED preceded implementation.
+
+GREEN initial3/0; expanded focused13/0: manager creation/reattach, parent, child,
+successor, exact durableId/path/cwd, hold-only refusal, event-driven recheck and
+post-release survival. Full related files164/0,5 files,18.55s.

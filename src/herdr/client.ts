@@ -80,6 +80,7 @@ export interface HerdrClient {
     label: string,
   ): Promise<{ tabId: string; rootPaneId: string }>;
   renameTab(tabId: string, label: string): Promise<void>;
+  closeTab(tabId: string): Promise<void>;
   focusWorkspace(workspaceId: string): Promise<void>;
   focusPane(paneId: string): Promise<void>;
   paneContainsProcess(paneId: string, pid: number): Promise<boolean>;
@@ -182,6 +183,10 @@ class SocketHerdrClient implements HerdrClient {
         label: nonEmptyStringSchema.parse(label),
       }),
     );
+  }
+
+  public async closeTab(tabId: string): Promise<void> {
+    await this.#expectOk("tab.close", { tab_id: nonEmptyStringSchema.parse(tabId) });
   }
 
   public async focusWorkspace(workspaceId: string): Promise<void> {

@@ -21,6 +21,15 @@ not impersonate an existing supervisor, parent or child or execute their assigne
 
 ## Determine the requested operation
 
+The shared host uses one worker isolate per session, with a native 20-session
+capacity. If creation returns `host_session_capacity`, close an unused role and
+wait for teardown before retrying creation; attaching an existing session is allowed.
+Do not resend accepted or uncertain messages, create replacement IDs, or restart
+the host to evade the limit. Session close/park releases isolate resources; merely
+idle sessions retain state, and worker mode is not a process OOM memory limit.
+An older in-process host requires the normal profile handoff; follow the exact
+doctor/manage recovery command, never force replacement of an occupied host.
+
 - **Designate a supervisor:** only an explicit request to execute a named initiative's approved
   projects. Requires an imported snapshot digest from [olw-plan](../plan/SKILL.md). A link, a
   status question, a plan request or a quoted example is not a designation.

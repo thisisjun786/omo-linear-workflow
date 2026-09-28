@@ -1,0 +1,44 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/manager-notice-client.test.ts:
+(pass) manager notice client returns parsed admission errors [0.91ms]
+(pass) manager notice client types failures before requestExtension as retryable [0.14ms]
+(pass) manager notice client types requestExtension failure as uncertain [0.15ms]
+
+tests/manager-notices.test.ts:
+(pass) reports defaults to posted user inbox; --all explicitly includes manager delivery states [355.66ms]
+(pass) manager report carries authorized sender data through a failed lookup boundary and same-ID replay sends once [719.19ms]
+(pass) manager question carries authorized sender data through a failed lookup boundary and same-ID replay sends once [754.37ms]
+(pass) manager-bound report retries the same ID after authorization fails before native delivery [1040.99ms]
+(pass) manager-bound question retries the same ID after authorization fails before native delivery [1041.77ms]
+(pass) parent-bound report retries the same ID after authorization fails before native delivery [766.94ms]
+(pass) parent-bound question retries the same ID after authorization fails before native delivery [792.03ms]
+(pass) manager report waits for idle, sends one-line notice and preserves its envelope [722.73ms]
+(pass) manager question waits for idle, sends one-line notice and preserves its envelope [734.53ms]
+(pass) manager admission rechecks synchronous idle state and waits for the next event without sending [676.86ms]
+(pass) preflight idle rejection remains proven pre-delivery even when executeTool throws [680.06ms]
+(pass) a failure after native execution remains uncertain and never resends [735.52ms]
+(pass) manager idle rejection permits same-ID retry; uncertain never resends [1007.09ms]
+(pass) manager returned admission error rejects terminally and same-ID retry sends once [879.29ms]
+(pass) manager pre-request transport error rejects terminally and same-ID retry sends once [1061.01ms]
+(pass) manager lost reply after requestExtension remains uncertain and never retries [666.29ms]
+
+tests/manager-isolation.test.ts:
+(pass) manager owns admission without shared contexts: idle [887.79ms]
+(pass) manager owns admission without shared contexts: busy [832.23ms]
+(pass) manager owns admission without shared contexts: race [803.33ms]
+(pass) recipient rejects wrong keys and concurrent admission without another native call [725.02ms]
+
+ 23 pass
+ 0 fail
+ 143 expect() calls
+Ran 23 tests across 3 files. [16.43s]
+
+Final focused run after phase-tagged reply and post-native storage failure tests:
+28 pass
+0 fail
+161 expect() calls
+Ran 28 tests across 3 files. [18.01s]
+
+Real integrated QA: admission rejected with manager absent; reopen same manager,
+same logical ID retry accepted, attempts2 and transcript occurrences1. See qa.md.

@@ -1,0 +1,58 @@
+PR19 round3, baseline48f2c8d, worktree-only.
+
+NORMAL FULL SUITE
+bun test:746 pass,0 fail,73 files,101.61s,exit0.
+
+HERDR-UNSET FULL SUITE
+env -u HERDR_ENV HERDR_SOCKET_PATH=/tmp/olw-lina307-r3-no-socket bun test
+746 pass,0 fail,73 files,170.39s,exit0.
+
+STATIC / BUILD / RELEASE / SMOKE
+bun run typecheck && bun run lint && bun run build && bun run release:check
+&& bun test tests/install.test.ts && bun dist/cli.js --help
+All exit0. Biome checked173 files without error/warning (information diagnostics
+remain). Release0.2.0/v0.2.0. Install smoke5/0 in2.45s, built CLI help printed.
+The install negative test's deliberate build exit7 is expected and passed.
+
+REAL SURFACE
+bun scripts/qa-manager-idle.ts --capacity-race:PASS exit0,2026-09-28T11:21-11:22Z.
+Describe/idle/busy/accepted replay, manager absent rejected then same-ID accepted
+with attempts2/delivery1, guard19/competing20 typed refusal with no TUI, held-slot
+attach and release all passed. PID272958/root/tmp/olw-manager-idle-eauTMx cleaned.
+The new persistence-failure and exact tab-close cases are deterministic integration
+tests; no live Herdr pane was closed for QA.
+
+RED FIRST
+round3-red.txt: four pre-native runtime failures returned uncertain; two newly
+created tabs leaked while existing-pane controls passed; tab.close API absent.
+GREEN focused: manager28/0, tab ownership/RPC8/0. No sleeps/polling in new tests.
+
+BOUNDARY AUDIT
+Manager nativeBoundary is attempt-local, passed into dispatch's AsyncLocalStorage.
+Before executeTool, adapter behavior is conservatively unknown. While our matching
+unused tool_call guard is running, native execution cannot have started; only the
+guard's successful release marks possible delivery. Installed Senpi runner.js
+emitToolCall1298-1333 rethrows hook errors, so guard throws cannot fall through into
+native execution. Once released, post-native persistence errors remain uncertain.
+setup, idle wait, input parse, authorization Result/throw, final idle recheck and
+guard rejection all preserve pre-native proof even if recipient finish fails.
+Opaque adapter failures stay uncertain. Used permits never restore pre-native proof.
+
+TAB OWNERSHIP AUDIT
+Successor and manager reattachment remember only tabId returned by their own
+createTab call. Capacity catch awaits closeTab before returning/retiring binding.
+Existing successor pane, pending manager shell and foreground user pane do not
+populate createdTab and cannot be closed by this path. Parent/child/new-manager
+creation still uses the existing owned-workspace capacity cleanup; workspaceOwned
+false remains protected. closeTab errors are not suppressed; no false successful
+capacity cleanup claim. Adapter sends tab.close with exact tab_id over Unix RPC.
+
+LSP
+src49, src/herdr5, tests50 capped, tests/integration3, tests/repo9, scripts40:
+all zero errors. Per-file fresh diagnostic timeout was resolved by directory scan.
+
+INVARIANTS
+No upstream source/patch/global config edits; package.json/pnpm-lock.yaml unchanged,
+no bun.lock. No live root/socket commands or edits. No readonly session-list or
+registry mutations added. Accepted/uncertain delivery still never retries. No push,
+no amend, one new commit required. Reply drafts3/4 unposted in pr19-replies.md.

@@ -1195,6 +1195,37 @@ export function openRegistry(
     });
   }
 
+  function closeUnstartedSuccessor(
+    id: string,
+    token: string,
+    localTuiStopped = false,
+  ): Result<Binding> {
+    return transaction(() => {
+      if (
+        !successorOwner(id, token, "claimed") &&
+        !(localTuiStopped && successorOwner(id, token, "dispatching"))
+      )
+        return error("lease_lost", "Only the undispatched successor owner can retire admission");
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      if (binding.value.initialization.state !== "pending")
+        return error(
+          "invalid_transition",
+          "An initialized successor cannot be retired as unstarted",
+        );
+      const closed = saveBinding({
+        ...binding.value,
+        launchState: "closed",
+        contactState: "cancelled",
+      });
+      if (!closed.ok) return closed;
+      settleSuccessorAttempt(id, token, "failed");
+      db.query("DELETE FROM successor_launch WHERE binding_id = ? AND owner = ?").run(id, token);
+      lineage.retire(id);
+      return closed;
+    });
+  }
+
   function failSuccessorLaunch(id: string, token: string): Result<Binding> {
     return transaction(() => {
       const held = successorLaunchClaim(id);
@@ -2498,6 +2529,7 @@ export function openRegistry(
     dispatchSuccessorLaunch,
     reconcileSuccessorLaunch,
     failSuccessorLaunch,
+    closeUnstartedSuccessor,
     finishSuccessorLaunch,
     activate,
     setLaunchState,

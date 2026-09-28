@@ -41,8 +41,10 @@ import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { HostHandoffBusyError, withHostHandoffLock } from "./host-handoff-lock";
 import {
+  assertHostCapacity,
   assertHostProtocol,
   createHostProfile,
+  HostCapacityError,
   HostPostHandoffVerificationError,
   HostProfileMismatchError,
   HostSessionsPresentError,
@@ -57,7 +59,13 @@ import {
 } from "./host-profile";
 import { buildRoleBrief, readScopeSnapshot, roleLabel } from "./linear";
 import { ensureRouting, globalOmo } from "./proxy/routing-launch";
-import { type Readiness, readReadiness, removeReadiness, subscribeReadiness } from "./readiness";
+import {
+  proveTuiConnection,
+  type Readiness,
+  readReadiness,
+  removeReadiness,
+  subscribeReadiness,
+} from "./readiness";
 import {
   checkoutGit,
   cloneCheckout,
@@ -68,11 +76,15 @@ import {
 import { fetchMirror } from "./repo/mirror";
 import { mergePr, type OpenPrInput, openPr } from "./repo/pr";
 import {
+  acquireLaunchSession,
   attachBinding,
+  type LaunchSession,
   type NativeSession,
   NativeSessionAbsentError,
   type NativeSessionProbe,
   probeBindingSession,
+  TuiAttachmentUnverifiedError,
+  TuiLocalFallbackError,
 } from "./transport";
 import {
   checkUpdates,
@@ -315,6 +327,8 @@ export interface OrchestratorDependencies {
     socket: string,
     env: Readonly<Record<string, string | undefined>>,
   ) => Promise<void>;
+  readonly assertHostCapacity?: (socket: string, sessionPath?: string) => Promise<void>;
+  readonly acquireLaunchSession?: (binding: Binding) => Promise<LaunchSession>;
   readonly checkHostProfile?: (
     root: string,
     socket: string,
@@ -638,6 +652,8 @@ const defaults: OrchestratorDependencies = {
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
+  assertHostCapacity,
+  acquireLaunchSession,
   checkHostProfile: assertHostProtocol,
   readHostStatus,
   observeEmptyHostSessions,
@@ -957,6 +973,8 @@ export class Orchestrator {
       if (
         !result.ok &&
         result.error.code !== "manager_interrupted" &&
+        !z.object({ reason: z.literal("attachment_unverified") }).safeParse(result.error.details)
+          .success &&
         here?.tui !== undefined &&
         this.#ownsForeground(here)
       )
@@ -1175,6 +1193,8 @@ export class Orchestrator {
     const workspaceId = binding.workspaceId;
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     let token: string | undefined;
+    let launchSession: LaunchSession | undefined;
+    let createdTab: string | undefined;
     try {
       const snapshot = await this.#whileForeground(herdr.snapshot(), here);
       if (here?.failure !== undefined) throw here.failure;
@@ -1310,11 +1330,16 @@ export class Orchestrator {
       if (!beforeTab.ok) return beforeTab;
       if (!beforeTab.value) return leaseLost();
       // A pending attempt's pane that is still a plain shell is reused instead of adding a tab.
-      const paneId =
+      let paneId =
         here?.paneId ??
         (pending.value && recordedPane !== undefined && recordedPane.agent === undefined
           ? recordedPane.paneId
-          : (await herdr.createTab(workspaceId, binding.cwd, "manager")).rootPaneId);
+          : undefined);
+      if (paneId === undefined) {
+        const tab = await herdr.createTab(workspaceId, binding.cwd, "manager");
+        createdTab = tab.tabId;
+        paneId = tab.rootPaneId;
+      }
       // The TUI publishes readiness for the binding's recorded pane, so record it before launch;
       // the pending claim keeps later calls from reporting this pane as focused until verified.
       const moved = this.#withRegistry((registry) =>
@@ -1327,9 +1352,14 @@ export class Orchestrator {
         const beforeRun = stillOwner();
         if (!beforeRun.ok) return beforeRun;
         if (!beforeRun.value) return leaseLost();
+        launchSession = await this.#deps.acquireLaunchSession?.(moved.value);
+        if (here?.failure !== undefined) throw here.failure;
         const argv = this.#tuiArgv(moved.value, binding.sessionPath, "manager", null);
+        if (launchSession?.nonce !== undefined)
+          argv.splice(3, 0, `OMO_INITIATIVE_LAUNCH_NONCE=${launchSession.nonce}`);
         if (here === undefined) await herdr.run(paneId, argv, this.#tuiEnvironment(managedPath));
         else this.#launchHere(argv, binding.cwd, managedPath, here);
+        await this.#confirmTuiAttachment(launchSession, moved.value, herdr);
         const expired = Promise.withResolvers<never>();
         const timeout = setTimeout(
           () => expired.reject(new Error("Timed out awaiting manager TUI readiness")),
@@ -1380,6 +1410,33 @@ export class Orchestrator {
         modelSource: "existing",
       });
     } catch (cause) {
+      if (cause instanceof TuiAttachmentUnverifiedError) {
+        const ownership = this.#withRegistry((r) => r.ownsReattach(binding.id, token ?? ""));
+        if (!ownership.ok) return ownership;
+        if (!ownership.value)
+          return failure("lease_lost", "Manager reattachment ownership changed");
+        return this.#attachmentUnverified(binding.id, cause);
+      }
+      if (cause instanceof TuiLocalFallbackError) {
+        const ownership = this.#withRegistry((r) => r.ownsReattach(binding.id, token ?? ""));
+        if (!ownership.ok) return ownership;
+        if (!ownership.value)
+          return failure("lease_lost", "Manager reattachment ownership changed");
+        const current = this.#binding(binding.id);
+        if (!current.ok) return current;
+        const stopped = await this.#stopLocalTui(current.value, herdr, here);
+        if (!stopped.ok) return stopped;
+        if (createdTab !== undefined) await herdr.closeTab(createdTab);
+        return this.#localFallbackResult(cause);
+      }
+      if (cause instanceof HostCapacityError) {
+        if (createdTab !== undefined) await herdr.closeTab(createdTab);
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
+      }
       if (cause instanceof ManagerInterrupted) {
         if (here !== undefined && this.#ownsForeground(here)) await here.tui?.exited;
         return failure("manager_interrupted", cause.message, { exitCode: cause.exitCode });
@@ -1404,7 +1461,11 @@ export class Orchestrator {
             );
         }
       } finally {
-        herdr.close();
+        try {
+          await launchSession?.release();
+        } finally {
+          herdr.close();
+        }
       }
     }
   }
@@ -2106,6 +2167,18 @@ export class Orchestrator {
   ): Promise<Result<CreationResult>> {
     const result = await this.#runSuccessorLaunch(binding, snapshot, handoff, owner);
     if (!result.ok) {
+      const stoppedFallback = z
+        .object({ reason: z.literal("tui_local_fallback") })
+        .safeParse(result.error.details).success;
+      if (
+        (result.error.code === "host_session_capacity" || stoppedFallback) &&
+        binding.initialization.state === "pending"
+      ) {
+        const closed = this.#withRegistry((registry) =>
+          registry.closeUnstartedSuccessor(binding.id, owner, stoppedFallback),
+        );
+        return closed.ok ? result : closed;
+      }
       const settled = this.#withRegistry((registry) =>
         registry.failSuccessorLaunch(binding.id, owner),
       );
@@ -2205,9 +2278,16 @@ export class Orchestrator {
         binding.omoSocket,
         launchEnvironment(this.#root, managedPath),
       );
+      await this.#deps.assertHostCapacity?.(binding.omoSocket, binding.sessionPath ?? undefined);
       if ((await this.#deps.gitTip(checkout.path, "HEAD")) !== handoff.head)
         return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
     } catch (cause) {
+      if (cause instanceof HostCapacityError)
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
       if (cause instanceof HostProfileMismatchError)
         return failure("runtime_unavailable", cause.message, {
           reason: "host_profile_mismatch",
@@ -2218,6 +2298,8 @@ export class Orchestrator {
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     let stop: (() => void) | undefined;
     let stopReadiness: (() => void) | undefined;
+    let launchSession: LaunchSession | undefined;
+    let createdTab: string | undefined;
     try {
       const readySignal = Promise.withResolvers<string>();
       const outcome = readySignal.promise.then(
@@ -2246,7 +2328,9 @@ export class Orchestrator {
         const workspaceId = previous.value.workspaceId;
         // The predecessor's workspace is supplied by the caller when reservation has no pane yet.
         if (workspaceId === null) throw new Error("Successor workspace is missing");
-        paneId = (await herdr.createTab(workspaceId, checkout.path, "execute")).rootPaneId;
+        const tab = await herdr.createTab(workspaceId, checkout.path, "execute");
+        createdTab = tab.tabId;
+        paneId = tab.rootPaneId;
         const provisioned = this.#withRegistry((registry) =>
           registry.provisionSuccessorLaunch(current.id, owner, workspaceId, paneId ?? ""),
         );
@@ -2293,6 +2377,10 @@ export class Orchestrator {
         (cause: unknown) => readySignal.reject(cause),
       );
       const label = roleLabel(current.assignment, snapshot, current.id);
+      launchSession = await this.#deps.acquireLaunchSession?.(current);
+      const ownershipBeforeDispatch = stillOwner();
+      if (!ownershipBeforeDispatch.ok) return ownershipBeforeDispatch;
+      if (!ownershipBeforeDispatch.value) return leaseLost();
       const dispatch = this.#withRegistry((registry) =>
         registry.dispatchSuccessorLaunch(current.id, owner),
       );
@@ -2305,6 +2393,9 @@ export class Orchestrator {
           "env",
           "-u",
           "OMO_INITIATIVE_HOST",
+          ...(launchSession?.nonce === undefined
+            ? []
+            : [`OMO_INITIATIVE_LAUNCH_NONCE=${launchSession.nonce}`]),
           "OMO_ENABLE_SHARED_HOST=1",
           `OMO_RPC_SOCKET=${binding.omoSocket}`,
           `OMO_INITIATIVE_ROOT=${this.#root}`,
@@ -2328,6 +2419,7 @@ export class Orchestrator {
         ],
         { PATH: managedPath, ...runtimeCacheEnvironment(this.#root) },
       );
+      await this.#confirmTuiAttachment(launchSession, current, herdr);
       const timeout = setTimeout(
         () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),
         15_000,
@@ -2358,6 +2450,31 @@ export class Orchestrator {
       );
       return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
     } catch (cause) {
+      if (cause instanceof TuiAttachmentUnverifiedError) {
+        const ownership = stillOwner();
+        if (!ownership.ok) return ownership;
+        if (!ownership.value) return leaseLost();
+        return this.#attachmentUnverified(binding.id, cause);
+      }
+      if (cause instanceof TuiLocalFallbackError) {
+        const ownership = stillOwner();
+        if (!ownership.ok) return ownership;
+        if (!ownership.value) return leaseLost();
+        const current = this.#binding(binding.id);
+        if (!current.ok) return current;
+        const stopped = await this.#stopLocalTui(current.value, herdr);
+        if (!stopped.ok) return stopped;
+        if (createdTab !== undefined) await herdr.closeTab(createdTab);
+        return this.#localFallbackResult(cause);
+      }
+      if (cause instanceof HostCapacityError) {
+        if (createdTab !== undefined) await herdr.closeTab(createdTab);
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
+      }
       return failure(
         "runtime_unavailable",
         dispatched
@@ -2366,9 +2483,13 @@ export class Orchestrator {
         messageOf(cause),
       );
     } finally {
-      stopReadiness?.();
-      stop?.();
-      herdr.close();
+      try {
+        await launchSession?.release();
+      } finally {
+        stopReadiness?.();
+        stop?.();
+        herdr.close();
+      }
     }
   }
 
@@ -3607,6 +3728,59 @@ export class Orchestrator {
     }
   }
 
+  async #confirmTuiAttachment(
+    hold: LaunchSession | undefined,
+    binding: Binding,
+    herdr: HerdrClient,
+  ): Promise<void> {
+    if (hold === undefined) return;
+    const nonce = hold.nonce;
+    await hold.confirmTuiAttachment(
+      undefined,
+      nonce === undefined
+        ? undefined
+        : () =>
+            proveTuiConnection(this.#root, binding, nonce, (pid) =>
+              herdr.paneContainsProcess(binding.paneId ?? "", pid),
+            ),
+    );
+  }
+
+  #attachmentUnverified(bindingId: string, cause: TuiAttachmentUnverifiedError): Result<never> {
+    const marked = this.#withRegistry((r) => r.setLaunchState(bindingId, "uncertain"));
+    return marked.ok
+      ? failure("runtime_unavailable", cause.message, { reason: cause.reason })
+      : marked;
+  }
+
+  #localFallbackResult(cause: TuiLocalFallbackError): Result<never> {
+    if (cause.count >= 20) {
+      const capacity = new HostCapacityError(cause.count);
+      return failure(capacity.code, capacity.message, {
+        reason: cause.reason,
+        count: capacity.count,
+        limit: capacity.limit,
+        action: capacity.action,
+      });
+    }
+    return failure("runtime_unavailable", cause.message, { reason: cause.reason });
+  }
+
+  async #stopLocalTui(
+    binding: Binding,
+    herdr: HerdrClient,
+    here?: ManagerHere,
+  ): Promise<Result<void>> {
+    if (here?.tui !== undefined) {
+      if (!this.#ownsForeground(here))
+        return failure("lease_lost", "Manager startup ownership changed; nothing was terminated");
+      here.tui.kill();
+      await here.tui.exited;
+      return ok(undefined);
+    }
+    return this.#stopStageSession(binding, herdr, false);
+  }
+
   public async reconcile(
     filter: string | ScopeFilter,
   ): Promise<Result<{ readonly observed: number; readonly bindings: StatusBinding[] }>> {
@@ -3937,6 +4111,7 @@ export class Orchestrator {
         this.#deps.ensureHost(this.#root, this.#omoSocket, environment),
         here,
       );
+      await this.#deps.assertHostCapacity?.(reserved.value.omoSocket);
     } catch (cause) {
       if (here !== undefined && launchToken !== undefined) {
         const closed = this.#withRegistry((r) => r.closeUnstartedManager(bindingId, launchToken));
@@ -3954,12 +4129,19 @@ export class Orchestrator {
           return closing.ok ? registry.finishClose(bindingId) : closing;
         });
       if (cause instanceof HostProtocolResultError) return cause.result;
+      if (cause instanceof HostCapacityError)
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
       return failure("runtime_unavailable", "Native host launch failed", messageOf(cause));
     }
 
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     let stop: (() => void) | undefined;
     let stopReadiness: (() => void) | undefined;
+    let launchSession: LaunchSession | undefined;
     try {
       const readySignal = Promise.withResolvers<string>();
       const readinessOutcome = readySignal.promise.then(
@@ -4047,10 +4229,15 @@ export class Orchestrator {
         (receipt) => readySignal.resolve(receipt.sessionPath),
         (cause: unknown) => readySignal.reject(cause),
       );
+      launchSession = await this.#deps.acquireLaunchSession?.(allocated.value);
+      if (here?.failure !== undefined) throw here.failure;
       const argv = this.#tuiArgv(reserved.value, seedPath, label, model);
+      if (launchSession?.nonce !== undefined)
+        argv.splice(3, 0, `OMO_INITIATIVE_LAUNCH_NONCE=${launchSession.nonce}`);
       if (target?.here === undefined)
         await herdr.run(workspace.rootPaneId, argv, this.#tuiEnvironment(managedPath));
       else this.#launchHere(argv, cwd, managedPath, target.here);
+      await this.#confirmTuiAttachment(launchSession, allocated.value, herdr);
       const timeout = setTimeout(
         () => readySignal.reject(new Error("Timed out awaiting OMO TUI readiness")),
         15_000,
@@ -4111,6 +4298,46 @@ export class Orchestrator {
               },
       });
     } catch (cause) {
+      if (cause instanceof TuiAttachmentUnverifiedError)
+        return this.#attachmentUnverified(bindingId, cause);
+      if (cause instanceof TuiLocalFallbackError) {
+        const current = this.#binding(bindingId);
+        if (!current.ok) return current;
+        const stopped = await this.#stopLocalTui(current.value, herdr, here);
+        if (!stopped.ok) return stopped;
+        if (current.value.workspaceOwned !== false && current.value.workspaceId !== null)
+          await herdr.closeWorkspace(current.value.workspaceId);
+        const closed = this.#withRegistry((registry) => {
+          if (launchToken !== undefined)
+            return registry.closeUnstartedManager(bindingId, launchToken);
+          const closing = registry.beginClose(bindingId);
+          return closing.ok ? registry.finishClose(bindingId) : closing;
+        });
+        if (!closed.ok) return closed;
+        await removeReadiness(this.#root, bindingId);
+        return this.#localFallbackResult(cause);
+      }
+      if (cause instanceof HostCapacityError) {
+        // Native admission precedes run/launchHere: no TUI, local runtime or
+        // initialization can exist for this attempt. Keep user-owned workspaces.
+        const allocated = this.#binding(bindingId);
+        if (!allocated.ok) return allocated;
+        if (allocated.value.workspaceOwned !== false && allocated.value.workspaceId !== null)
+          await herdr.closeWorkspace(allocated.value.workspaceId);
+        const closed = this.#withRegistry((registry) => {
+          if (here !== undefined && launchToken !== undefined)
+            return registry.closeUnstartedManager(bindingId, launchToken);
+          const closing = registry.beginClose(bindingId);
+          return closing.ok ? registry.finishClose(bindingId) : closing;
+        });
+        if (!closed.ok) return closed;
+        await removeReadiness(this.#root, bindingId);
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
+      }
       // A rejected pre-launch await can mask the signal that already interrupted this entry.
       // No foreground child was spawned: settle the owned reservation, never mark it uncertain.
       // The finally block below still releases any subscription/readiness resources.
@@ -4136,6 +4363,9 @@ export class Orchestrator {
         if (!allocated.ok) return allocated;
         if (here !== undefined && !this.#ownsForeground(here) && allocated.value.paneId !== null)
           return failure("lease_lost", "Manager startup ownership changed; nothing was terminated");
+        const held = launchSession;
+        launchSession = undefined;
+        await held?.release();
         if (here?.tui !== undefined) await this.#deps.terminateBinding(allocated.value);
         const closed = this.#withRegistry((registry) => {
           if (here?.tui === undefined && launchToken !== undefined)
@@ -4160,9 +4390,13 @@ export class Orchestrator {
         messageOf(cause),
       );
     } finally {
-      stopReadiness?.();
-      stop?.();
-      herdr.close();
+      try {
+        await launchSession?.release();
+      } finally {
+        stopReadiness?.();
+        stop?.();
+        herdr.close();
+      }
     }
   }
 

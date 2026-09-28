@@ -216,7 +216,7 @@ describe("HerdrClient", () => {
     ]);
   });
 
-  test("creates and renames tabs and sends raw pane input", async () => {
+  test("creates renames and closes exact tabs and sends raw pane input", async () => {
     const server = await fixture((socket, request) => {
       if (request.method === "tab.create") {
         ok(socket, request.id, {
@@ -236,6 +236,7 @@ describe("HerdrClient", () => {
     });
     await client.renameTab("ws:t2", "execute");
     await client.sendKeys("ws:p2", "/quit", ["Enter"]);
+    await client.closeTab("ws:t2");
     expect(server.requests.map(({ method, params }) => ({ method, params }))).toEqual([
       {
         method: "tab.create",
@@ -243,6 +244,7 @@ describe("HerdrClient", () => {
       },
       { method: "tab.rename", params: { tab_id: "ws:t2", label: "execute" } },
       { method: "pane.send_input", params: { pane_id: "ws:p2", text: "/quit", keys: ["Enter"] } },
+      { method: "tab.close", params: { tab_id: "ws:t2" } },
     ]);
   });
 

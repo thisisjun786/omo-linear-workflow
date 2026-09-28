@@ -1,0 +1,79 @@
+LINA-307 verification, 2026-09-28
+Worktree /home/jun/code/olw-wt/lina-307-host-memory
+Base 22bf7e3, Bun 1.4.0, Senpi 2026.9.27, omo-ai 5.0.1
+
+FINAL FULL SUITES
+Command: bun test
+720 pass
+0 fail
+Ran 720 tests across 72 files. [88.57s]
+Exit 0.
+
+Command: env -u HERDR_ENV HERDR_SOCKET_PATH=/tmp/olw-lina307-no-socket bun test
+720 pass
+0 fail
+Ran 720 tests across 72 files. [100.78s]
+Exit 0.
+
+Earlier first full suite was 719 pass/1 fail because the contained-profile
+integration fixture still expected in-process and no worker admission marker.
+Updated that stale machine-consumed profile expectation; final suites above green.
+Expected negative installer tests print build exit 7; the tests themselves pass.
+
+STATIC / RELEASE
+Command: bun run typecheck && bun run lint && bun run build && bun run release:check
+tsc --noEmit: exit 0.
+Biome: Checked 172 files; no fixes applied; zero errors/warnings. Existing
+useLiteralKeys information diagnostics remain (not suppressed).
+Build: Built CLI, worker, extensions, routing synchronizer and managed OMO launcher.
+Release check: {"version":"0.2.0","tag":"v0.2.0","prerelease":false}
+Combined exit 0.
+
+INSTALL / ENTRY POINT
+Command: bun test tests/install.test.ts && bun dist/cli.js --help
+5 pass, 0 fail; installer uses real pnpm frozen-lockfile/build in owned temporary
+checkouts and executes the installed quoted-path launcher. CLI help prints its
+usage and command map. Combined exit 0. All fixture roots removed by afterEach.
+
+LSP
+Individual fresh-file diagnostic requests sometimes timed out at the tool's 3 s
+deadline. Directory scans successfully completed with fresh zero-error results:
+src/extension: 10 files, 0 errors.
+src: 49 files, 0 errors.
+scripts: 40 files, 0 errors.
+tests: 50 files (tool cap), 0 errors.
+tests/integration: 3 files, 0 errors.
+tests/runtime: 4 files, 0 errors.
+tests/transport: 1 file, 0 errors.
+No server configuration or global package was changed.
+
+REAL SURFACE
+See qa.md and measurements.md. Actual two-worker RPC describe/send/idle/busy and
+native 20-session capacity PASS. Post-change memory: 2719700 -> 382752 KiB RSS,
+20 -> 0 LISTEN fds after close. No paid inference.
+
+SELF-REVIEW / INVARIANTS
+- No edits to Senpi, omo-ai, or patches. git diff for patches/node_modules empty.
+- status/doctor read-only paths unchanged: no new list_sessions or mutation.
+- New capacity list_sessions is only in role/successor creation before launch.
+- Same-ID accepted/uncertain deliveries never resend; target reads current attempt,
+  verifies recipient and original route, and uses original native key. Concurrent
+  target RPC is fenced before awaits. In-flight set does not retain history.
+- Synchronous local isIdle recheck remains after async preflight authorization.
+- Full tests pass with Herdr unset and nonexistent socket.
+- QA PID/socket/root cleanup receipts in qa.md; independent ps/absence checks pass.
+- No global ~/.omo configuration changes. No live host/socket commands or restart.
+- Delegated file-location violation was corrected and disclosed in qa.md; exact
+  accidentally added live-root file was moved away before execution.
+- User-authorized package.json restoration and bun.lock removal completed; no diff
+  in package.json/pnpm-lock.yaml and no bun.lock. Neither is staged for this task.
+- No push. Commit authorization and required trailers supplied by user.
+- HEAVY tier retained for session lifecycle/concurrency changes. No ulw-plan was
+  requested, so self-review rather than a formal gate reviewer. Independent cold
+  read corrected overbroad deterministic-reclamation wording in measurements.md.
+
+LIMITATIONS
+Workers are isolates, not processes: active-session hard OOM containment remains
+unsupported. User explicitly approved this measured design. Idle state is retained
+until native safe eviction or close; no shortened eviction window. Upstream draft
+is local-only, contains no private workflow terminology, and was not filed.

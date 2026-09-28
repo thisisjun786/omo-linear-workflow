@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { RpcClientEvent } from "@code-yeongyu/senpi";
+import { RpcCommandError } from "../../node_modules/@code-yeongyu/senpi/dist/modes/rpc/rpc-client.js";
 import type { Binding, DeliveryRecord, Envelope } from "../../src/core/contracts";
+import { HostCapacityError } from "../../src/host-profile";
 import {
+  acquireLaunchSession,
   attachBindingWithClient,
   NativeSessionNotReadyError,
   probeBindingSessionWithClient,
@@ -92,6 +95,7 @@ class FakeRpc implements RpcPort {
     },
   ];
   opened = { sessionId: "host-row-parent", attached: true };
+  openFailure: Error | null = null;
   async start(): Promise<void> {
     this.started += 1;
   }
@@ -109,6 +113,7 @@ class FakeRpc implements RpcPort {
     readonly cwd?: string;
     readonly retain_on_disconnect?: boolean;
   }) {
+    if (this.openFailure !== null) throw this.openFailure;
     return this.opened;
   }
   async requestExtension(name: string): Promise<unknown> {
@@ -133,6 +138,242 @@ class FakeRpc implements RpcPort {
     return () => {};
   }
 }
+
+test("launch admission preserves native capacity refusal and never hands a local fallback to the caller", async () => {
+  const client = new FakeRpc();
+  client.openSession = async () => {
+    throw new RpcCommandError("open_failed: too_many_sessions", undefined, undefined);
+  };
+  await expect(acquireLaunchSession(binding, client)).rejects.toMatchObject({
+    code: "host_session_capacity",
+    count: 20,
+    limit: 20,
+    action: "close_an_existing_role",
+  });
+  expect(client.stopped).toBe(1);
+});
+
+test("launch admission holds the actual slot until explicit release", async () => {
+  const client = new FakeRpc();
+  const held = await acquireLaunchSession(binding, client);
+  expect(client.stopped).toBe(0);
+  expect(client.closeSessionCalls).toBe(0);
+  await held.release();
+  expect(client.closeSessionCalls).toBe(1);
+  expect(client.stopped).toBe(1);
+});
+
+test("launch proof rejects a hold-only row even though native describe succeeds", async () => {
+  const client = new FakeRpc();
+  const held = await acquireLaunchSession(binding, client);
+  try {
+    expect(await client.requestExtension("omo.initiative.describe")).toMatchObject({ ok: true });
+    await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
+      reason: "tui_local_fallback",
+    });
+  } finally {
+    await held.release();
+  }
+});
+
+test("observer attachments cannot prove a local-fallback TUI attached", async () => {
+  const client = new FakeRpc();
+  client.listSessions = async () => client.sessions.map((row) => ({ ...row, attachments: 2 }));
+  const held = await acquireLaunchSession(binding, client);
+  try {
+    await expect(held.confirmTuiAttachment(0, async () => false)).rejects.toMatchObject({
+      reason: "tui_local_fallback",
+    });
+  } finally {
+    await held.release();
+  }
+});
+
+test("attachment count cannot bypass an omitted TUI ownership proof", async () => {
+  const client = new FakeRpc();
+  client.listSessions = async () => client.sessions.map((row) => ({ ...row, attachments: 2 }));
+  const held = await acquireLaunchSession(binding, client);
+  try {
+    await expect(held.confirmTuiAttachment(0)).rejects.toMatchObject({
+      reason: "attachment_unverified",
+    });
+  } finally {
+    await held.release();
+  }
+});
+
+test.each(["deadline", "after-release"] as const)(
+  "attachment observation failure is not local fallback: %s",
+  async (phase) => {
+    const client = new FakeRpc();
+    let heldOpen = true;
+    client.listSessions = async () => {
+      if (phase === "deadline" || !heldOpen)
+        throw new Error("list response lost while TUI attached");
+      return client.sessions.map((row) => ({ ...row, attachments: 2 }));
+    };
+    client.closeSession = async () => {
+      heldOpen = false;
+      client.closeSessionCalls++;
+    };
+    const held = await acquireLaunchSession(binding, client);
+    try {
+      await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
+        name: "TuiAttachmentUnverifiedError",
+        reason: "attachment_unverified",
+      });
+    } finally {
+      await held.release();
+    }
+  },
+);
+
+test("a transient attachment observation error waits for the next native event", async () => {
+  const client = new FakeRpc();
+  let listener: ((event: RpcClientEvent) => void) | undefined;
+  let reads = 0;
+  let attachments = 2;
+  client.onEvent = (cb) => {
+    listener = cb;
+    return () => {
+      listener = undefined;
+    };
+  };
+  client.listSessions = async () => {
+    reads++;
+    if (reads === 1) throw new Error("transient list failure");
+    return client.sessions.map((row) => ({ ...row, attachments }));
+  };
+  client.closeSession = async () => {
+    attachments--;
+  };
+  const held = await acquireLaunchSession(binding, client);
+  const proof = held.confirmTuiAttachment(1000, async () => true);
+  try {
+    // Drain the already-rejected list promise; no clock advancement or sleep.
+    await Promise.resolve();
+    listener?.({ type: "agent_start" });
+    await expect(proof).resolves.toBeUndefined();
+    expect(reads).toBe(3);
+    expect(attachments).toBe(1);
+  } finally {
+    await held.release();
+  }
+});
+
+test("attachment deadline and event queue a fresh observation behind a stale in-flight list", async () => {
+  const client = new FakeRpc();
+  const pending = Promise.withResolvers<Awaited<ReturnType<FakeRpc["listSessions"]>>>();
+  const entered = Promise.withResolvers<void>();
+  const timers: Array<() => void> = [];
+  let listener: ((event: RpcClientEvent) => void) | undefined;
+  let reads = 0;
+  let attachments = 2;
+  client.onEvent = (cb) => {
+    listener = cb;
+    return () => {};
+  };
+  client.listSessions = async () => {
+    reads++;
+    if (reads === 1) {
+      entered.resolve();
+      return pending.promise;
+    }
+    return client.sessions.map((row) => ({ ...row, attachments }));
+  };
+  client.closeSession = async () => {
+    attachments--;
+  };
+  const held = await acquireLaunchSession(binding, client, (callback) => {
+    timers.push(callback);
+    return () => {};
+  });
+  const proof = held.confirmTuiAttachment(1000, async () => true);
+  try {
+    await entered.promise;
+    listener?.({ type: "agent_start" });
+    timers[0]?.();
+    pending.resolve(client.sessions.map((row) => ({ ...row, attachments: 1 })));
+    await expect(proof).resolves.toBeUndefined();
+    expect(reads).toBe(3);
+  } finally {
+    pending.resolve([]);
+    await held.release();
+  }
+});
+
+test("launch proof requires exact identity and surviving attachment after release", async () => {
+  for (const survives of [false, true]) {
+    const client = new FakeRpc();
+    let heldOpen = true;
+    client.listSessions = async () =>
+      client.sessions.map((row) => ({ ...row, attachments: heldOpen ? 2 : survives ? 1 : 0 }));
+    client.closeSession = async () => {
+      heldOpen = false;
+      client.closeSessionCalls++;
+    };
+    const held = await acquireLaunchSession(binding, client);
+    try {
+      if (survives) await held.confirmTuiAttachment(0, async () => true);
+      else
+        await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
+          reason: "tui_local_fallback",
+        });
+    } finally {
+      await held.release();
+    }
+    expect(client.closeSessionCalls).toBe(1);
+  }
+});
+
+test.each(["durableSessionId", "sessionPath", "cwd"] as const)(
+  "launch proof rejects another session's attachments: %s",
+  async (key) => {
+    const client = new FakeRpc();
+    client.listSessions = async () =>
+      client.sessions.map((row) => ({ ...row, [key]: "/other", attachments: 2 }));
+    const held = await acquireLaunchSession(binding, client);
+    try {
+      await expect(held.confirmTuiAttachment(0, async () => true)).rejects.toMatchObject({
+        reason: "tui_local_fallback",
+      });
+    } finally {
+      await held.release();
+    }
+  },
+);
+
+test("launch proof rechecks on a native event without polling", async () => {
+  const client = new FakeRpc();
+  let listener: ((event: RpcClientEvent) => void) | undefined;
+  const observed = Promise.withResolvers<void>();
+  let attachments = 1;
+  client.onEvent = (cb) => {
+    listener = cb;
+    return () => {
+      listener = undefined;
+    };
+  };
+  client.listSessions = async () => {
+    observed.resolve();
+    return client.sessions.map((row) => ({ ...row, attachments }));
+  };
+  client.closeSession = async () => {
+    attachments--;
+    client.closeSessionCalls++;
+  };
+  const held = await acquireLaunchSession(binding, client);
+  const proof = held.confirmTuiAttachment(1000, async () => true);
+  try {
+    await observed.promise;
+    attachments = 2;
+    listener?.({ type: "agent_start" });
+    await proof;
+    expect(attachments).toBe(1);
+  } finally {
+    await held.release();
+  }
+});
 
 describe("native session client", () => {
   test("attaches only an exact existing durable id, path, and cwd", async () => {
@@ -252,5 +493,23 @@ describe("native session client", () => {
     await session.close();
     expect(rpc.stopped).toBe(1);
     expect(rpc.closeSessionCalls).toBe(0);
+  });
+
+  test("maps the native worker cap refusal to an actionable typed error", async () => {
+    const rpc = new FakeRpc();
+    rpc.openFailure = new RpcCommandError("open_failed: too_many_sessions", undefined, undefined);
+
+    const result = await attachBindingWithClient(binding, rpc).then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(result).toBeInstanceOf(HostCapacityError);
+    expect(result).toMatchObject({
+      code: "host_session_capacity",
+      limit: 20,
+      action: "close_an_existing_role",
+    });
+    expect(rpc.stopped).toBe(1);
   });
 });

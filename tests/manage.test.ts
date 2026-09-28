@@ -17,13 +17,18 @@ import { openRegistry } from "../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../src/herdr";
 import { HostHandoffBusyError } from "../src/host-handoff-lock";
 import {
+  HostCapacityError,
   HostProfileMismatchError,
   HostSessionsPresentError,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "../src/orchestrator";
 import { publishReadiness } from "../src/readiness";
-import type { NativeSession } from "../src/transport";
+import {
+  type NativeSession,
+  TuiAttachmentUnverifiedError,
+  TuiLocalFallbackError,
+} from "../src/transport";
 import { fixtureTip, mappedScope } from "./fixtures/mapped-scope";
 
 const roots: string[] = [];
@@ -139,6 +144,11 @@ async function world(agent = "omo") {
       return tab;
     },
     async renameTab() {},
+    async closeTab(tabId) {
+      const match = /^(.*):tab(\d+)$/.exec(tabId);
+      if (match === null) throw new Error("unexpected closeTab");
+      panes.delete(`${match[1]}:tp${match[2]}`);
+    },
     async sendKeys() {},
     async focusWorkspace(workspaceId) {
       focused.push(workspaceId);
@@ -334,6 +344,236 @@ async function world(agent = "omo") {
 function managers(bindings: readonly Binding[]): Binding[] {
   return bindings.filter((binding) => binding.assignment.role === "manager");
 }
+
+test.each([true, false])(
+  "manager reattachment capacity closes only its new tab: new=%s",
+  async (newTab) => {
+    const w = await world();
+    const manager = value(await w.orchestrator.manage()).binding;
+    if (manager.paneId === null || manager.workspaceId === null)
+      throw new Error("Missing manager workspace");
+    if (newTab) w.panes.delete(manager.paneId);
+    else {
+      w.panes.set(manager.paneId, { workspaceId: manager.workspaceId });
+      // Only a durable pending reattachment reuses the recorded plain shell.
+      const held = w.readRegistry((r) =>
+        value(r.beginReattach(manager.id, manager.paneId, w.hooks.now, "2020-01-01")),
+      );
+      if (!held.claimed) throw new Error("Missing reattachment claim");
+      w.readRegistry((r) => value(r.releaseReattach(manager.id, held.token)));
+    }
+    const closed: string[] = [];
+    Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+      closeTab: async (id: string) => {
+        closed.push(id);
+      },
+    });
+    Object.assign(w.deps, {
+      acquireLaunchSession: async () => {
+        throw new HostCapacityError(20);
+      },
+    });
+    expect(await w.orchestrator.manage()).toMatchObject({
+      ok: false,
+      error: { code: "host_session_capacity" },
+    });
+    expect(closed).toHaveLength(newTab ? 1 : 0);
+    expect(w.runs).toHaveLength(1);
+  },
+);
+
+test.each(["new-manager", "reattach", "parent"] as const)(
+  "%s hold-only fallback never reaches native initialization",
+  async (mode) => {
+    const w = await world();
+    const manager = mode === "reattach" ? value(await w.orchestrator.manage()).binding : undefined;
+    if (manager?.paneId) w.panes.delete(manager.paneId);
+    let listener: ((event: unknown) => void) | undefined;
+    let quits = 0;
+    const closed: string[] = [];
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    const closeTab = herdr.closeTab.bind(herdr);
+    Object.assign(herdr, {
+      subscribe: async (cb: (event: unknown) => void) => {
+        listener = cb;
+        return () => {};
+      },
+      sendKeys: async (pane: string) => {
+        quits++;
+        listener?.({ event: "pane.exited", data: { pane_id: pane } });
+      },
+      closeTab: async (tab: string) => {
+        closed.push(tab);
+        await closeTab(tab);
+      },
+    });
+    Object.assign(w.deps, {
+      acquireLaunchSession: async () => ({
+        confirmTuiAttachment: async () => {
+          throw new TuiLocalFallbackError(1);
+        },
+        release: async () => {},
+      }),
+    });
+    const result =
+      mode === "parent" ? await w.createParent("project", true) : await w.orchestrator.manage();
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable", details: { reason: "tui_local_fallback" } },
+    });
+    expect(quits).toBe(1);
+    if (manager) {
+      expect(closed).toHaveLength(1);
+      expect(w.readRegistry((r) => value(r.get(manager.id)))).toMatchObject({
+        initialization: { state: "accepted" },
+      });
+    } else {
+      expect(value(w.orchestrator.status()).at(-1)).toMatchObject({
+        launchState: "closed",
+        initialization: { state: "pending" },
+      });
+      expect(w.prompts.size).toBe(0);
+    }
+  },
+);
+
+test.each(["new-manager", "reattach", "parent", "foreground"] as const)(
+  "%s attachment observation failure preserves TUI and uncertain binding",
+  async (mode) => {
+    const w = await world();
+    const manager = mode === "reattach" ? value(await w.orchestrator.manage()).binding : undefined;
+    if (manager?.paneId) w.panes.delete(manager.paneId);
+    const old = {
+      HERDR_ENV: process.env["HERDR_ENV"],
+      HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
+    };
+    const exit = Promise.withResolvers<number>();
+    let stops = 0;
+    if (mode === "foreground") {
+      process.env["HERDR_ENV"] = "1";
+      process.env["HERDR_PANE_ID"] = "caller:p1";
+      w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+      w.panes.set("caller:p1", { workspaceId: "caller" });
+      Object.assign(w.deps, {
+        launchHere: () => ({
+          exited: exit.promise,
+          kill: () => {
+            stops++;
+            exit.resolve(0);
+          },
+        }),
+      });
+    }
+    const herdr = w.deps.createHerdrClient("/fixture/herdr.sock");
+    Object.assign(herdr, {
+      sendKeys: async () => {
+        stops++;
+      },
+      closeTab: async () => {
+        stops++;
+      },
+      closeWorkspace: async () => {
+        stops++;
+      },
+    });
+    Object.assign(w.deps, {
+      acquireLaunchSession: async () => ({
+        confirmTuiAttachment: async () => {
+          throw new TuiAttachmentUnverifiedError();
+        },
+        release: async () => {},
+      }),
+    });
+    try {
+      const result =
+        mode === "parent"
+          ? await w.createParent("project", true)
+          : await w.orchestrator.manage(mode === "foreground" ? { here: true } : undefined);
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "runtime_unavailable", details: { reason: "attachment_unverified" } },
+      });
+      expect(stops).toBe(0);
+      const current = value(w.orchestrator.status()).at(-1);
+      expect(current?.launchState).toBe("uncertain");
+      expect(current?.initialization.state).toBe(manager ? "accepted" : "pending");
+    } finally {
+      exit.resolve(0);
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+);
+
+test("foreground local fallback kills only its child and preserves the user workspace", async () => {
+  const w = await world();
+  const old = { HERDR_ENV: process.env["HERDR_ENV"], HERDR_PANE_ID: process.env["HERDR_PANE_ID"] };
+  process.env["HERDR_ENV"] = "1";
+  process.env["HERDR_PANE_ID"] = "caller:p1";
+  w.workspaces.set("caller", { workspaceId: "caller", rootPaneId: "caller:p1", cwd: w.root });
+  w.panes.set("caller:p1", { workspaceId: "caller" });
+  const exit = Promise.withResolvers<number>();
+  let kills = 0;
+  Object.assign(w.deps, {
+    launchHere: () => ({
+      exited: exit.promise,
+      kill: () => {
+        kills++;
+        exit.resolve(0);
+      },
+    }),
+    acquireLaunchSession: async () => ({
+      confirmTuiAttachment: async () => {
+        throw new TuiLocalFallbackError(1);
+      },
+      release: async () => {},
+    }),
+  });
+  try {
+    expect(await w.orchestrator.manage({ here: true })).toMatchObject({
+      ok: false,
+      error: { code: "runtime_unavailable", details: { reason: "tui_local_fallback" } },
+    });
+    expect(kills).toBe(1);
+    expect(w.workspaces.has("caller")).toBe(true);
+    expect(value(w.orchestrator.status()).at(-1)).toMatchObject({
+      launchState: "closed",
+      workspaceOwned: false,
+    });
+  } finally {
+    exit.resolve(0);
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("manager reattachment capacity refusal preserves its initialized identity without another TUI", async () => {
+  const w = await world();
+  const manager = value(await w.orchestrator.manage()).binding;
+  if (manager.paneId === null) throw new Error("Missing manager pane");
+  const pane = w.panes.get(manager.paneId);
+  if (pane === undefined) throw new Error("Missing manager pane");
+  w.panes.set(manager.paneId, { workspaceId: pane.workspaceId });
+  Object.assign(w.deps, {
+    acquireLaunchSession: async () => {
+      throw new HostCapacityError(20);
+    },
+  });
+  expect(await w.orchestrator.manage()).toMatchObject({
+    ok: false,
+    error: { code: "host_session_capacity" },
+  });
+  expect(w.runs).toHaveLength(1);
+  expect(w.readRegistry((registry) => value(registry.get(manager.id)))).toMatchObject({
+    id: manager.id,
+    launchState: "ready",
+    initialization: { state: "accepted" },
+  });
+});
 
 test("bare entry cannot displace a live reattachment owner after its lease expires", async () => {
   const w = await world();
@@ -1199,6 +1439,7 @@ test("foreground exit before readiness returns its code and releases the singlet
   process.env["HERDR_ENV"] = "1";
   process.env["HERDR_PANE_ID"] = "caller:p1";
   let child: ReturnType<typeof Bun.spawn> | undefined;
+  let held = false;
   const deadline = Promise.withResolvers<never>();
   const timer = setTimeout(
     () => deadline.reject(new Error("Foreground exit was not observed")),
@@ -1208,6 +1449,19 @@ test("foreground exit before readiness returns its code and releases the singlet
     const code = await Promise.race([
       runCli(["--root", w.root], {
         ...w.deps,
+        acquireLaunchSession: async () => {
+          held = true;
+          return {
+            confirmTuiAttachment: async () => {},
+            release: async () => {
+              held = false;
+            },
+          };
+        },
+        terminateBinding: async (binding) => {
+          expect(held).toBe(false);
+          await w.deps.terminateBinding(binding);
+        },
         launchHere: () => {
           child = Bun.spawn([process.execPath, "--eval", "process.exit(37)"], {
             stdin: "ignore",

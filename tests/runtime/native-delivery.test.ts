@@ -201,7 +201,7 @@ test("manager busy race reenters event admission before native auto; no mailbox 
         const decision = await harness.guard()(
           name,
           z.record(z.string(), z.unknown()).parse(input),
-          context(parent),
+          context(manager),
         );
         expect(decision).toBeUndefined();
         nativeCalls++;

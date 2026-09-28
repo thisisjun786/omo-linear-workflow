@@ -1,0 +1,23 @@
+PR19 round3 baseline48f2c8d; worktree-only commands.
+
+bun test tests/manager-notices.test.ts -t 'survives recipient finish failure'
+Four deterministic cases: idle admission rejection + finish worker failure;
+guard authorization rejection + finish worker failure; guard worker throw;
+active-tool setup throw. Every case expected rejected, received uncertain.
+0 pass, 4 fail; exit1. Runtime and SQLite registry are real, recipient native
+invocation counter remains0; sender can persist the proven rejection.
+
+bun test tests/manage.test.ts tests/integration/successor-recovery.test.ts -t 'capacity closes only'
+New successor tab: expected [workspace:new-tab], received [].
+New manager reattachment tab: expected length1, received0.
+Existing-tab controls passed. 2 pass,2 fail; exit1.
+
+bun test tests/herdr.test.ts -t 'closes exact tabs'
+closeTab absent, 0 pass/1 fail, exit1.
+
+GREEN runtime: manager-notices + manager-isolation28/0,14.22s.
+GREEN tabs: capacity cases + exact tab RPC8/0; typecheck exit0.
+The first tab GREEN pass also exposed a fixture assumption: an ordinary existing
+manager shell is not reused unless a pending reattachment exists. Fixture now
+creates/releases the durable pending claim to exercise actual reuse. Production
+reuse policy was not changed.

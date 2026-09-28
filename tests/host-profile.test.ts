@@ -17,6 +17,7 @@ import {
   readHostStatusReadOnly,
   resolveOmoAgentDir,
   runtimeCacheEnvironment,
+  WORKER_ADMISSION_MARKER,
 } from "../src/host-profile";
 
 const roots: string[] = [];
@@ -116,7 +117,7 @@ async function fixture() {
         "rpc",
         "--multi-session",
         "--session-runtime",
-        "in-process",
+        "worker",
         ...extensions.flatMap((path) => ["-e", path]),
       ],
       root,
@@ -129,7 +130,12 @@ async function fixture() {
       foreign_attached: 0,
       foreign_retained: 0,
     },
-    env_keys: [RUNTIME_CACHE_MARKER, "XDG_CACHE_HOME", EXTENSION_PROTOCOL_MARKER],
+    env_keys: [
+      RUNTIME_CACHE_MARKER,
+      "XDG_CACHE_HOME",
+      EXTENSION_PROTOCOL_MARKER,
+      WORKER_ADMISSION_MARKER,
+    ],
   };
   return { root, status };
 }
@@ -191,7 +197,7 @@ test("accepts required effective extensions while retaining additional host exte
         "rpc",
         "--multi-session",
         "--session-runtime",
-        "in-process",
+        "worker",
         ...extensions.flatMap((path) => ["-e", path]),
       ],
       root,
@@ -237,11 +243,87 @@ test("rejects a host missing the extension protocol marker with handoff recovery
   });
 });
 
+test("rejects a worker host missing target-side admission capability", async () => {
+  const { root, status } = await fixture();
+  const result = await createHostProfile(root, {
+    ...status,
+    env_keys: status.env_keys.filter((key) => key !== WORKER_ADMISSION_MARKER),
+  }).then(
+    () => null,
+    (cause: unknown) => cause,
+  );
+
+  expect(result).toMatchObject({
+    name: "HostProfileMismatchError",
+    details: {
+      missingCapabilities: ["worker_admission_2"],
+      recovery: { automatic: false },
+    },
+  });
+});
+
 test("writes a launch spec accepted by Senpi's real loader", async () => {
   const { root } = await fixture();
   const path = await createHostProfile(root);
   const loaded = await loadHostLaunchSpec(path);
+  expect(loaded.hostArgs.slice(0, 2)).toEqual(["--session-runtime", "worker"]);
+  expect(loaded.policy.coldStart).toBe("persistent");
   expect(loaded.env[EXTENSION_PROTOCOL_MARKER]).toBe("1");
+  expect(loaded.env[WORKER_ADMISSION_MARKER]).toBe("1");
+});
+
+test("phase-tagged admission refuses the previous worker RPC generation", async () => {
+  const { root, status } = await fixture();
+  const old = {
+    ...status,
+    env_keys: [
+      ...status.env_keys.filter((key) => key !== WORKER_ADMISSION_MARKER),
+      "OMO_INITIATIVE_WORKER_ADMISSION_1",
+    ],
+  };
+  await expect(createHostProfile(root, old)).rejects.toMatchObject({
+    name: "HostProfileMismatchError",
+    details: { missingCapabilities: ["worker_admission_2"] },
+  });
+});
+
+test("rejects the old in-process host for normal automatic handoff when idle", async () => {
+  const { root, status } = await fixture();
+  const old = {
+    ...status,
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...status.launchProfile.core.extensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
+    sessions: {
+      ...status.sessions,
+      total: 0,
+      interactive: 0,
+      worker: 0,
+    },
+  };
+
+  const result = await createHostProfile(root, old).then(
+    () => null,
+    (cause: unknown) => cause,
+  );
+
+  expect(result).toMatchObject({
+    name: "HostProfileMismatchError",
+    details: {
+      missingExtensions: [],
+      missingCapabilities: ["worker_session_runtime"],
+      actualProfile: { core: { session_runtime: "in-process" } },
+      recovery: { automatic: true },
+    },
+  });
 });
 
 test("rejects a reused host without cache isolation and supplies scoped handoff environment", async () => {
@@ -253,7 +335,11 @@ test("rejects a reused host without cache isolation and supplies scoped handoff 
   expect(result).toMatchObject({
     details: {
       missingExtensions: [],
-      missingCapabilities: ["runtime_cache_isolation", "olw_extension_protocol_2"],
+      missingCapabilities: [
+        "runtime_cache_isolation",
+        "olw_extension_protocol_2",
+        "worker_admission_2",
+      ],
       recovery: {
         automatic: false,
         env: {

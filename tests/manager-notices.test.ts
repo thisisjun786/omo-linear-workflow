@@ -271,7 +271,7 @@ test.each(["report", "question"] as const)(
         expect(notice?.length).toBeLessThan(240);
         expect(extra).toEqual([]);
         expect(JSON.parse(encoded ?? "null")).toEqual(message);
-        expect(input.delivery).toBe("auto");
+        expect(input.delivery).toBe("follow_up");
         expect(value(registry.delivery(message.id)).envelope).toEqual(message);
         if (kind === "report")
           expect(

@@ -119,6 +119,9 @@ describe("native delivery extension", () => {
       const send = harness.rpc("omo.initiative.send");
       const message = envelope(supervisor, parent, digest, "message-1");
       expect(resultState(await send(message))).toBe("accepted");
+      expect(z.object({ delivery: z.string() }).parse(harness.nativeInputs[0]).delivery).toBe(
+        "follow_up",
+      );
       const firstExec = harness.execCalls[0];
       expect(firstExec?.command).toBe("bun");
       expect(firstExec?.args[0]).toBe(join(root, "dist/core/worker.js"));

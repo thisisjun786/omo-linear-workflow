@@ -243,6 +243,24 @@ test("manager busy race reenters event admission before native auto; no mailbox 
   });
 });
 
+test("native follow_up to a busy target queues instead of rejecting for a missing turn id", async () => {
+  const f = await fixture();
+  f.state.active = true;
+  f.state.turnId = undefined;
+  const result = await f.execute({
+    thread: "parent",
+    message: "one logical instruction",
+    delivery: "follow_up",
+    all_scope: true,
+    idempotency_key: "busy-follow-up",
+  });
+  expect(nativeReceiptSchema.parse(result.details.result)).toMatchObject({
+    kind: "ok",
+    delivery: { kind: "queued" },
+  });
+  expect(f.state.promptCalls).toBe(0);
+});
+
 test("native pre-delivery turn conflict is distinct and replay cannot re-read the target", async () => {
   const f = await fixture();
   f.state.gateNextSnapshot = true;

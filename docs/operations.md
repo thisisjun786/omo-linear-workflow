@@ -175,6 +175,14 @@ atomically replaces the socket and drains the predecessor while preserving exist
 and sessions. After handoff, OLW still requires a reachable successor with the matching launch
 profile before manager entry continues.
 
+### Shared-host health and crash recovery
+
+`olw doctor --json` performs an on-demand shared-host inspection; OLW runs no polling daemon. The `host` object reports the current generation, whether the loaded extensions and environment markers match `omo-host.json`, all six session counters, RSS in MiB, recent endpoint-specific daemon crash records, warnings, and the exact profile handoff command. Set `OLW_HOST_RSS_WARNING_MB` to a positive MiB value to change the default 8192 MiB warning threshold. A `SIGKILL` crash is labeled as a likely OOM because Senpi's crash record does not identify the sender; confirm with the kernel journal.
+
+Senpi 2026.9.27 supports a launch profile only on `omo host ensure|handoff --launch-spec FILE`. In `modes/interactive/interactive-host-runtime.js`, both initial connection and reconnect call `ensureHost({ socket, agentDir })`; they pass no `policy` or `hostArgs` and expose no launch-spec hook. In `modes/rpc/host-ensure.js`, that cold start therefore defaults to a transient host with no OLW extensions. OLW cannot make that reconnect preserve its profile without patching Senpi, which OLW does not do.
+
+If doctor says the profile does not match OLW, do not trust ready bindings as remotely hosted. In particular, zero host sessions while OLW bindings are ready means those role TUIs are running local-only. The next bare `olw` or `olw manage` detects the mismatch and uses the existing automatic generation handoff only when every host session counter and the separately observed native session list are empty. If the host is occupied, OLW leaves it untouched; wait until all counters are zero, then retry entry or run the `host.profile.recovery` argv shown by doctor (equivalent to `node_modules/.bin/omo host handoff --launch-spec omo-host.json --socket .omo/state/omo.sock`) from the control root. Re-run `olw doctor --json` and require `host.profile.matchesOlw: true` before recovering roles.
+
 Before any operational switch, run `olw doctor --json` against the control root.
 `legacy_parents_remaining` lists every non-closed parent without an owned clone,
 including binding ID, project ID, cwd and workspace ID. The switch is blocked until

@@ -3,10 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
+import { hostLaunchProfile } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/protocol-identity.js";
 import {
   createHostProfile,
   EXTENSION_PROTOCOL_MARKER,
   HostCommandTimeoutError,
+  inspectHostHealth,
   observeEmptyHostSessions,
   RUNTIME_CACHE_MARKER,
   runtimeCacheEnvironment,
@@ -31,7 +33,17 @@ async function fixture() {
     reachable: true,
     socket: join(root, ".omo/state/omo.sock"),
     generation: 4,
-    launchProfile: { core: { session_runtime: "in-process", multi_session: true, extensions } },
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...extensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
     sessions: {
       total: 3,
       interactive: 2,
@@ -47,14 +59,20 @@ async function fixture() {
 
 test("rejects a running host missing the OLW extension without replacing its profile or sessions", async () => {
   const { root, status } = await fixture();
+  const oldExtensions = status.launchProfile.core.extensions.slice(0, -1);
   const old = {
     ...status,
-    launchProfile: {
-      core: {
-        ...status.launchProfile.core,
-        extensions: status.launchProfile.core.extensions.slice(0, -1),
-      },
-    },
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...oldExtensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
   };
   const result = await createHostProfile(root, old).then(
     () => null,
@@ -63,7 +81,9 @@ test("rejects a running host missing the OLW extension without replacing its pro
   expect(result).toMatchObject({
     name: "HostProfileMismatchError",
     details: {
-      missingExtensions: [join(root, "dist/extension/index.js")],
+      missingExtensions: status.launchProfile.core.extensions.filter(
+        (extension) => !oldExtensions.includes(extension),
+      ),
       generation: 4,
       sessions: { total: 3, interactive: 2, worker: 1 },
       recovery: {
@@ -85,9 +105,23 @@ test("rejects a running host missing the OLW extension without replacing its pro
 
 test("accepts required effective extensions while retaining additional host extensions", async () => {
   const { root, status } = await fixture();
-  status.launchProfile.core.extensions.push(join(root, "user-extension.js"));
-  expect(await createHostProfile(root, status)).toBe(join(root, "omo-host.json"));
-  expect(status.launchProfile.core.extensions).toHaveLength(4);
+  const extensions = [...status.launchProfile.core.extensions, join(root, "user-extension.js")];
+  const withExtra = {
+    ...status,
+    launchProfile: hostLaunchProfile(
+      [
+        "--mode",
+        "rpc",
+        "--multi-session",
+        "--session-runtime",
+        "in-process",
+        ...extensions.flatMap((path) => ["-e", path]),
+      ],
+      root,
+    ),
+  };
+  expect(await createHostProfile(root, withExtra)).toBe(join(root, "omo-host.json"));
+  expect(withExtra.launchProfile.core.extensions).toHaveLength(4);
 });
 
 test("does not consider an unknown running launch profile ready", async () => {
@@ -332,4 +366,90 @@ test("prepares a new profile when no host is reachable", async () => {
   expect(await createHostProfile(root, { ...status, reachable: false, launchProfile: null })).toBe(
     join(root, "omo-host.json"),
   );
+});
+
+test("reports generation, profile, sessions, RSS warnings, and local-only roles", async () => {
+  const { root, status } = await fixture();
+  const health = await inspectHostHealth(
+    root,
+    {
+      ...status,
+      rss_mb: 9_001,
+      sessions: { ...status.sessions, total: 0, interactive: 0, worker: 0, retained: 0 },
+    },
+    {
+      agentDir: join(root, "agent"),
+      readyBindings: 2,
+      rssWarningMb: 8_192,
+    },
+  );
+  expect(health).toMatchObject({
+    reachable: true,
+    generation: 4,
+    profile: { matchesOlw: true },
+    sessions: { total: 0 },
+    rssMb: 9_001,
+    warnings: [
+      expect.stringContaining("RSS 9001 MiB exceeds 8192 MiB"),
+      expect.stringContaining("role sessions are running local-only"),
+    ],
+  });
+});
+
+test("reads only this socket's recent daemon crash records and labels SIGKILL as likely OOM", async () => {
+  const { root, status } = await fixture();
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(status.socket));
+  await mkdir(daemonDir, { recursive: true });
+  await writeFile(
+    join(daemonDir, "crashes.jsonl"),
+    [
+      JSON.stringify({ at: "2026-09-27T17:54:32.119Z", signal: "SIGKILL", uptimeMs: 14_398_708 }),
+      "not-json",
+      JSON.stringify({ at: "2026-09-28T01:00:00.000Z", code: 1, uptimeMs: 50 }),
+    ].join("\n"),
+  );
+  const health = await inspectHostHealth(root, { ...status, rss_mb: 512 }, { agentDir });
+  expect(health.crashes).toEqual([
+    {
+      at: "2026-09-27T17:54:32.119Z",
+      signal: "SIGKILL",
+      uptimeMs: 14_398_708,
+      likelyOom: true,
+    },
+    { at: "2026-09-28T01:00:00.000Z", code: 1, uptimeMs: 50, likelyOom: false },
+  ]);
+});
+
+test("flags a default crash-restart profile and provides the exact safe handoff command", async () => {
+  const { root, status } = await fixture();
+  const health = await inspectHostHealth(
+    root,
+    {
+      ...status,
+      generation: 0,
+      rss_mb: 300,
+      launchProfile: hostLaunchProfile(
+        ["--mode", "rpc", "--multi-session", "--session-runtime", "in-process"],
+        root,
+      ),
+    },
+    { agentDir: join(root, "agent") },
+  );
+  expect(health.profile).toMatchObject({
+    matchesOlw: false,
+    recovery: [
+      join(root, "node_modules/.bin/omo"),
+      "host",
+      "handoff",
+      "--launch-spec",
+      join(root, "omo-host.json"),
+      "--socket",
+      status.socket,
+    ],
+  });
+  expect(health.warnings).toEqual([expect.stringContaining("does not match OLW")]);
 });

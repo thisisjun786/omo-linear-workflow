@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, realpath, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import { z } from "zod";
@@ -16,10 +16,11 @@ const hostStatusSchema = z.object({
   generation: z.number().nullable(),
   launchProfile: z
     .object({
+      profile_id: z.string().optional(),
       core: z.object({
         session_runtime: z.string(),
         multi_session: z.boolean(),
-        extensions: z.array(z.string()),
+        extensions: z.array(z.string()).readonly(),
       }),
     })
     .nullable(),
@@ -31,6 +32,7 @@ const hostStatusSchema = z.object({
     foreign_attached: z.number(),
     foreign_retained: z.number(),
   }),
+  rss_mb: z.number().nullable().optional(),
   env_keys: z.array(z.string()).default([]),
 });
 export type HostStatus = z.infer<typeof hostStatusSchema>;
@@ -87,6 +89,30 @@ export const RUNTIME_CACHE_MARKER = `OMO_INITIATIVE_CACHE_V1_${runtimeNamespace(
   import.meta.resolve("@code-yeongyu/senpi"),
 ).toUpperCase()}`;
 export const EXTENSION_PROTOCOL_MARKER = "OMO_INITIATIVE_EXTENSION_PROTOCOL_2";
+export const DEFAULT_HOST_RSS_WARNING_MB = 8 * 1024;
+
+const crashRecordSchema = z.object({
+  at: z.iso.datetime(),
+  signal: z.string().min(1).optional(),
+  code: z.number().int().optional(),
+  uptimeMs: z.number().nonnegative(),
+});
+
+export interface HostHealth {
+  readonly reachable: boolean;
+  readonly generation: number | null;
+  readonly profile: {
+    readonly matchesOlw: boolean;
+    readonly recovery: readonly string[];
+  };
+  readonly sessions: HostStatus["sessions"];
+  readonly rssMb: number | null;
+  readonly rssWarningMb: number;
+  readonly crashes: ReadonlyArray<
+    z.infer<typeof crashRecordSchema> & { readonly likelyOom: boolean }
+  >;
+  readonly warnings: readonly string[];
+}
 
 export function runtimeCacheEnvironment(
   root: string,
@@ -326,16 +352,121 @@ export async function verifyHostAfterHandoff(root: string, status: HostStatus): 
   await createHostProfile(root, status);
 }
 
-export async function createHostProfile(rootInput: string, status?: HostStatus): Promise<string> {
-  const root = await realpath(rootInput);
+function daemonDirectoryName(socket: string): string {
+  const canonical =
+    process.platform === "win32" ? socket.replaceAll("/", "\\").toLowerCase() : socket;
+  return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 16);
+}
+
+async function readCrashRecords(agentDir: string, socket: string) {
+  const path = join(agentDir, "rpc-host-daemon", daemonDirectoryName(socket), "crashes.jsonl");
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return [];
+    throw cause;
+  }
+  return text
+    .split("\n")
+    .flatMap((line) => {
+      if (line.trim() === "") return [];
+      try {
+        const parsed = crashRecordSchema.safeParse(JSON.parse(line));
+        return parsed.success
+          ? [{ ...parsed.data, likelyOom: parsed.data.signal === "SIGKILL" }]
+          : [];
+      } catch {
+        return [];
+      }
+    })
+    .slice(-10);
+}
+
+async function requiredExtensionPaths(root: string): Promise<string[]> {
   const required: string[] = [];
   for (const extension of EXTENSIONS) {
     const resolved = await realpath(join(root, extension));
-    if (!isContained(root, resolved)) {
+    if (!isContained(root, resolved))
       throw new Error(`Host extension escapes the control root: ${extension}`);
-    }
     required.push(resolved);
   }
+  return required;
+}
+
+function expectedProfileId(required: readonly string[]): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        extensions: [...required].sort(),
+        multi_session: true,
+        session_runtime: "in-process",
+      }),
+    )
+    .digest("hex");
+}
+
+function hostProfileMatchesOlw(status: HostStatus, required: readonly string[]): boolean {
+  return (
+    status.launchProfile?.profile_id === expectedProfileId(required) &&
+    status.env_keys.includes(RUNTIME_CACHE_MARKER) &&
+    status.env_keys.includes("XDG_CACHE_HOME") &&
+    status.env_keys.includes(EXTENSION_PROTOCOL_MARKER)
+  );
+}
+
+export async function inspectHostHealth(
+  rootInput: string,
+  status: HostStatus,
+  options: {
+    readonly agentDir: string;
+    readonly readyBindings?: number;
+    readonly rssWarningMb?: number;
+  },
+): Promise<HostHealth> {
+  const root = await realpath(rootInput);
+  const profilePath = join(root, "omo-host.json");
+  const matchesOlw =
+    !status.reachable || hostProfileMatchesOlw(status, await requiredExtensionPaths(root));
+  const rssWarningMb = options.rssWarningMb ?? DEFAULT_HOST_RSS_WARNING_MB;
+  const warnings: string[] = [];
+  if (status.reachable && !matchesOlw)
+    warnings.push(
+      "Shared host launch profile does not match OLW; use the recovery command after its sessions are idle.",
+    );
+  const rssMb = status.rss_mb ?? null;
+  if (rssMb !== null && rssMb > rssWarningMb)
+    warnings.push(`Shared host RSS ${rssMb} MiB exceeds ${rssWarningMb} MiB.`);
+  if (status.reachable && status.sessions.total === 0 && (options.readyBindings ?? 0) > 0)
+    warnings.push(
+      "OLW bindings are ready but the shared host has zero sessions; role sessions are running local-only.",
+    );
+  return {
+    reachable: status.reachable,
+    generation: status.generation,
+    profile: {
+      matchesOlw,
+      recovery: [
+        join(root, "node_modules/.bin/omo"),
+        "host",
+        "handoff",
+        "--launch-spec",
+        profilePath,
+        "--socket",
+        status.socket,
+      ],
+    },
+    sessions: status.sessions,
+    rssMb,
+    rssWarningMb,
+    crashes: await readCrashRecords(options.agentDir, status.socket),
+    warnings,
+  };
+}
+
+export async function createHostProfile(rootInput: string, status?: HostStatus): Promise<string> {
+  const root = await realpath(rootInput);
+  const required = await requiredExtensionPaths(root);
 
   await mkdir(join(root, ".omo/state"), { recursive: true, mode: 0o700 });
   const path = join(root, "omo-host.json");

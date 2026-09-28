@@ -2040,12 +2040,13 @@ export class Orchestrator {
           return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
         }
         if (sessionAbsent && observedIntent.value?.state === "uncertain")
-          return this.#recoverUndeliveredSuccessor(
+          return await this.#recoverUndeliveredSuccessor(
             binding,
             snapshot,
             handoff,
             observedIntent.value.attemptId,
-            hasLiveTui(pane) ? herdr : undefined,
+            pane,
+            herdr,
           );
         if (hasLiveTui(pane))
           return failure(
@@ -2093,7 +2094,13 @@ export class Orchestrator {
     snapshot: ScopeSnapshot,
     handoff: StageHandoff,
     attemptId: string,
-    liveHerdr?: HerdrClient,
+    pane: {
+      readonly paneId: string;
+      readonly workspaceId: string;
+      readonly sessionPath: string | null;
+      readonly agent?: string;
+    },
+    herdr: HerdrClient,
   ): Promise<Result<CreationResult>> {
     const unsafe = (reason: string) =>
       failure<CreationResult>(
@@ -2109,26 +2116,31 @@ export class Orchestrator {
       );
     if (binding.sessionPath === null) return unsafe("session_path_missing");
     try {
-      const transcript = await readFile(binding.sessionPath, "utf8");
-      const userMessage = z.object({
-        type: z.literal("message"),
-        message: z.object({ role: z.literal("user") }),
-      });
+      const startupTypes = new Set(["session", "model_change", "thinking_level_change"]);
+      const initialTranscript = await readFile(binding.sessionPath, "utf8");
       if (
-        transcript
+        initialTranscript
           .split("\n")
           .filter((line) => line.length > 0)
-          .some((line) => userMessage.safeParse(JSON.parse(line)).success)
+          .map((line) => z.object({ type: z.string() }).parse(JSON.parse(line)))
+          .some((entry) => !startupTypes.has(entry.type))
       )
-        return unsafe("transcript_contains_user_message");
+        return unsafe("transcript_contains_non_startup_entry");
     } catch (cause) {
       return unsafe(`transcript_unreadable: ${messageOf(cause)}`);
     }
-    const delivery = this.#withRegistry((registry) =>
-      registry.delivery(initializationMessageId(binding.id)),
-    );
-    if (delivery.ok) return unsafe(`initialization_delivery_${delivery.value.state}`);
-    if (delivery.error.code !== "not_found") return delivery;
+    if (
+      pane.paneId !== binding.paneId ||
+      pane.workspaceId !== binding.workspaceId ||
+      pane.sessionPath !== binding.sessionPath
+    )
+      return unsafe("pane_identity_mismatch");
+    try {
+      if (SessionManager.open(pane.sessionPath).getSessionId() !== binding.durableSessionId)
+        return unsafe("pane_durable_session_mismatch");
+    } catch (cause) {
+      return unsafe(`pane_session_unreadable: ${messageOf(cause)}`);
+    }
 
     const claimed = this.#withRegistry((registry) =>
       registry.recoverSuccessorLaunch(binding.id, attemptId, this.#deps.now()),
@@ -2142,19 +2154,39 @@ export class Orchestrator {
             execution: "not_started",
           })
         : failure("lease_lost", "Execute recovery attempt changed during proof");
-    if (liveHerdr !== undefined) {
-      const stopped = await this.#stopStageSession(binding, liveHerdr);
-      if (!stopped.ok) {
-        this.#withRegistry((registry) =>
-          registry.failSuccessorLaunch(
-            binding.id,
-            claimed.value.claimed ? claimed.value.token : "",
-          ),
-        );
-        return stopped;
-      }
+    const token = claimed.value.token;
+    const settleUnsafe = (result: Result<CreationResult>): Result<CreationResult> => {
+      const settled = this.#withRegistry((registry) =>
+        registry.failSuccessorLaunch(binding.id, token),
+      );
+      return settled.ok || settled.error.code === "lease_lost" ? result : settled;
+    };
+    if (hasLiveTui(pane)) {
+      const stopped = await this.#stopStageSession(binding, herdr);
+      if (!stopped.ok) return settleUnsafe(stopped);
     }
-    return this.#launchSuccessor(claimed.value.binding, snapshot, handoff, claimed.value.token);
+    try {
+      const startupTypes = new Set(["session", "model_change", "thinking_level_change"]);
+      const transcript = await readFile(binding.sessionPath, "utf8");
+      const entries = transcript
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => z.object({ type: z.string() }).parse(JSON.parse(line)));
+      if (entries.some((entry) => !startupTypes.has(entry.type)))
+        return settleUnsafe(unsafe("transcript_contains_non_startup_entry"));
+    } catch (cause) {
+      return settleUnsafe(unsafe(`transcript_unreadable: ${messageOf(cause)}`));
+    }
+    const delivery = this.#withRegistry((registry) =>
+      registry.delivery(initializationMessageId(binding.id)),
+    );
+    if (delivery.ok) return settleUnsafe(unsafe(`initialization_delivery_${delivery.value.state}`));
+    if (delivery.error.code !== "not_found") return settleUnsafe(delivery);
+    const confirmed = this.#withRegistry((registry) =>
+      registry.confirmSuccessorRecovery(binding.id, token),
+    );
+    if (!confirmed.ok) return settleUnsafe(confirmed);
+    return this.#launchSuccessor(confirmed.value, snapshot, handoff, token);
   }
 
   async #launchSuccessor(
@@ -3304,10 +3336,14 @@ export class Orchestrator {
       if (stage.value !== null) {
         const intent = this.#withRegistry((registry) => registry.successorLaunchIntent(bindingId));
         if (!intent.ok) return intent;
+        const retiring = this.#withRegistry((registry) =>
+          registry.uncertainSuccessorClosePending(bindingId),
+        );
+        if (!retiring.ok) return retiring;
         if (
           stage.value.stage === "execute" &&
-          target.value.launchState === "uncertain" &&
-          intent.value?.state === "uncertain"
+          ((target.value.launchState === "uncertain" && intent.value?.state === "uncertain") ||
+            retiring.value)
         )
           return withUnpushed(await this.#closeUncertainSuccessor(target.value), inspected.value);
         return this.#closeLineage(target.value, confirmAbsent);
@@ -3406,7 +3442,9 @@ export class Orchestrator {
   }
 
   async #closeUncertainSuccessor(binding: Binding): Promise<Result<Binding>> {
-    const closing = this.#withRegistry((registry) => registry.beginClose(binding.id));
+    const closing = this.#withRegistry((registry) =>
+      registry.beginUncertainSuccessorClose(binding.id),
+    );
     if (!closing.ok) return closing;
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     try {
@@ -3639,6 +3677,12 @@ export class Orchestrator {
             issues.push({ bindingId: binding.id, ...launchIntent.error });
             continue;
           }
+          if (
+            launchIntent.value?.state === "claimed" ||
+            launchIntent.value?.state === "dispatching"
+          ) {
+            continue;
+          }
           if (launchIntent.value?.state === "uncertain") {
             let session: NativeSession | undefined;
             try {
@@ -3720,12 +3764,21 @@ export class Orchestrator {
                   (item) =>
                     item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
                 );
+                if (pane === undefined) {
+                  issues.push({
+                    bindingId: binding.id,
+                    code: "runtime_unavailable",
+                    message: "Execute pane is missing",
+                  });
+                  continue;
+                }
                 const recovered = await this.#recoverUndeliveredSuccessor(
                   binding,
                   context.value.snapshot,
                   previous.value.handoff,
                   launchIntent.value.attemptId,
-                  pane !== undefined && hasLiveTui(pane) ? herdr : undefined,
+                  pane,
+                  herdr,
                 );
                 if (recovered.ok) observed += 1;
                 else issues.push({ bindingId: binding.id, ...recovered.error });

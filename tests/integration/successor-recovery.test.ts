@@ -27,7 +27,7 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 
-async function world(options: { executeInitialized?: boolean } = {}) {
+async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "olw-successor-recovery-"));
   roots.push(root);
   await mkdir(join(root, ".omo/state"), { recursive: true });
@@ -192,12 +192,14 @@ async function world(options: { executeInitialized?: boolean } = {}) {
   let absences = 0;
   let descriptions = 0;
   let sends = 0;
+  let paneSessionPath: string | null | undefined;
+  let beforePaneExit: (() => Promise<void>) | undefined;
   const listeners = new Set<(event: unknown) => void>();
   const pane = (): Snapshot["panes"][number] => ({
     paneId: "pane-execute",
     workspaceId: "workspace",
     revision: 1,
-    sessionPath: paneLive ? execute.sessionPath : null,
+    sessionPath: paneLive ? (paneSessionPath ?? execute.sessionPath) : null,
     ...(paneLive ? { agent: "pi" } : {}),
   });
   const herdr: HerdrClient = {
@@ -217,6 +219,7 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     sendKeys: async (paneId, text, keys) => {
       expect([paneId, text, keys]).toEqual(["pane-execute", "/quit", ["Enter"]]);
       quits += 1;
+      await beforePaneExit?.();
       paneLive = false;
       for (const listener of listeners)
         listener({ event: "pane.exited", data: { pane_id: paneId } });
@@ -295,9 +298,27 @@ async function world(options: { executeInitialized?: boolean } = {}) {
       close: async () => {},
     };
   }
+  const createHerdrClient = (): HerdrClient => {
+    if (!options.closeAwareHerdr) return herdr;
+    let closed = false;
+    return new Proxy(herdr, {
+      get(target, property) {
+        if (property === "close")
+          return () => {
+            closed = true;
+          };
+        const member = Reflect.get(target, property);
+        if (typeof member !== "function") return member;
+        return (...args: unknown[]) => {
+          if (closed) throw new Error("Herdr client is closed");
+          return Reflect.apply(member, target, args);
+        };
+      },
+    });
+  };
   const dependencies: OrchestratorDependencies = {
     openRegistry,
-    createHerdrClient: () => herdr,
+    createHerdrClient,
     resolveHerdrArtifact: async () => ({ artifactDir: join(root, "herdr") }),
     checkHostProfile: async () => {},
     ensureHost: async () => {},
@@ -349,6 +370,12 @@ async function world(options: { executeInitialized?: boolean } = {}) {
       native = false;
       paneLive = true;
     },
+    setPaneSessionPath: (path: string) => {
+      paneSessionPath = path;
+    },
+    setBeforePaneExit: (hook: () => Promise<void>) => {
+      beforePaneExit = hook;
+    },
     disconnect: () => {
       for (const listener of listeners)
         listener({ event: "connection.error", data: { code: "closed", message: "disconnected" } });
@@ -376,6 +403,109 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     registry: withRegistry,
   };
 }
+
+test("real CLI stage start keeps its Herdr client alive through recovery", async () => {
+  const w = await world({ executeInitialized: false, closeAwareHerdr: true });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  w.setRunHook(async () => w.publish());
+
+  expect(
+    await runCli(
+      [
+        "--root",
+        w.root,
+        "--herdr-socket",
+        "/herdr",
+        "stage",
+        "start",
+        "--from",
+        "plan",
+        "--parent",
+        "parent",
+        "--stage",
+        "execute",
+        "--id",
+        "start",
+        "--json",
+      ],
+      w.dependencies,
+    ),
+  ).toBe(0);
+  expect(w.quits()).toBe(1);
+  expect(w.sends()).toBe(1);
+});
+
+test("recovery rechecks durable evidence after the exact pane exits", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  w.setBeforePaneExit(async () => {
+    const manager = SessionManager.open(w.execute.sessionPath ?? "");
+    manager.appendMessage({ role: "user", content: "late accepted input", timestamp: Date.now() });
+  });
+  w.setRunHook(async () => w.publish());
+
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: {
+      code: "successor_recovery_unsafe",
+      details: { reason: "transcript_contains_non_startup_entry" },
+    },
+  });
+  expect(w.quits()).toBe(1);
+  expect(w.launches()).toBe(1);
+  expect(w.sends()).toBe(0);
+});
+
+test("reconcile refuses a live pane advertising another session without touching it", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  w.setPaneSessionPath("/another-binding/session.jsonl");
+  w.setRunHook(async () => w.publish());
+
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({
+    ok: false,
+    error: { code: "reconciliation_uncertain" },
+  });
+  expect(w.quits()).toBe(0);
+  expect(w.launches()).toBe(1);
+  expect(w.sends()).toBe(0);
+});
+
+test("concurrent stage start and reconcile initialize the recovered successor once", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  w.setRunHook(async () => {
+    entered.resolve();
+    await release.promise;
+    await w.publish();
+  });
+  const owner = w.start();
+  await entered.promise;
+  const reconcile = await w.orchestrator().reconcile({ projectId: "project" });
+  expect(reconcile).toMatchObject({ ok: true });
+  release.resolve();
+  expect(await owner).toMatchObject({ ok: true });
+  expect(w.launches()).toBe(2);
+  expect(w.sends()).toBe(1);
+});
 
 test("an uncertain local-only successor with an empty transcript relaunches and initializes once", async () => {
   const w = await world({ executeInitialized: false });
@@ -426,7 +556,10 @@ test("an uncertain successor with a durable init message is refused without muta
 
   expect(await w.start()).toMatchObject({
     ok: false,
-    error: { code: "successor_recovery_unsafe", message: expect.stringContaining("close") },
+    error: {
+      code: "successor_recovery_unsafe",
+      details: { reason: "transcript_contains_non_startup_entry" },
+    },
   });
   expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual(
     before,

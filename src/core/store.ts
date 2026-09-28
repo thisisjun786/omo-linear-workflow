@@ -218,6 +218,18 @@ export function openRegistry(
     claimed_at TEXT NOT NULL,
     owner TEXT NOT NULL
   )`);
+    db.run(`CREATE TABLE IF NOT EXISTS successor_launch_attempts (
+    binding_id TEXT NOT NULL REFERENCES bindings(id),
+    attempt_number INTEGER NOT NULL,
+    owner TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK(state IN ('claimed','dispatching','ready','uncertain','failed')),
+    claimed_at TEXT NOT NULL,
+    PRIMARY KEY (binding_id, attempt_number)
+  )`);
+    db.run(`CREATE TABLE IF NOT EXISTS successor_close (
+    binding_id TEXT PRIMARY KEY REFERENCES bindings(id),
+    mode TEXT NOT NULL CHECK(mode = 'retire-edge')
+  )`);
     const successorColumns = db
       .query<{ readonly name: string }, []>("PRAGMA table_info(successor_launch)")
       .all();
@@ -889,6 +901,27 @@ export function openRegistry(
     }
   }
 
+  function appendSuccessorAttempt(
+    id: string,
+    owner: string,
+    state: "claimed" | "dispatching" | "ready" | "uncertain" | "failed",
+    claimedAt: string,
+  ): void {
+    db.query(
+      "INSERT INTO successor_launch_attempts (binding_id, attempt_number, owner, state, claimed_at) VALUES (?, COALESCE((SELECT max(attempt_number) + 1 FROM successor_launch_attempts WHERE binding_id = ?), 1), ?, ?, ?)",
+    ).run(id, id, owner, state, claimedAt);
+  }
+
+  function settleSuccessorAttempt(
+    id: string,
+    owner: string,
+    state: "dispatching" | "ready" | "uncertain" | "failed",
+  ): void {
+    db.query(
+      "UPDATE successor_launch_attempts SET state = ? WHERE binding_id = ? AND owner = ?",
+    ).run(state, id, owner);
+  }
+
   function successorLaunchClaim(id: string): {
     readonly state: "claimed" | "dispatching" | "ready" | "uncertain";
     readonly claimed_at: string;
@@ -935,6 +968,7 @@ export function openRegistry(
       db.query(
         "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES (?, 'claimed', ?, ?) ON CONFLICT(binding_id) DO UPDATE SET state = 'claimed', claimed_at = excluded.claimed_at, owner = excluded.owner",
       ).run(id, claimedAt, token);
+      appendSuccessorAttempt(id, token, "claimed", claimedAt);
       return ok({ claimed: true, binding: binding.value, token });
     });
   }
@@ -980,16 +1014,43 @@ export function openRegistry(
           "Execute delivery cannot be proven absent. Inspect the delivery receipt; either reconcile the exact native session or close this binding and start a fresh successor.",
           { bindingId: id, reason: "delivery_row_exists" },
         );
+      if (
+        db
+          .query("SELECT owner FROM successor_launch_attempts WHERE binding_id = ? AND owner = ?")
+          .get(id, attemptId) === null
+      )
+        appendSuccessorAttempt(id, attemptId, "uncertain", held.claimed_at);
       const token = randomUUID();
       const claimed = db
         .query(
           "UPDATE successor_launch SET state = 'claimed', claimed_at = ?, owner = ? WHERE binding_id = ? AND state = 'uncertain' AND owner = ?",
         )
         .run(claimedAt, token, id, attemptId);
+      if (claimed.changes === 1) appendSuccessorAttempt(id, token, "claimed", claimedAt);
       return claimed.changes === 1
         ? ok({ claimed: true, binding: binding.value, token })
         : ok({ claimed: false, binding: binding.value, state: "claimed" });
     });
+  }
+
+  function confirmSuccessorRecovery(id: string, token: string): Result<Binding> {
+    return successorMutation(
+      id,
+      token,
+      (binding) =>
+        db
+          .query(
+            "SELECT message_id FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? LIMIT 1",
+          )
+          .get(id) !== null
+          ? error(
+              "successor_recovery_unsafe",
+              "Execute delivery appeared after the local TUI stopped; the successor was not relaunched",
+              { bindingId: id, reason: "delivery_row_exists_after_stop" },
+            )
+          : saveBinding({ ...binding, launchState: "provisioning" }),
+      "claimed",
+    );
   }
 
   function ownsSuccessorLaunch(id: string, token: string): Result<boolean> {
@@ -1097,6 +1158,7 @@ export function openRegistry(
       db.query(
         "UPDATE successor_launch SET state = 'dispatching' WHERE binding_id = ? AND owner = ? AND state = 'claimed'",
       ).run(id, token);
+      settleSuccessorAttempt(id, token, "dispatching");
       return get(id);
     });
   }
@@ -1144,7 +1206,10 @@ export function openRegistry(
         return binding;
       }
       if (held.state === "claimed") {
-        db.query("DELETE FROM successor_launch WHERE binding_id = ? AND owner = ?").run(id, token);
+        settleSuccessorAttempt(id, token, "failed");
+        db.query(
+          "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
+        ).run(id, token);
         return binding;
       }
       if (held.state === "dispatching") {
@@ -1156,6 +1221,7 @@ export function openRegistry(
         db.query(
           "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
         ).run(id, token);
+        settleSuccessorAttempt(id, token, "uncertain");
         return saved;
       }
       return error("invalid_transition", "Execute recovery is already settled");
@@ -1199,6 +1265,7 @@ export function openRegistry(
         id,
         token,
       );
+      settleSuccessorAttempt(id, token, state);
       return saved;
     });
   }
@@ -1480,6 +1547,35 @@ export function openRegistry(
     return saveBinding({ ...binding.value, launchState: "closed" });
   }
 
+  function beginUncertainSuccessorClose(id: string): Result<Binding> {
+    return transaction(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const intent = successorLaunchClaim(id);
+      if (
+        binding.value.launchState === "closing" &&
+        db.query("SELECT binding_id FROM successor_close WHERE binding_id = ?").get(id) !== null
+      )
+        return binding;
+      if (binding.value.launchState !== "uncertain" || intent?.state !== "uncertain")
+        return error("invalid_transition", "Only an uncertain execute can enter edge retirement");
+      const closing = beginCloseInTransaction(id);
+      if (!closing.ok) return closing;
+      db.query("INSERT INTO successor_close (binding_id, mode) VALUES (?, 'retire-edge')").run(id);
+      return closing;
+    });
+  }
+
+  function uncertainSuccessorClosePending(id: string): Result<boolean> {
+    try {
+      return ok(
+        db.query("SELECT binding_id FROM successor_close WHERE binding_id = ?").get(id) !== null,
+      );
+    } catch (cause) {
+      return error("storage_error", "Could not inspect successor closure", messageOf(cause));
+    }
+  }
+
   function closeUncertainSuccessor(id: string): Result<Binding> {
     return transaction(() => {
       const binding = get(id);
@@ -1489,7 +1585,8 @@ export function openRegistry(
       if (
         binding.value.launchState !== "closing" ||
         stage?.stage !== "execute" ||
-        intent?.state !== "uncertain"
+        intent?.state !== "uncertain" ||
+        db.query("SELECT binding_id FROM successor_close WHERE binding_id = ?").get(id) === null
       )
         return error("invalid_transition", "Only a closing uncertain execute can be retired");
       if (stage.previousBindingId === null)
@@ -1505,6 +1602,7 @@ export function openRegistry(
       });
       if (!restored.ok) return restored;
       lineage.retire(id);
+      db.query("DELETE FROM successor_close WHERE binding_id = ?").run(id);
       return closed;
     });
   }
@@ -2391,6 +2489,7 @@ export function openRegistry(
     beginSuccessorLaunch,
     successorLaunchIntent,
     recoverSuccessorLaunch,
+    confirmSuccessorRecovery,
     ownsSuccessorLaunch,
     provisionSuccessorLaunch,
     prepareSuccessorLaunch,
@@ -2409,6 +2508,8 @@ export function openRegistry(
     setOwner,
     beginClose,
     finishClose,
+    beginUncertainSuccessorClose,
+    uncertainSuccessorClosePending,
     closeUncertainSuccessor,
     post,
     postedReports: (filter, includeManager) => inboxRecords(filter, false, includeManager),

@@ -145,7 +145,12 @@ function seedRegistry(
   socket: string,
   managerPath: string,
   parentPath: string,
-): { readonly manager: Binding; readonly parent: Binding; readonly digest: string } {
+): {
+  readonly manager: Binding;
+  readonly parent: Binding;
+  readonly digest: string;
+  readonly managerDigest: string;
+} {
   const dbPath = join(scratch, ".omo/state/registry.sqlite");
   const registry = openRegistry(dbPath);
   try {
@@ -253,6 +258,7 @@ function seedRegistry(
       manager,
       parent: value(registry.finishInitialization(reservedParent.id, "accepted")),
       digest,
+      managerDigest,
     };
   } finally {
     registry.close();
@@ -530,6 +536,220 @@ async function main(): Promise<void> {
       first: rejected.state,
       retry: retried.state,
       attempts: retried.attempts?.length,
+      transcriptOccurrences: 1,
+    });
+
+    // Instructions and issue packets take no idle admission: native delivery itself must
+    // queue behind a running turn. The pinned host never reports activeTurnId, so the old
+    // `auto` mode rejected every busy target with turn_conflict_before_delivery.
+    const instruction = (id: string): Envelope => ({
+      version: 1,
+      id,
+      fromBindingId: fixture.manager.id,
+      toBindingId: fixture.parent.id,
+      designationId: fixture.manager.designationId,
+      snapshotDigest: fixture.managerDigest,
+      kind: "instruction",
+      text: `instruction ${id}\nReproducible busy-target delivery QA payload`,
+      outcome: null,
+      evidence: [],
+    });
+    const sendInstruction = async (message: Envelope) =>
+      value(
+        resultSchema(deliveryRecordSchema).parse(
+          await managerClient.requestExtension("omo.initiative.send", message),
+        ),
+      );
+    await idleNowOrSettled(parentClient);
+    const idleInstruction = instruction("qa-idle-instruction");
+    const idleDelivered = await sendInstruction(idleInstruction);
+    assert.equal(idleDelivered.state, "accepted");
+    assert.equal(
+      idleDelivered.receipt?.kind === "ok" && idleDelivered.receipt.delivery.kind,
+      "started",
+    );
+    await idleNowOrSettled(parentClient);
+    assert.equal(await occurrence(parentClient, idleInstruction.id), 1);
+    receipt("idle-instruction", { delivery: idleDelivered, transcriptOccurrences: 1 });
+
+    await rm(join(gate, "entered"), { force: true });
+    await rm(join(gate, "release"), { force: true });
+    const parentEntered = waitForFile(gate, "entered", "Parent busy gate");
+    await parentClient.prompt("OLW_ENTRY_BUSY_GATE");
+    await parentEntered;
+    assert.equal((await parentClient.getState()).isStreaming, true);
+    const busyInstruction = instruction("qa-busy-instruction");
+    const busyDelivered = await sendInstruction(busyInstruction);
+    assert.equal(busyDelivered.state, "accepted", JSON.stringify(busyDelivered));
+    assert.equal(
+      busyDelivered.receipt?.kind === "ok" && busyDelivered.receipt.delivery.kind,
+      "queued",
+    );
+    assert.equal((await parentClient.getState()).isStreaming, true);
+    assert.equal(await occurrence(parentClient, busyInstruction.id), 0);
+    const busyReplayInstruction = await sendInstruction(busyInstruction);
+    assert.deepEqual(busyReplayInstruction, busyDelivered);
+    const queuedTurn = Promise.withResolvers<void>();
+    let settles = 0;
+    const stopQueued = parentClient.onEvent((event) => {
+      if (event.type === "agent_settled" && ++settles >= 1) {
+        void occurrence(parentClient, busyInstruction.id).then((count) => {
+          if (count >= 1) queuedTurn.resolve();
+        }, queuedTurn.reject);
+      }
+    });
+    const queuedDeadline = setTimeout(
+      () => queuedTurn.reject(new Error("Queued instruction was never processed")),
+      WAIT_MS,
+    );
+    try {
+      await writeFile(join(gate, "release"), "release\n", { flag: "wx", mode: 0o600 });
+      await queuedTurn.promise;
+    } finally {
+      clearTimeout(queuedDeadline);
+      stopQueued();
+    }
+    await idleNowOrSettled(parentClient);
+    assert.equal(await occurrence(parentClient, busyInstruction.id), 1);
+    assert.deepEqual(await sendInstruction(busyInstruction), busyDelivered);
+    assert.equal(await occurrence(parentClient, busyInstruction.id), 1);
+    receipt("busy-instruction", {
+      acceptedWhileStreaming: true,
+      absentBeforeRelease: true,
+      replayIdentical: true,
+      delivery: busyDelivered,
+      transcriptOccurrencesAfterRelease: 1,
+    });
+
+    // A target with an active goal keeps re-waking itself with hidden continuation
+    // turns (the live JUN-288 child). Delivery must still land exactly once.
+    await idleNowOrSettled(parentClient);
+    await rm(join(gate, "entered"), { force: true });
+    await rm(join(gate, "release"), { force: true });
+    const goalEntered = waitForFile(gate, "entered", "Goal continuation gate");
+    await parentClient.prompt(
+      "/goal OLW_ENTRY_BUSY_GATE keep acknowledging OLW QA continuation turns.",
+    );
+    await goalEntered;
+    assert.equal((await parentClient.getState()).isStreaming, true);
+    const goalInstruction = instruction("qa-goal-loop-instruction");
+    const goalDelivered = await sendInstruction(goalInstruction);
+    assert.equal(goalDelivered.state, "accepted", JSON.stringify(goalDelivered));
+    assert.equal(
+      goalDelivered.receipt?.kind === "ok" && goalDelivered.receipt.delivery.kind,
+      "queued",
+    );
+    const goalLanded = Promise.withResolvers<void>();
+    const inspectGoal = () => {
+      void occurrence(parentClient, goalInstruction.id).then((count) => {
+        if (count >= 1) goalLanded.resolve();
+      }, goalLanded.reject);
+    };
+    const stopGoal = parentClient.onEvent((event) => {
+      if (event.type === "agent_start" || event.type === "agent_settled") inspectGoal();
+    });
+    const goalDeadline = setTimeout(
+      () => goalLanded.reject(new Error("Instruction never reached the goal-looping target")),
+      WAIT_MS,
+    );
+    try {
+      await writeFile(join(gate, "release"), "release\n", { flag: "wx", mode: 0o600 });
+      await goalLanded.promise;
+    } finally {
+      clearTimeout(goalDeadline);
+      stopGoal();
+    }
+    await parentClient.prompt("/goal clear");
+    await idleNowOrSettled(parentClient);
+    assert.equal(await occurrence(parentClient, goalInstruction.id), 1);
+    assert.deepEqual(await sendInstruction(goalInstruction), goalDelivered);
+    assert.equal(await occurrence(parentClient, goalInstruction.id), 1);
+    receipt("goal-loop-instruction", {
+      continuationObserved: true,
+      delivery: goalDelivered,
+      transcriptOccurrences: 1,
+    });
+
+    // Answer path: the parent asks, then the manager answers while the parent is busy.
+    // Answers keep their idle admission and must still land exactly once.
+    const questionId = "question:qa-parent:qa-follow-up";
+    const question: Envelope = {
+      version: 1,
+      id: questionId,
+      fromBindingId: fixture.parent.id,
+      toBindingId: fixture.manager.id,
+      designationId: fixture.parent.designationId,
+      snapshotDigest: fixture.digest,
+      kind: "question",
+      text: "Which option should the QA parent take?",
+      outcome: null,
+      evidence: [],
+      question: {
+        questions: [
+          {
+            id: "qa-choice",
+            question: "Which option should the QA parent take?",
+            options: [{ label: "A" }, { label: "B" }],
+            multiSelect: false,
+          },
+        ],
+        escalates: null,
+      },
+    };
+    const asked = value(
+      resultSchema(deliveryRecordSchema).parse(
+        await parentClient.requestExtension("omo.initiative.send", question),
+      ),
+    );
+    assert.equal(asked.state, "accepted", JSON.stringify(asked));
+    await idleNowOrSettled(managerClient);
+    assert.equal(await occurrence(managerClient, questionId), 1);
+    await idleNowOrSettled(parentClient);
+    await rm(join(gate, "entered"), { force: true });
+    await rm(join(gate, "release"), { force: true });
+    const answerEntered = waitForFile(gate, "entered", "Answer busy gate");
+    await parentClient.prompt("OLW_ENTRY_BUSY_GATE");
+    await answerEntered;
+    const answer: Envelope = {
+      version: 1,
+      id: `answer:${questionId}`,
+      fromBindingId: fixture.manager.id,
+      toBindingId: fixture.parent.id,
+      designationId: fixture.manager.designationId,
+      snapshotDigest: fixture.managerDigest,
+      kind: "answer",
+      text: "Take option A.",
+      outcome: null,
+      evidence: [],
+      answer: {
+        questionId,
+        answers: { "qa-choice": { selected: ["A"] } },
+        unanswered: [],
+      },
+    };
+    const answerSending = waitForDelivery(join(state, "registry.sqlite"), answer.id, "sending");
+    const answerResult = managerClient.requestExtension("omo.initiative.send", answer);
+    await answerSending;
+    assert.equal((await parentClient.getState()).isStreaming, true);
+    assert.equal(await occurrence(parentClient, answer.id), 0);
+    await writeFile(join(gate, "release"), "release\n", { flag: "wx", mode: 0o600 });
+    const answered = value(resultSchema(deliveryRecordSchema).parse(await answerResult));
+    assert.equal(answered.state, "accepted", JSON.stringify(answered));
+    await idleNowOrSettled(parentClient);
+    assert.equal(await occurrence(parentClient, answer.id), 1);
+    assert.deepEqual(
+      value(
+        resultSchema(deliveryRecordSchema).parse(
+          await managerClient.requestExtension("omo.initiative.send", answer),
+        ),
+      ),
+      answered,
+    );
+    assert.equal(await occurrence(parentClient, answer.id), 1);
+    receipt("busy-answer", {
+      question: asked.state,
+      waitedWhileStreaming: true,
+      delivery: answered,
       transcriptOccurrences: 1,
     });
 

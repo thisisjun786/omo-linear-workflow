@@ -64,7 +64,13 @@ import {
 } from "./repo/checkout";
 import { fetchMirror } from "./repo/mirror";
 import { mergePr, type OpenPrInput, openPr } from "./repo/pr";
-import { attachBinding, type NativeSession, NativeSessionAbsentError } from "./transport";
+import {
+  attachBinding,
+  type NativeSession,
+  NativeSessionAbsentError,
+  type NativeSessionProbe,
+  probeBindingSession,
+} from "./transport";
 import {
   checkUpdates,
   systemUpdateTimer,
@@ -146,6 +152,7 @@ export type CreateParentInput = z.infer<typeof createParentInputSchema>;
 export const MANAGER_DESIGNATION_ID = "manager";
 /** A launch claim older than this is presumed abandoned by a crashed owner. */
 const LAUNCH_CLAIM_LEASE_MS = 120_000;
+const RUNTIME_HEALTH_DEADLINE_MS = 5_000;
 const managerSnapshot: ScopeSnapshot = {
   version: 1,
   source: "linear-export",
@@ -260,7 +267,6 @@ export interface ListedQuestion {
   readonly answer: DeliveryRecord | null;
 }
 export type StatusBinding = Binding & {
-  readonly runtimeState?: "connected" | "local_only" | "host_lost";
   readonly mode?: ChildCreateMode;
   readonly stage?: ChildStage;
   readonly stageBindings?: ReadonlyArray<{
@@ -291,6 +297,7 @@ export interface OrchestratorDependencies {
   readonly openRegistry: (path: string, options?: { readonly readonly?: boolean }) => Registry;
   readonly createHerdrClient: (socket: string) => HerdrClient;
   readonly attachBinding: (binding: Binding) => Promise<NativeSession>;
+  readonly probeBindingSession?: (binding: Binding) => Promise<NativeSessionProbe>;
   readonly terminateBinding: (binding: Binding) => Promise<void>;
   readonly resolveHerdrArtifact: (root: string) => Promise<{ readonly artifactDir: string }>;
   readonly ensureHost: (
@@ -452,31 +459,45 @@ async function defaultEnsureHost(
 }
 
 async function defaultPrompt(binding: Binding, text: string): Promise<void> {
-  if (binding.sessionPath === null)
-    throw new Error("Cannot prompt a binding without a session path");
+  const sessionPath = binding.sessionPath;
+  if (sessionPath === null) throw new Error("Cannot prompt a binding without a session path");
   const client = new RpcClient({ socketPath: binding.omoSocket });
-  await client.start();
-  try {
-    const sessions = await client.listSessions();
-    const found = sessions.find(
-      (session) =>
-        session.status === "open" &&
-        session.durableSessionId === binding.durableSessionId &&
-        session.sessionPath === binding.sessionPath &&
-        session.cwd === binding.cwd,
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("Native host-loss notice timed out")),
+      RUNTIME_HEALTH_DEADLINE_MS,
     );
-    if (found === undefined) throw new Error("Exact durable native session is not open for prompt");
-    const opened = await client.openSession({
-      sessionPath: binding.sessionPath,
-      cwd: binding.cwd,
-      retain_on_disconnect: true,
-    });
-    if (opened.sessionId !== found.sessionId || opened.attached !== true) {
-      throw new Error("Native host did not attach the exact existing session for prompt");
-    }
-    await client.prompt(text);
+  });
+  try {
+    await Promise.race([
+      (async () => {
+        await client.start();
+        const sessions = await client.listSessions();
+        const found = sessions.find(
+          (session) =>
+            session.status === "open" &&
+            session.durableSessionId === binding.durableSessionId &&
+            session.sessionPath === sessionPath &&
+            session.cwd === binding.cwd,
+        );
+        if (found === undefined)
+          throw new Error("Exact durable native session is not open for prompt");
+        const opened = await client.openSession({
+          sessionPath,
+          cwd: binding.cwd,
+          retain_on_disconnect: true,
+        });
+        if (opened.sessionId !== found.sessionId || opened.attached !== true) {
+          throw new Error("Native host did not attach the exact existing session for prompt");
+        }
+        await client.prompt(text);
+      })(),
+      deadline,
+    ]);
   } finally {
-    await client.stop();
+    if (timer !== undefined) clearTimeout(timer);
+    await client.stop().catch(() => {});
   }
 }
 
@@ -575,6 +596,7 @@ const defaults: OrchestratorDependencies = {
   openRegistry,
   createHerdrClient,
   attachBinding,
+  probeBindingSession,
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
@@ -2779,8 +2801,9 @@ export class Orchestrator {
   }
 
   public status(filter: string | ScopeFilter = {}): Result<StatusBinding[]> {
+    if (!existsSync(this.#dbPath)) return ok([]);
     const scope = typeof filter === "string" ? { initiativeId: filter } : filter;
-    return this.#withRegistry((registry) => {
+    return this.#withReadonlyRegistry((registry) => {
       const listed = registry.list();
       if (!listed.ok) return listed;
       const questions = registry.questions({});
@@ -2837,18 +2860,22 @@ export class Orchestrator {
 
   public async statusWithRuntimeHealth(
     filter: string | ScopeFilter = {},
-    notify = true,
+    notify = false,
   ): Promise<Result<StatusBinding[]>> {
     const listed = this.status(filter);
     if (!listed.ok) return listed;
-    const active = listed.value.filter(
-      (binding) => binding.launchState === "ready" && binding.sessionPath !== null,
+    const all = this.status();
+    if (!all.ok) return all;
+    const candidates = all.value.filter(
+      (binding) =>
+        (binding.launchState === "ready" || binding.launchState === "uncertain") &&
+        binding.sessionPath !== null,
     );
-    if (active.length === 0) return listed;
+    if (candidates.length === 0) return listed;
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {
       const snapshot = await herdr.snapshot();
-      const live = active.filter((binding) =>
+      const live = candidates.filter((binding) =>
         snapshot.panes.some(
           (pane) =>
             pane.paneId === binding.paneId &&
@@ -2857,50 +2884,58 @@ export class Orchestrator {
         ),
       );
       if (live.length === 0) return listed;
-      const hostReachability = new Map<string, boolean>();
+      const hostReachability = new Map<string, "reachable" | "lost" | "unknown">();
       for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
         try {
           const status = await (this.#deps.readHostStatus ?? readHostStatus)(this.#root, socket, {
             ...process.env,
             ...runtimeCacheEnvironment(this.#root),
           });
-          hostReachability.set(socket, status.reachable);
+          hostReachability.set(socket, status.reachable ? "reachable" : "lost");
         } catch {
-          hostReachability.set(socket, false);
+          hostReachability.set(socket, "unknown");
         }
       }
-      const states = new Map<string, "connected" | "local_only" | "host_lost">();
+      const states = new Map<string, NonNullable<StatusBinding["runtimeState"]>>();
       for (const binding of live) {
-        if (!hostReachability.get(binding.omoSocket)) {
+        const host = hostReachability.get(binding.omoSocket);
+        if (host === "lost") {
           states.set(binding.id, "host_lost");
           continue;
         }
-        let session: NativeSession | undefined;
-        try {
-          session = await this.#deps.attachBinding(binding);
-          states.set(binding.id, "connected");
-        } catch (cause) {
-          states.set(
-            binding.id,
-            cause instanceof NativeSessionAbsentError ? "local_only" : "host_lost",
-          );
-        } finally {
-          await session?.close();
+        if (host !== "reachable") {
+          states.set(binding.id, "unknown");
+          continue;
         }
+        const probe = await (this.#deps.probeBindingSession ?? probeBindingSession)(binding);
+        states.set(
+          binding.id,
+          probe.state === "open"
+            ? "connected"
+            : probe.state === "absent"
+              ? "local_only"
+              : probe.state === "present"
+                ? "starting"
+                : "unknown",
+        );
       }
       const unavailable = new Set(
-        [...states].filter(([, state]) => state !== "connected").map(([id]) => id),
+        [...states]
+          .filter(([, state]) => state === "local_only" || state === "host_lost")
+          .map(([id]) => id),
       );
       if (notify) {
         for (const binding of live) {
           const state = states.get(binding.id);
+          if (state !== undefined)
+            this.#withRegistry((registry) => registry.setRuntimeState(binding.id, state));
           if (state === "local_only" || state === "host_lost")
             await this.#notifyRuntimeLoss(binding, state, unavailable);
         }
       }
       return ok(
         listed.value.map((binding) => {
-          const runtimeState = states.get(binding.id);
+          const runtimeState = states.get(binding.id) ?? binding.runtimeState;
           return runtimeState === undefined ? binding : { ...binding, runtimeState };
         }),
       );
@@ -2948,7 +2983,10 @@ export class Orchestrator {
         : binding.id
     }`;
     try {
-      await this.#deps.prompt(claim.value.target, message);
+      await this.#boundedRuntimeOperation(
+        this.#deps.prompt(claim.value.target, message),
+        "Host-loss notice timed out",
+      );
       const finished = this.#withRegistry((registry) =>
         registry.finish(claim.value.record.envelope.id, {
           kind: "ok",
@@ -3269,8 +3307,8 @@ export class Orchestrator {
 
   public async reconcile(
     filter: string | ScopeFilter,
-  ): Promise<Result<{ readonly observed: number; readonly bindings: Binding[] }>> {
-    const listed = await this.statusWithRuntimeHealth(filter);
+  ): Promise<Result<{ readonly observed: number; readonly bindings: StatusBinding[] }>> {
+    const listed = await this.statusWithRuntimeHealth(filter, true);
     if (!listed.ok) return listed;
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {
@@ -3425,7 +3463,7 @@ export class Orchestrator {
           lost(binding, "runtime_unavailable", messageOf(cause));
         }
       }
-      const current = this.status(filter);
+      const current = await this.statusWithRuntimeHealth(filter);
       if (!current.ok) return current;
       return issues.length === 0
         ? ok({ observed, bindings: current.value })
@@ -4073,6 +4111,28 @@ export class Orchestrator {
     );
     if (!snapshot.ok) return snapshot;
     return ok({ designation: designation.value, snapshot: snapshot.value });
+  }
+
+  async #boundedRuntimeOperation<T>(operation: Promise<T>, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), RUNTIME_HEALTH_DEADLINE_MS);
+    });
+    try {
+      return await Promise.race([operation, deadline]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  #withReadonlyRegistry<T>(operation: (registry: Registry) => Result<T>): Result<T> {
+    if (!existsSync(this.#dbPath)) return failure("not_found", "Registry does not exist");
+    const registry = this.#deps.openRegistry(this.#dbPath, { readonly: true });
+    try {
+      return operation(registry);
+    } finally {
+      registry.close();
+    }
   }
 
   #withRegistry<T>(operation: (registry: Registry) => Result<T>): Result<T> {

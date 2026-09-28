@@ -747,7 +747,7 @@ test("status/close: status counts unanswered sent/received records, excludes ans
   }
 });
 
-test("status detects a live local-only role and posts its host-loss notice exactly once", async () => {
+test("status is read-only while reconcile posts one host-loss notice and preserves runtime state", async () => {
   const w = await world();
   try {
     const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
@@ -774,7 +774,7 @@ test("status detects a live local-only role and posts its host-loss notice exact
       onEvent: () => () => {},
       close: async () => {},
     });
-    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+    const runtimeDependencies = {
       ...w.dependencies,
       readHostStatus: async () => ({
         reachable: true,
@@ -791,14 +791,17 @@ test("status detects a live local-only role and posts its host-loss notice exact
         },
         env_keys: [],
       }),
-      attachBinding: async (binding) => {
+      probeBindingSession: async (binding: Binding) =>
+        binding.id === child.id ? { state: "absent" as const } : { state: "open" as const },
+      attachBinding: async (binding: Binding) => {
         if (binding.id === child.id) throw new NativeSessionAbsentError();
         return healthySession(binding);
       },
-      prompt: async (binding, text) => {
+      prompt: async (binding: Binding, text: string) => {
         prompts.push({ bindingId: binding.id, text });
       },
-    });
+    };
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", runtimeDependencies);
 
     for (let attempt = 0; attempt < 2; attempt++) {
       expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
@@ -808,6 +811,40 @@ test("status detects a live local-only role and posts its host-loss notice exact
         ]),
       });
     }
+    expect(prompts).toHaveLength(0);
+    expect(value(w.registry.operationalNotices({}))).toHaveLength(0);
+    expect(
+      await runCli(
+        ["--root", w.root, "--herdr-socket", "/fake/herdr", "status", "--project", "p", "--json"],
+        runtimeDependencies,
+      ),
+    ).toBe(0);
+    expect(prompts).toHaveLength(0);
+    expect(value(w.registry.operationalNotices({}))).toHaveLength(0);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reconciled = await orchestrator.reconcile({ projectId: "p" });
+      expect(reconciled).toMatchObject({
+        ok: false,
+        error: {
+          code: "reconciliation_uncertain",
+          details: {
+            bindings: expect.arrayContaining([
+              expect.objectContaining({ id: child.id, runtimeState: "local_only" }),
+            ]),
+          },
+        },
+      });
+    }
+    expect(await orchestrator.statusWithRuntimeHealth({ projectId: "p" })).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({
+          id: child.id,
+          launchState: "uncertain",
+          runtimeState: "local_only",
+        }),
+      ]),
+    });
     expect(prompts).toHaveLength(1);
     expect(prompts[0]?.bindingId).toBe(w.parent.id);
     expect(value(w.registry.operationalNotices({}))).toHaveLength(1);
@@ -818,6 +855,128 @@ test("status detects a live local-only role and posts its host-loss notice exact
         operational: { failure: { source: "host_loss" } },
       },
     });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("runtime health distinguishes starting and unknown probes without notifying", async () => {
+  const w = await world();
+  try {
+    const starting = w.ready(w.reserve("starting", "direct"), "starting-ws", "starting-ws:p");
+    const unknown = w.parent;
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostStatus: async () => ({
+        reachable: true,
+        socket: "/fake/omo",
+        generation: 0,
+        launchProfile: null,
+        sessions: {
+          total: 2,
+          interactive: 2,
+          worker: 0,
+          retained: 0,
+          foreign_attached: 0,
+          foreign_retained: 0,
+        },
+        env_keys: [],
+      }),
+      probeBindingSession: async (binding) =>
+        binding.id === starting.id
+          ? { state: "present" as const, status: "opening" as const }
+          : binding.id === unknown.id
+            ? { state: "unknown" as const, reason: "probe timed out" }
+            : { state: "open" as const },
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({ id: starting.id, runtimeState: "starting" }),
+        expect.objectContaining({ id: unknown.id, runtimeState: "unknown" }),
+      ]),
+    });
+    expect(prompts).toEqual([]);
+    expect(value(w.registry.operationalNotices({}))).toEqual([]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("project reconciliation checks an affected manager outside display scope and posts locally", async () => {
+  const w = await world();
+  try {
+    const managerScope: ScopeSnapshot = {
+      version: 1,
+      source: "linear-export",
+      initiative: null,
+      projects: [],
+      decisionRefs: [],
+    };
+    const digest = value(w.registry.importScope(managerScope)).digest;
+    const manager = value(
+      w.registry.reserve({
+        bindingId: "manager",
+        durableSessionId: "s-manager",
+        designation: {
+          id: "manager-designation",
+          snapshotDigest: digest,
+          designatedBy: "user",
+          designatedAt: "now",
+          create: true,
+          execute: true,
+          contact: true,
+        },
+        snapshot: managerScope,
+        assignment: { role: "manager" },
+        cwd: w.root,
+        checkout: null,
+        herdrSocket: "/fake/herdr",
+        omoSocket: "/fake/omo",
+      }),
+    );
+    w.ready(manager, "manager-ws", "manager-ws:p");
+    value(w.registry.setOwner(w.parent.id, manager.id));
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostStatus: async () => ({
+        reachable: true,
+        socket: "/fake/omo",
+        generation: 0,
+        launchProfile: null,
+        sessions: {
+          total: 0,
+          interactive: 0,
+          worker: 0,
+          retained: 0,
+          foreign_attached: 0,
+          foreign_retained: 0,
+        },
+        env_keys: [],
+      }),
+      probeBindingSession: async () => ({ state: "absent" as const }),
+      attachBinding: async () => {
+        throw new NativeSessionAbsentError();
+      },
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    await orchestrator.reconcile({ projectId: "p" });
+    expect(prompts).toEqual([]);
+    expect(value(w.registry.operationalNotices({}))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          state: "posted",
+          envelope: expect.objectContaining({ fromBindingId: w.parent.id, toBindingId: null }),
+        }),
+      ]),
+    );
   } finally {
     w.cleanup();
   }

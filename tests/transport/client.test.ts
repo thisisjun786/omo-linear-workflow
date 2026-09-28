@@ -4,6 +4,7 @@ import type { Binding, DeliveryRecord, Envelope } from "../../src/core/contracts
 import {
   attachBindingWithClient,
   NativeSessionNotReadyError,
+  probeBindingSessionWithClient,
   type RpcPort,
 } from "../../src/transport/client";
 
@@ -186,6 +187,21 @@ describe("native session client", () => {
       expect(rpc.opened).toEqual({ sessionId: "host-row-parent", attached: true });
     },
   );
+
+  test("bounded probing stops the client on timeout", async () => {
+    const rpc = new FakeRpc();
+    const never = Promise.withResolvers<void>();
+    rpc.start = () => never.promise;
+    const timers: Array<() => void> = [];
+    const result = await probeBindingSessionWithClient(binding, rpc, 1, (expire) => {
+      timers.push(expire);
+      queueMicrotask(expire);
+      return () => {};
+    });
+    expect(timers).toHaveLength(1);
+    expect(result).toEqual({ state: "unknown", reason: "Native session probe timed out" });
+    expect(rpc.stopped).toBe(1);
+  });
 
   test("validates extension replies and close only disconnects the client", async () => {
     const rpc = new FakeRpc();

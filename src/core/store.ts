@@ -1201,6 +1201,18 @@ export function openRegistry(
     });
   }
 
+  function setRuntimeState(id: string, state: Binding["runtimeState"]): Result<Binding> {
+    return transaction(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      return saveBinding(
+        state === undefined
+          ? (({ runtimeState: _runtimeState, ...current }) => current)(binding.value)
+          : { ...binding.value, runtimeState: state },
+      );
+    });
+  }
+
   function setContactState(id: string, state: Binding["contactState"]): Result<Binding> {
     return transaction(() => {
       const binding = get(id);
@@ -2209,6 +2221,7 @@ export function openRegistry(
     finishSuccessorLaunch,
     activate,
     setLaunchState,
+    setRuntimeState,
     setContactState,
     setOwner,
     post,

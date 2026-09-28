@@ -266,6 +266,30 @@ describe("HerdrClient", () => {
     });
   });
 
+  test("lists the requested pane's foreground process names and rejects another pane's reply", async () => {
+    const server = await fixture((socket, request) =>
+      ok(socket, request.id, {
+        type: "pane_process_info",
+        process_info: {
+          pane_id: "ws:p1",
+          foreground_processes: [
+            { pid: 1, name: "zsh" },
+            { pid: 2, name: "bun" },
+          ],
+        },
+      }),
+    );
+    const client = createHerdrClient(server.path);
+    cleanups.push(() => client.close());
+    expect(await client.paneForegroundProcesses("ws:p1")).toEqual([
+      { pid: 1, name: "zsh" },
+      { pid: 2, name: "bun" },
+    ]);
+    await expect(client.paneForegroundProcesses("ws:p2")).rejects.toMatchObject({
+      code: "pane_mismatch",
+    });
+  });
+
   test("focuses a workspace only on explicit request", async () => {
     const server = await fixture((socket, request) =>
       ok(socket, request.id, { type: "workspace_info", workspace: workspace("ws", "ws:t1") }),

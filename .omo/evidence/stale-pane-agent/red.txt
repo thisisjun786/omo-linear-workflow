@@ -1,0 +1,102 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/manage.test.ts:
+2056 |     paneForegroundProcessNames: async () => ["zsh"],
+2057 |   });
+2058 | 
+2059 |   const result = await w.orchestrator.manage();
+2060 | 
+2061 |   expect(result).toMatchObject({ ok: true, value: { action: "reattached" } });
+                        ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "ok": true,
+    "value": {
+-     "action": "reattached",
++     "action": "focused",
++     "binding": {
++       "assignment": {
++         "role": "manager",
++       },
++       "checkout": null,
++       "contactState": "active",
++       "cwd": "/tmp/olw-manage-oGIHgn",
++       "designationId": "manager",
++       "durableSessionId": "id-3",
++       "herdrSocket": "/fixture/herdr.sock",
++       "id": "id-1",
++       "initialization": {
++         "state": "accepted",
++         "text": 
++ "source: linear-export
++ binding_id: id-1
++ designation_id: manager
++ snapshot_digest: b613da115c413460f5b330122b7d280c463f12cdbe839026bf1cd75e6a1f5619
++ durable_session_id: id-3
++ role: manager
++ scope_refs:
++   initiative_id: null
++ behavior:
++   applies_when: handling an OLW message; otherwise act as a normal assistant
++   scope: unbound
++   ask_user_directly: true
++   manage_linked_parents: true
++   wait_for_explicit_instruction: true
++   no_autonomous_goal_loop: true
++ scope: unbound
++ ask_user_directly: true
++ olw_messages: Read details with olw reports --all or olw questions --project ID; use the envelope ID for correlation.
++ olw_answers: Answer a parent with olw answer --from BINDING --question ID --text-file PATH.
++ olw_approval: Review evidence against approved scope before accepting work; a management link never grants execution approval.
++ olw_escalation: Ask the user directly when a decision exceeds existing approval; do not expand scope on their behalf.
++ update_check: omo-ai pinned 1.0.0, beta 1.0.0; @code-yeongyu/senpi pinned 1.0.0, latest 1.0.0; run olw update check to refresh
++ routing_advice: none"
++ ,
++       },
++       "launchState": "ready",
++       "omoSocket": "/tmp/olw-manage-oGIHgn/.omo/state/omo.sock",
++       "paneId": "ws-4:p1",
++       "sessionPath": "/tmp/olw-manage-oGIHgn/.omo/state/sessions/2026-09-28T13-28-22-374Z_id-3.jsonl",
++       "workspaceId": "ws-4",
++     },
++     "modelSource": "existing",
++     "routingAdvice": {
++       "catalog": [],
++       "count": 0,
++       "line": "none",
++       "routes": [],
++     },
++     "updateCheck": {
++       "checkedAt": "2026-09-26T00:00:00.000Z",
++       "globalOmo": "1.0.0",
++       "packages": {
++         "@code-yeongyu/senpi": {
++           "available": "1.0.0",
++           "pinned": "1.0.0",
++           "state": "current",
++           "tag": "latest",
++         },
++         "omo-ai": {
++           "available": "1.0.0",
++           "pinned": "1.0.0",
++           "state": "current",
++           "tag": "beta",
++         },
++       },
++       "state": "current",
++     },
+    },
+  }
+
+- Expected  - 1
++ Received  + 72
+
+      at <anonymous> (/home/jun/code/olw-wt/fix-stale-pane-agent/tests/manage.test.ts:2061:18)
+(fail) manage relaunches when a stale agent label outlives the TUI in its pane [107.46ms]
+
+ 0 pass
+ 80 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [826.00ms]

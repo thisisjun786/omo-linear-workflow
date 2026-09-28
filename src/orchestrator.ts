@@ -1221,7 +1221,9 @@ export class Orchestrator {
         recordedPane !== undefined &&
         hasLiveTui(recordedPane) &&
         (typeof recordedPane.sessionPath !== "string" ||
-          recordedPane.sessionPath === binding.sessionPath);
+          recordedPane.sessionPath === binding.sessionPath) &&
+        (typeof recordedPane.sessionPath === "string" ||
+          (await this.#whileForeground(this.#foregroundTui(herdr, recordedPane.paneId), here)));
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {
@@ -1494,6 +1496,16 @@ export class Orchestrator {
     return here === undefined ? work : Promise.race([work, here.interruption]);
   }
 
+  /**
+   * Herdr can keep an agent label after the TUI exits, so an agent-only pane is live only
+   * while a Bun process other than this entry (or its launcher shell) holds its foreground.
+   */
+  async #foregroundTui(herdr: HerdrClient, paneId: string): Promise<boolean> {
+    return (await herdr.paneForegroundProcesses(paneId)).some(
+      (entry) => entry.name === "bun" && entry.pid !== process.pid && entry.pid !== process.ppid,
+    );
+  }
+
   #ownsForeground(here: ManagerHere): boolean {
     if (here.bindingId === undefined || here.token === undefined) return false;
     const current = this.#withRegistry((r) => {
@@ -1548,13 +1560,14 @@ export class Orchestrator {
     try {
       const snapshot = await this.#whileForeground(herdr.snapshot(), here);
       if (here.failure !== undefined) throw here.failure;
+      const recordedPane = snapshot.panes.find(
+        (pane) => pane.paneId === binding.paneId && pane.workspaceId === binding.workspaceId,
+      );
       if (
-        snapshot.panes.some(
-          (pane) =>
-            pane.paneId === binding.paneId &&
-            pane.workspaceId === binding.workspaceId &&
-            hasLiveTui(pane),
-        )
+        recordedPane !== undefined &&
+        hasLiveTui(recordedPane) &&
+        (recordedPane.sessionPath != null ||
+          (await this.#whileForeground(this.#foregroundTui(herdr, recordedPane.paneId), here)))
       )
         return failure(
           "manager_unavailable",

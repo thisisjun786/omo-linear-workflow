@@ -609,6 +609,8 @@ async function main(): Promise<void> {
         focusWorkspace: unexpected,
         focusPane: unexpected,
         paneContainsProcess: async (_pane, pid) => tui?.pid === pid && tui.exitCode === null,
+        paneForegroundProcesses: async () =>
+          tui?.exitCode === null ? [{ pid: tui.pid, name: "bun" }] : [],
         snapshot: unexpected,
         removeWorktree: unexpected,
       };
@@ -717,6 +719,7 @@ async function main(): Promise<void> {
           focusWorkspace: unexpected,
           focusPane: unexpected,
           paneContainsProcess: unexpected,
+          paneForegroundProcesses: unexpected,
           sendKeys: unexpected,
           snapshot: unexpected,
           removeWorktree: unexpected,

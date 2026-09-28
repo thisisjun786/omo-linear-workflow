@@ -156,6 +156,9 @@ async function world(agent = "omo") {
     async paneContainsProcess() {
       return true;
     },
+    async paneForegroundProcesses() {
+      return [{ pid: 424242, name: "bun" }];
+    },
     async focusPane(paneId) {
       focused.push(paneId);
     },
@@ -840,7 +843,10 @@ test.each(["reserved", "provisioning"] as const)(
     );
     db.query("UPDATE manager_reattach SET owner_pid = ?").run(child.pid);
     db.close();
-    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "" });
+    w.panes.set(first.paneId ?? "", { workspaceId: first.workspaceId ?? "", agent: "pi" });
+    Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+      paneForegroundProcesses: async () => [{ pid: 1998154, name: "zsh" }],
+    });
     const old = {
       HERDR_ENV: process.env["HERDR_ENV"],
       HERDR_PANE_ID: process.env["HERDR_PANE_ID"],
@@ -2039,6 +2045,43 @@ test("manage relaunches when the recorded pane survives but its TUI exited", asy
 
   expect(result.action).toBe("reattached");
   expect(w.tabs).toHaveLength(1);
+  expect(w.runs).toHaveLength(2);
+});
+
+test("manage relaunches when a stale agent label outlives the TUI in its pane", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage());
+  const paneId = first.binding.paneId ?? "";
+  const pane = w.panes.get(paneId);
+  if (pane === undefined) throw new Error("No manager pane");
+  w.panes.set(paneId, { workspaceId: pane.workspaceId, agent: "pi" });
+  Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+    paneForegroundProcesses: async () => [{ pid: 1998154, name: "zsh" }],
+  });
+
+  const result = await w.orchestrator.manage();
+
+  expect(result).toMatchObject({ ok: true, value: { action: "reattached" } });
+  expect(w.runs).toHaveLength(2);
+});
+
+test("bare olw typed in a stale manager pane does not count itself as the manager TUI", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage());
+  const paneId = first.binding.paneId ?? "";
+  const pane = w.panes.get(paneId);
+  if (pane === undefined) throw new Error("No manager pane");
+  w.panes.set(paneId, { workspaceId: pane.workspaceId, agent: "pi" });
+  Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+    paneForegroundProcesses: async () => [
+      { pid: process.ppid, name: "sh" },
+      { pid: process.pid, name: "bun" },
+    ],
+  });
+
+  const result = await w.orchestrator.manage();
+
+  expect(result).toMatchObject({ ok: true, value: { action: "reattached" } });
   expect(w.runs).toHaveLength(2);
 });
 

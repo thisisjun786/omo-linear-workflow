@@ -235,6 +235,7 @@ async function world(
     focusWorkspace: async () => {},
     focusPane: async () => {},
     paneContainsProcess: async () => true,
+    paneForegroundProcesses: async () => [{ pid: 424242, name: "bun" }],
     sendKeys: async (paneId, text, keys) => {
       expect([paneId, text, keys]).toEqual(["pane-execute", "/quit", ["Enter"]]);
       quits += 1;

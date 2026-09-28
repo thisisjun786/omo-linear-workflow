@@ -432,6 +432,9 @@ async function world() {
     async paneContainsProcess() {
       return true;
     },
+    async paneForegroundProcesses() {
+      return [{ pid: 424242, name: "bun" }];
+    },
     async run(paneId, argv) {
       launches.push(paneId);
       const path = argv[argv.indexOf("--session") + 1];

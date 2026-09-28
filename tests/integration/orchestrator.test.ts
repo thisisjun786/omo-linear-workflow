@@ -232,6 +232,9 @@ class FakeHerdr implements HerdrClient {
   async paneContainsProcess(): Promise<boolean> {
     return true;
   }
+  async paneForegroundProcesses(): Promise<readonly { pid: number; name: string }[]> {
+    return [{ pid: 424242, name: "bun" }];
+  }
   rootTabFromCreate = true;
   async createWorktree(checkout: Checkout, label: string): Promise<Workspace> {
     if (checkout.originalRepoRoot !== checkout.path)

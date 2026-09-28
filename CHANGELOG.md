@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Relaunch the manager when Herdr keeps a stale agent label after its TUI exits. An agent-only pane now counts as a live TUI only while a Bun process other than the running `olw` entry holds its foreground, so bare `olw` in that pane no longer fails with `runtime_unavailable`.
 - Accept the handed-off host listener (`<socket>.next-N`, as the kernel still reports it) when proving a launched TUI is attached, so roles launched on a host after a generation handoff are no longer refused and stopped as `tui_local_fallback`.
 - Hold native session admission across TUI attachment so a last-slot capacity race returns a typed refusal without local fallback. Finish proven pre-native manager admission failures as same-ID retryable rejections, while lost replies and post-send storage failures remain uncertain; phase-tagged admission requires the normal worker-profile handoff.
 - Reclaim closed sessions' extension allocations and loopback servers with worker isolates, admit manager notices in the receiving isolate with a final synchronous idle check, and report the native 20-session capacity before role launch. Existing in-process hosts require the normal idle-host profile handoff; worker mode is not process-fatal OOM containment.

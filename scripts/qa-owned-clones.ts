@@ -162,6 +162,7 @@ try {
         focusWorkspace: (workspace) => client.focusWorkspace(workspace),
         focusPane: (pane) => client.focusPane(pane),
         paneContainsProcess: (pane, pid) => client.paneContainsProcess(pane, pid),
+        paneForegroundProcesses: (pane) => client.paneForegroundProcesses(pane),
         sendKeys: (pane, text, keys) => client.sendKeys(pane, text, keys),
         snapshot: () => client.snapshot(),
         subscribe: (listener) => client.subscribe(listener),

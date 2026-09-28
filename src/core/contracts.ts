@@ -157,7 +157,7 @@ export interface InitializationClaim {
   readonly binding: Binding;
 }
 export interface RuntimeFailure {
-  readonly source: "turn_end";
+  readonly source: "turn_end" | "host_loss";
   readonly sessionEntryId: string;
   readonly durableSessionId: string;
   readonly sessionPath: string;
@@ -395,6 +395,11 @@ export interface Registry {
   finishInitialization(id: string, state: "accepted" | "rejected" | "uncertain"): Result<Binding>;
   authorize(senderSessionId: string, envelope: Envelope): Result<Binding>;
   claim(senderSessionId: string, envelope: Envelope | RuntimeFailureClaim): Result<ClaimResult>;
+  claimRuntimeFailure(
+    senderSessionId: string,
+    failure: RuntimeFailureClaim,
+    unavailableOwnerIds?: ReadonlySet<string>,
+  ): Result<ClaimResult>;
   finish(messageId: string, receipt: NativeReceipt, nativeKey?: string): Result<DeliveryRecord>;
   uncertain(messageId: string, reason: string, nativeKey?: string): Result<DeliveryRecord>;
   delivery(messageId: string): Result<DeliveryRecord>;

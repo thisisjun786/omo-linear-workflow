@@ -280,10 +280,12 @@ interface DoctorResult {
   readonly paths: unknown;
   readonly checks: unknown;
   readonly host: unknown;
+  readonly runtimeHealth: unknown;
 }
 
 async function doctor(root: string, herdrSocket?: string): Promise<Result<DoctorResult>> {
-  const paths = new Orchestrator(root, herdrSocket).paths();
+  const orchestrator = new Orchestrator(root, herdrSocket);
+  const paths = orchestrator.paths();
   const database = join(root, ".omo/state/registry.sqlite");
   if (await Bun.file(database).exists()) {
     const registry = openRegistry(database, { readonly: true });
@@ -359,8 +361,15 @@ async function doctor(root: string, herdrSocket?: string): Promise<Result<Doctor
       registry.close();
     }
   }
-  const host = await hostHealth(root, readyBindings);
-  return { ok: true, value: { sideEffects: false, paths, checks, host } };
+  const [host, runtimeHealth] = await Promise.all([
+    hostHealth(root, readyBindings),
+    orchestrator.statusWithRuntimeHealth(),
+  ]);
+  if (!runtimeHealth.ok) return runtimeHealth;
+  return {
+    ok: true,
+    value: { sideEffects: false, paths, checks, host, runtimeHealth: runtimeHealth.value },
+  };
 }
 
 async function doctorWithChains(root: string, herdrSocket?: string): Promise<Result<unknown>> {
@@ -797,7 +806,7 @@ export async function runCli(
             ? orchestrator.notices(filter.value)
             : command === "questions"
               ? orchestrator.questions(filter.value)
-              : orchestrator.status(filter.value)
+              : await orchestrator.statusWithRuntimeHealth(filter.value)
         : filter;
     } else if (command === "pause" || command === "resume" || command === "close") {
       const values = requireOptions(options, ["binding"]);

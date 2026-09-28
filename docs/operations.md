@@ -138,7 +138,11 @@ A paused manager blocks new native contact to itself, not parent-child work or e
 
 ### Operational notices
 
-Explicit native assistant errors create separate `operational_notice` records, not completion reports. `notices --project ID --json` reads all recorded operational outcomes without a live host. Healthy owners receive one claimed native notice; absent/paused routes remain visible locally without waking anyone. The notice preserves the original binding and error entry, while `ready` remains an identity/initialization status. Normal idle, cancellation and reload alone aren't errors. See [maintained runtime repairs](runtime-patches.md) for native patch ownership and verification boundaries.
+Explicit native assistant errors create separate `operational_notice` records, not completion reports. `notices --project ID --json` reads all recorded operational outcomes without a live host. Healthy owners receive one claimed native notice; absent/paused routes remain visible locally without waking anyone. The notice preserves the original binding and error entry, while `ready` remains an identity/initialization status. Normal idle, cancellation and reload alone aren't errors.
+
+`status`, `doctor`, and `reconcile` also correlate each ready binding with its Herdr pane and exact shared-host session. A live TUI with a reachable host but no exact session is `runtimeState: "local_only"`; a live TUI whose host cannot be reached is `runtimeState: "host_lost"`. The first observation stores one deterministic operational notice and wakes the owner when its own host session is healthy; if the owner is affected too, the notice is posted to the local user inbox. Repeated commands do not post or send it again. This check runs only at those natural operator entry points: Senpi 2026.9.27 exposes reconnect/fallback as a TUI warning and internal runtime state, but no extension lifecycle event or public pending-turn abort hook. OLW therefore cannot settle the already orphaned tool call; after confirming the typed state, press Esc in the affected pane, inspect `olw notices`, and continue from durable state. No polling loop is used.
+
+See [maintained runtime repairs](runtime-patches.md) for native patch ownership and verification boundaries.
 
 ### Ignore the thread tools directory
 

@@ -17,6 +17,7 @@ import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Workspace } from "../../src/herdr";
 import { roleLabel } from "../../src/linear";
 import { Orchestrator } from "../../src/orchestrator";
+import { NativeSessionAbsentError } from "../../src/transport";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -740,6 +741,82 @@ test("status/close: status counts unanswered sent/received records, excludes ans
       mode: "planned",
       stage: "execute",
       openQuestions: 2,
+    });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("status detects a live local-only role and posts its host-loss notice exactly once", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    const prompts: Array<{ bindingId: string; text: string }> = [];
+    const healthySession = (binding: Binding) => ({
+      configure: async () => {},
+      hasUserMessage: async () => false,
+      describe: async () => ({
+        ok: true as const,
+        value: {
+          durableSessionId: binding.durableSessionId,
+          sessionPath: binding.sessionPath ?? "",
+          cwd: binding.cwd,
+          ...modelForRole(binding.assignment.role),
+          extensionProtocol: 2 as const,
+        },
+      }),
+      send: async () => {
+        throw new Error("Unexpected send");
+      },
+      deliverUserAnswer: async () => {
+        throw new Error("Unexpected answer");
+      },
+      onEvent: () => () => {},
+      close: async () => {},
+    });
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostStatus: async () => ({
+        reachable: true,
+        socket: "/fake/omo",
+        generation: 0,
+        launchProfile: null,
+        sessions: {
+          total: 1,
+          interactive: 1,
+          worker: 0,
+          retained: 0,
+          foreign_attached: 0,
+          foreign_retained: 0,
+        },
+        env_keys: [],
+      }),
+      attachBinding: async (binding) => {
+        if (binding.id === child.id) throw new NativeSessionAbsentError();
+        return healthySession(binding);
+      },
+      prompt: async (binding, text) => {
+        prompts.push({ bindingId: binding.id, text });
+      },
+    });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await orchestrator.statusWithRuntimeHealth()).toMatchObject({
+        ok: true,
+        value: expect.arrayContaining([
+          expect.objectContaining({ id: child.id, runtimeState: "local_only" }),
+        ]),
+      });
+    }
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.bindingId).toBe(w.parent.id);
+    expect(value(w.registry.operationalNotices({}))).toHaveLength(1);
+    expect(value(w.registry.operationalNotices({}))[0]).toMatchObject({
+      state: "accepted",
+      envelope: {
+        kind: "operational_notice",
+        operational: { failure: { source: "host_loss" } },
+      },
     });
   } finally {
     w.cleanup();

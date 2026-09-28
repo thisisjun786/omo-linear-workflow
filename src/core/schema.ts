@@ -104,7 +104,7 @@ export const bindingSchema = z.strictObject({
   ]),
 });
 export const runtimeFailureSchema = z.strictObject({
-  source: z.literal("turn_end"),
+  source: z.enum(["turn_end", "host_loss"]),
   sessionEntryId: text,
   durableSessionId: text,
   sessionPath: text,

@@ -16,6 +16,7 @@ import type {
   Envelope,
   Registry,
   Result,
+  RuntimeFailureClaim,
   ScopeFilter,
   ScopeSnapshot,
   StageHandoff,
@@ -34,6 +35,7 @@ import {
 } from "./core/policy";
 import { envelopeSchema } from "./core/schema";
 import { openRegistry } from "./core/store";
+import { publishOperationalNotice } from "./extension/operational";
 import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { HostHandoffBusyError, withHostHandoffLock } from "./host-handoff-lock";
@@ -258,6 +260,7 @@ export interface ListedQuestion {
   readonly answer: DeliveryRecord | null;
 }
 export type StatusBinding = Binding & {
+  readonly runtimeState?: "connected" | "local_only" | "host_lost";
   readonly mode?: ChildCreateMode;
   readonly stage?: ChildStage;
   readonly stageBindings?: ReadonlyArray<{
@@ -2832,6 +2835,141 @@ export class Orchestrator {
     });
   }
 
+  public async statusWithRuntimeHealth(
+    filter: string | ScopeFilter = {},
+    notify = true,
+  ): Promise<Result<StatusBinding[]>> {
+    const listed = this.status(filter);
+    if (!listed.ok) return listed;
+    const active = listed.value.filter(
+      (binding) => binding.launchState === "ready" && binding.sessionPath !== null,
+    );
+    if (active.length === 0) return listed;
+    const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
+    try {
+      const snapshot = await herdr.snapshot();
+      const live = active.filter((binding) =>
+        snapshot.panes.some(
+          (pane) =>
+            pane.paneId === binding.paneId &&
+            pane.workspaceId === binding.workspaceId &&
+            hasLiveTui(pane),
+        ),
+      );
+      if (live.length === 0) return listed;
+      const hostReachability = new Map<string, boolean>();
+      for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
+        try {
+          const status = await (this.#deps.readHostStatus ?? readHostStatus)(this.#root, socket, {
+            ...process.env,
+            ...runtimeCacheEnvironment(this.#root),
+          });
+          hostReachability.set(socket, status.reachable);
+        } catch {
+          hostReachability.set(socket, false);
+        }
+      }
+      const states = new Map<string, "connected" | "local_only" | "host_lost">();
+      for (const binding of live) {
+        if (!hostReachability.get(binding.omoSocket)) {
+          states.set(binding.id, "host_lost");
+          continue;
+        }
+        let session: NativeSession | undefined;
+        try {
+          session = await this.#deps.attachBinding(binding);
+          states.set(binding.id, "connected");
+        } catch (cause) {
+          states.set(
+            binding.id,
+            cause instanceof NativeSessionAbsentError ? "local_only" : "host_lost",
+          );
+        } finally {
+          await session?.close();
+        }
+      }
+      const unavailable = new Set(
+        [...states].filter(([, state]) => state !== "connected").map(([id]) => id),
+      );
+      if (notify) {
+        for (const binding of live) {
+          const state = states.get(binding.id);
+          if (state === "local_only" || state === "host_lost")
+            await this.#notifyRuntimeLoss(binding, state, unavailable);
+        }
+      }
+      return ok(
+        listed.value.map((binding) => {
+          const runtimeState = states.get(binding.id);
+          return runtimeState === undefined ? binding : { ...binding, runtimeState };
+        }),
+      );
+    } catch (cause) {
+      return failure("runtime_unavailable", "Runtime health observation failed", messageOf(cause));
+    } finally {
+      herdr.close();
+    }
+  }
+
+  async #notifyRuntimeLoss(
+    binding: Binding,
+    state: "local_only" | "host_lost",
+    unavailable: ReadonlySet<string>,
+  ): Promise<void> {
+    if (binding.sessionPath === null) return;
+    const failure: RuntimeFailureClaim = {
+      version: 1,
+      kind: "runtime_failure",
+      failure: {
+        source: "host_loss",
+        sessionEntryId: `host-loss:${binding.id}:${binding.sessionPath}`,
+        durableSessionId: binding.durableSessionId,
+        sessionPath: binding.sessionPath,
+        cwd: binding.cwd,
+        provider: modelForBinding(binding).provider,
+        modelId: modelForBinding(binding).modelId,
+        timestamp: 0,
+        stopReason: "error",
+        errorMessage:
+          state === "local_only"
+            ? "Role TUI is alive in local fallback, but its bound host session is absent"
+            : "Role TUI is alive, but its bound interactive host is unavailable",
+      },
+    };
+    const claim = this.#withRegistry((registry) =>
+      registry.claimRuntimeFailure(binding.durableSessionId, failure, unavailable),
+    );
+    if (!claim.ok || claim.value.disposition !== "new") return;
+    await publishOperationalNotice(this.#root, claim.value.record);
+    if (claim.value.target === null) return;
+    const message = `[OLW] ${state}: role ${binding.id} has a live TUI without its bound host session. The active turn may be orphaned; press Esc in that pane before continuing. Details: olw notices --project ${
+      binding.assignment.role === "parent" || binding.assignment.role === "child"
+        ? binding.assignment.projectId
+        : binding.id
+    }`;
+    try {
+      await this.#deps.prompt(claim.value.target, message);
+      const finished = this.#withRegistry((registry) =>
+        registry.finish(claim.value.record.envelope.id, {
+          kind: "ok",
+          thread_id: claim.value.target?.durableSessionId ?? "",
+          message_seq: 0,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: claim.value.record.envelope.id },
+        }),
+      );
+      if (finished.ok) await publishOperationalNotice(this.#root, finished.value);
+    } catch (cause) {
+      const uncertain = this.#withRegistry((registry) =>
+        registry.uncertain(
+          claim.value.record.envelope.id,
+          `Host-loss notice did not return: ${messageOf(cause)}`,
+        ),
+      );
+      if (uncertain.ok) await publishOperationalNotice(this.#root, uncertain.value);
+    }
+  }
+
   public setPaused(bindingId: string, paused: boolean): Result<Binding> {
     return this.#withRegistry((registry) =>
       registry.setContactState(bindingId, paused ? "paused" : "active"),
@@ -3132,7 +3270,7 @@ export class Orchestrator {
   public async reconcile(
     filter: string | ScopeFilter,
   ): Promise<Result<{ readonly observed: number; readonly bindings: Binding[] }>> {
-    const listed = this.status(filter);
+    const listed = await this.statusWithRuntimeHealth(filter);
     if (!listed.ok) return listed;
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
     try {

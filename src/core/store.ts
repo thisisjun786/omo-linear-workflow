@@ -1406,7 +1406,11 @@ export function openRegistry(
   }
 
   // Called inside claim's transaction: observation identity is independent of owner changes.
-  function claimFailure(senderSessionId: string, input: RuntimeFailureClaim): Result<ClaimResult> {
+  function claimRuntimeFailure(
+    senderSessionId: string,
+    input: RuntimeFailureClaim,
+    unavailableOwnerIds: ReadonlySet<string> = new Set(),
+  ): Result<ClaimResult> {
     const parsed = runtimeFailureClaimSchema.safeParse(input);
     if (!parsed.success)
       return error("invalid_failure", "Runtime failure evidence is invalid", parsed.error.issues);
@@ -1440,7 +1444,11 @@ export function openRegistry(
     }
     const approval = designationFor(sender.value.designationId);
     if (!approval.ok) return approval;
-    const target = operationalTarget(sender.value);
+    const candidate = operationalTarget(sender.value);
+    const target =
+      candidate.ok && unavailableOwnerIds.has(candidate.value.id)
+        ? error<Binding>("owner_host_lost", "Owner is also detached from the native host")
+        : candidate;
     if (
       !target.ok &&
       (target.error.code === "storage_corrupt" || target.error.code === "storage_error")
@@ -1685,7 +1693,7 @@ export function openRegistry(
   ): Result<ClaimResult> {
     return transaction(() => {
       if (envelopeValue.kind === "runtime_failure")
-        return claimFailure(senderSessionId, envelopeValue);
+        return claimRuntimeFailure(senderSessionId, envelopeValue);
       if (envelopeValue.kind === "operational_notice")
         return error(
           "route_denied",
@@ -2216,6 +2224,8 @@ export function openRegistry(
     finishInitialization,
     authorize,
     claim,
+    claimRuntimeFailure: (senderSessionId, failure, unavailableOwnerIds) =>
+      transaction(() => claimRuntimeFailure(senderSessionId, failure, unavailableOwnerIds)),
     finish,
     uncertain,
     delivery(messageId: string): Result<DeliveryRecord> {

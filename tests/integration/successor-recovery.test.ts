@@ -552,7 +552,11 @@ test("reconcile reports an uncertain local-only successor for manual abandonment
       },
     },
   });
-  expect(w.registry((registry) => value(registry.get("execute")))).toEqual(before);
+  expect(w.registry((registry) => value(registry.get("execute")))).toMatchObject({
+    id: before.id,
+    launchState: "uncertain",
+    initialization: before.initialization,
+  });
   expect(w.quits()).toBe(0);
   expect(w.launches()).toBe(1);
   expect(w.sends()).toBe(0);

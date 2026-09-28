@@ -1,8 +1,11 @@
+import { createHerdrClient } from "../../../src/herdr/client";
 
-import { createHerdrClient } from "../src/herdr/client";
-const c = createHerdrClient(process.env.HERDR_SOCKET_PATH ?? "");
+const panes = process.argv.slice(2);
+const client = createHerdrClient(process.env["HERDR_SOCKET_PATH"] ?? "");
+const out: Record<string, readonly string[]> = {};
 try {
-  const out: Record<string, readonly string[]> = {};
-  for (const p of process.argv.slice(2)) out[p] = await c.paneForegroundProcessNames(p);
-  console.log(JSON.stringify(out));
-} finally { c.close(); }
+  for (const pane of panes) out[pane] = await client.paneForegroundProcessNames(pane);
+} finally {
+  client.close();
+}
+console.log(JSON.stringify({ panes, out }));

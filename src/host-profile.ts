@@ -265,7 +265,9 @@ export async function runBoundedHostCommand(
 }
 
 const protocolInfoSchema = z.object({
-  generation: z.number().optional(),
+  protocolVersion: z.number().int().positive(),
+  serverVersion: z.string().min(1),
+  generation: z.number().int().nonnegative().optional(),
   launch_profile: hostStatusSchema.shape.launchProfile.unwrap().optional(),
 });
 const pointerSchema = z.object({ instance_id: z.string() });
@@ -284,7 +286,10 @@ async function readJson(path: string): Promise<unknown> {
   }
 }
 
-async function probeProtocolInfoReadOnly(socket: string): Promise<{
+async function probeProtocolInfoReadOnly(
+  socket: string,
+  timeoutMs: number,
+): Promise<{
   readonly reachability: "reachable" | "unreachable" | "unknown";
   readonly protocol?: z.infer<typeof protocolInfoSchema>;
 }> {
@@ -303,7 +308,7 @@ async function probeProtocolInfoReadOnly(socket: string): Promise<{
       client.destroy();
       resolveProbe(protocol === undefined ? { reachability } : { reachability, protocol });
     };
-    const timeout = setTimeout(() => finish("unknown"), HOST_STATUS_TIMEOUT_MS);
+    const timeout = setTimeout(() => finish("unknown"), timeoutMs);
     client.once("connect", () =>
       client.write(`${JSON.stringify({ id, type: "get_protocol_info" })}\n`),
     );
@@ -320,18 +325,14 @@ async function probeProtocolInfoReadOnly(socket: string): Promise<{
             .safeParse(JSON.parse(line));
           if (!response.success) continue;
           const parsed = protocolInfoSchema.safeParse(response.data.data);
-          return parsed.success
-            ? finish("reachable", parsed.data)
-            : finish("unknown");
+          return parsed.success ? finish("reachable", parsed.data) : finish("unknown");
         } catch {
           // Ignore unrelated lifecycle records and malformed lines until the bounded deadline.
         }
       }
     });
     client.once("error", (cause: NodeJS.ErrnoException) =>
-      finish(
-        cause.code === "ENOENT" || cause.code === "ECONNREFUSED" ? "unreachable" : "unknown",
-      ),
+      finish(cause.code === "ENOENT" || cause.code === "ECONNREFUSED" ? "unreachable" : "unknown"),
     );
     client.once("close", () => finish("unknown"));
   });
@@ -359,10 +360,11 @@ async function readRssMb(pid: number | undefined): Promise<number | null> {
 export async function readHostStatusReadOnly(
   socket: string,
   agentDir: string,
+  timeoutMs = HOST_STATUS_TIMEOUT_MS,
 ): Promise<HostStatus> {
   const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(socket));
   const [observation, registration, envKeys] = await Promise.all([
-    probeProtocolInfoReadOnly(socket),
+    probeProtocolInfoReadOnly(socket, timeoutMs),
     readRegistration(daemonDir),
     readJson(join(daemonDir, "env-keys.json")),
   ]);

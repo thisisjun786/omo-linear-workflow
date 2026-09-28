@@ -2899,14 +2899,18 @@ export class Orchestrator {
       }
       if (live.length === 0) return listed;
       const hostReachability = new Map<string, "reachable" | "unreachable" | "unknown">();
+      const readReachability =
+        this.#deps.readHostReachabilityReadOnly ??
+        (async (socket: string) => {
+          const status = await readHostStatusReadOnly(
+            socket,
+            resolveOmoAgentDir(process.env, process.cwd()),
+          );
+          return status.reachability ?? (status.reachable ? "reachable" : "unknown");
+        });
       for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
         try {
-          hostReachability.set(
-            socket,
-            await (this.#deps.readHostReachabilityReadOnly ?? defaults.readHostReachabilityReadOnly)(
-              socket,
-            ),
-          );
+          hostReachability.set(socket, await readReachability(socket));
         } catch {
           hostReachability.set(socket, "unknown");
         }

@@ -48,6 +48,35 @@ test("an unreachable host reports no generation even when its registration remai
   expect(status.generation).toBeNull();
 });
 
+test.each([null, {}, { protocolVersion: "1", serverVersion: "2026.9.27" }])(
+  "read-only status classifies malformed protocol payload %# as unknown",
+  async (data) => {
+    const root = await mkdtemp(join(tmpdir(), "olw-host-malformed-"));
+    roots.push(root);
+    const socket = join(root, "malformed.sock");
+    const server = createServer((connection) => {
+      let input = "";
+      connection.on("data", (chunk) => {
+        input += chunk.toString("utf8");
+        const newline = input.indexOf("\n");
+        if (newline < 0) return;
+        const request = JSON.parse(input.slice(0, newline)) as { id: string };
+        connection.end(`${JSON.stringify({ id: request.id, success: true, data })}\n`);
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socket, resolve);
+    });
+    try {
+      const status = await readHostStatusReadOnly(socket, join(root, "agent"), 100);
+      expect(status).toMatchObject({ reachable: false, reachability: "unknown" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+);
+
 test("read-only status classifies a silent protocol endpoint as unknown", async () => {
   const root = await mkdtemp(join(tmpdir(), "olw-host-silent-"));
   roots.push(root);
@@ -58,7 +87,7 @@ test("read-only status classifies a silent protocol endpoint as unknown", async 
     server.listen(socket, resolve);
   });
   try {
-    const status = await readHostStatusReadOnly(socket, join(root, "agent"));
+    const status = await readHostStatusReadOnly(socket, join(root, "agent"), 10);
     expect(status).toMatchObject({ reachable: false, reachability: "unknown" });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

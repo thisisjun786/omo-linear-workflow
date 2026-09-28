@@ -56,8 +56,16 @@ test.each(["report", "question"] as const)(
         let authorizedClaims = 0;
         let nativeAuthorizations = 0;
         harness.exec = async (command, args, options) => {
-          const request = z.object({ action: z.string() }).parse(JSON.parse(args[1] ?? "null"));
-          if (request.action === "lookup-session") {
+          const request = z
+            .object({
+              action: z.string(),
+              input: z.object({ durableSessionId: z.string().optional() }).passthrough(),
+            })
+            .parse(JSON.parse(args[1] ?? "null"));
+          if (
+            request.action === "lookup-session" &&
+            request.input.durableSessionId === parent.durableSessionId
+          ) {
             failedLookups++;
             return {
               stdout: "",

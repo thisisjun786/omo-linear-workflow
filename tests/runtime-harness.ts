@@ -4,8 +4,13 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { Binding, Designation, Envelope, Result, ScopeSnapshot } from "../src/core/contracts";
 import { modelForRole } from "../src/core/policy";
+import { deliveryRecordSchema, resultSchema } from "../src/core/schema";
 import { openRegistry } from "../src/core/store";
-import type { RuntimePort, SessionContextPort } from "../src/extension/runtime";
+import {
+  type RuntimePort,
+  registerInitiativeRuntime,
+  type SessionContextPort,
+} from "../src/extension/runtime";
 
 const snapshot: ScopeSnapshot = {
   version: 1,
@@ -285,6 +290,35 @@ export class Harness implements RuntimePort {
   }
   async waitForIdle(): Promise<void> {
     this.idleWaits++;
+  }
+  async sendManagerNotice(
+    target: Binding,
+    request: { readonly messageId: string; readonly nativeKey: string },
+  ) {
+    const recipient = new Harness();
+    recipient.exec = this.exec.bind(this);
+    recipient.isIdle = this.isIdle.bind(this);
+    recipient.waitForIdle = this.waitForIdle.bind(this);
+    recipient.receipt = this.receipt;
+    const priorContext = this.currentContext;
+    const priorGuard = this.toolCall;
+    registerInitiativeRuntime(recipient, { root: join(target.omoSocket, ".."), hostRuntime: true });
+    await recipient.start()(context(target));
+    // Existing tests inject native races at executeTool. Keep those injections on
+    // the receiving runtime rather than replacing the native preflight with a mock.
+    recipient.executeTool = async (name, input) => {
+      this.currentContext = context(target);
+      this.toolCall = recipient.guard();
+      try {
+        return await this.executeTool(name, input);
+      } finally {
+        this.currentContext = priorContext;
+        this.toolCall = priorGuard;
+      }
+    };
+    return resultSchema(deliveryRecordSchema).parse(
+      await recipient.rpc("omo.initiative.admit-manager-notice")(request),
+    );
   }
   notifyOperational(): void {}
   onResourcesDiscover(handler: () => { readonly skillPaths: readonly string[] }): void {

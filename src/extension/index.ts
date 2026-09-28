@@ -12,7 +12,8 @@ import { openRegistry } from "../core/store";
 import { waitForAnswerIdle } from "./answer-idle";
 import { ownsGoalPause, pauseGoal, resumeGoal } from "./goal-pause";
 import { createRoleHerdrClient, registerRoleHerdrReporter } from "./herdr-reporter";
-import { isManagerIdle, registerManagerIdle } from "./manager-idle";
+import { registerManagerIdle } from "./manager-idle";
+import { sendManagerNotice } from "./manager-notice-client";
 import { type RuntimePort, registerInitiativeRuntime, type SessionContextPort } from "./runtime";
 
 const herdrRepublishProofSchema = z.object({
@@ -74,7 +75,7 @@ export function questionWaitWire(
 }
 
 export default function initiativeExtension(pi: ExtensionAPI): void {
-  registerManagerIdle(pi);
+  const isManagerIdle = registerManagerIdle(pi);
   const { OMO_INITIATIVE_HOST: hostMarker, OMO_INITIATIVE_ROOT: initiativeRoot } = process.env;
   const root = initiativeRoot ?? pi.cwd;
   const debug = debuglog("olw:herdr");
@@ -151,6 +152,7 @@ export default function initiativeExtension(pi: ExtensionAPI): void {
     resumeGoal,
     waitForIdle: (target, timeoutMs) => waitForAnswerIdle(target, undefined, timeoutMs),
     isIdle: isManagerIdle,
+    sendManagerNotice,
     onUserInterrupt(handler): void {
       pi.on("session_abort", (_event, ctx) => handler(contextPort(ctx)));
       pi.on("agent_end", (event, ctx) => {

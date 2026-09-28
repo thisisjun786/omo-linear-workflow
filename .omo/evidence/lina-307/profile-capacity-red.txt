@@ -1,0 +1,31 @@
+COMMAND: env -u HERDR_ENV bun test tests/host-profile.test.ts tests/host-capacity.test.ts tests/transport/client.test.ts
+
+bun test v1.4.0 (34cbb9a40)
+
+tests/host-capacity.test.ts:
+SyntaxError: Export named 'assertHostCapacity' not found in module 'src/host-profile.ts'.
+
+tests/host-profile.test.ts:
+(fail) accepts required effective extensions while retaining additional host extensions
+HostProfileMismatchError: running worker fixture rejected because production compatibility still required in-process
+
+(fail) writes a launch spec accepted by Senpi's real loader
+Expected hostArgs to contain ["--session-runtime", "worker"]
+Received hostArgs containing ["--session-runtime", "in-process"]
+
+(fail) rejects the old in-process host for normal automatic handoff when idle
+Expected HostProfileMismatchError; received null
+
+(fail) reports generation, profile, sessions, RSS warnings, and local-only roles
+Expected matchesOlw true for worker fixture; received false
+
+tests/transport/client.test.ts:
+SyntaxError: Export named 'HostCapacityError' not found in module 'src/host-profile.ts'.
+
+23 pass
+6 fail
+2 errors
+59 expect() calls
+Ran 29 tests across 3 files. [3.52s]
+
+EXIT_CODE=1

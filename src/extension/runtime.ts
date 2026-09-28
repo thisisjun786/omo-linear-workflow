@@ -64,6 +64,10 @@ export interface RuntimePort {
   onGoalCheck(handler: (ctx: SessionContextPort) => Promise<void>): void;
   waitForIdle(target: Binding, timeoutMs?: number): Promise<void>;
   isIdle(target: Binding): boolean;
+  sendManagerNotice(
+    target: Binding,
+    request: { readonly messageId: string; readonly nativeKey: string },
+  ): Promise<Result<DeliveryRecord>>;
   onTurnEnd(handler: (message: unknown, ctx: SessionContextPort) => Promise<void>): void;
   notifyOperational(message: string, ctx: SessionContextPort): void;
   onResourcesDiscover(handler: () => { readonly skillPaths: string[] }): void;
@@ -169,6 +173,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     readonly managerTarget?: Binding;
     readonly noticeSender?: Binding;
     readonly admissionDeadline?: number;
+    readonly localManager?: boolean;
     preDeliveryFailure?: string;
     used: boolean;
   }>();
@@ -624,14 +629,92 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     } while (!port.isIdle(target));
   }
 
+  const admittedManagerAttempts = new Set<string>();
+  port.handleRpc("omo.initiative.admit-manager-notice", async (raw) => {
+    const request = z
+      .strictObject({ messageId: z.string().min(1), nativeKey: z.string().min(1) })
+      .safeParse(raw);
+    if (!request.success) return failure("invalid_input", "Invalid manager admission request");
+    const key = request.data.nativeKey;
+    if (admittedManagerAttempts.has(key))
+      return failure("delivery_in_progress", "Manager attempt is already being admitted");
+    // Reserve before the first await. Terminal state lives in the registry; this
+    // set holds only in-flight RPCs, not every historical notice for the session.
+    admittedManagerAttempts.add(key);
+    try {
+      const ctx = await contextWhenStarted();
+      if (ctx === undefined)
+        return failure("session_unavailable", "Manager session has not started");
+      const record = await worker(
+        "lookup-delivery",
+        { messageId: request.data.messageId },
+        resultSchema(deliveryRecordSchema),
+      );
+      if (!record.ok) return record;
+      const envelope = record.value.envelope;
+      if (
+        (record.value.attempts?.at(-1)?.nativeKey ?? envelope.id) !== key ||
+        record.value.state !== "sending"
+      )
+        return failure("stale_attempt", "Manager admission requires the current sending attempt");
+      if (
+        envelope.fromBindingId === null ||
+        envelope.toBindingId === null ||
+        (envelope.kind !== "report" && envelope.kind !== "question")
+      )
+        return failure("route_denied", "Only claimed manager notices use this admission path");
+      const target = await lookup(ctx.sessionManager.getSessionId());
+      if (!target.ok) return target;
+      if (
+        target.value.assignment.role !== "manager" ||
+        target.value.id !== envelope.toBindingId ||
+        target.value.cwd !== ctx.cwd ||
+        target.value.sessionPath !== ctx.sessionManager.getSessionFile()
+      )
+        return failure("identity_mismatch", "Manager admission addressed a different runtime");
+      const sender = await worker(
+        "lookup-binding",
+        { bindingId: envelope.fromBindingId },
+        resultSchema(bindingSchema),
+      );
+      if (!sender.ok) return sender;
+      return await deliver(
+        {
+          disposition: "new",
+          record: record.value,
+          target: target.value,
+          noticeSender: sender.value,
+          nativeKey: key,
+        },
+        ctx,
+        false,
+        true,
+      );
+    } finally {
+      admittedManagerAttempts.delete(key);
+    }
+  });
+
   async function deliver(
     claim: ClaimResult,
     ctx: SessionContextPort,
     userAnswer: boolean,
+    localManager = false,
   ): Promise<Result<DeliveryRecord>> {
     if (claim.target === null) return { ok: true, value: claim.record };
     const envelope = claim.record.envelope;
     const nativeKey = claim.nativeKey ?? envelope.id;
+    if (claim.noticeSender !== undefined && !localManager) {
+      try {
+        return await port.sendManagerNotice(claim.target, { messageId: envelope.id, nativeKey });
+      } catch (cause) {
+        return uncertain(
+          envelope.id,
+          `Manager admission did not return: ${messageOf(cause)}`,
+          nativeKey,
+        );
+      }
+    }
     const active = new Set(port.getActiveTools());
     active.add("thread_send");
     port.setActiveTools([...active]);
@@ -693,6 +776,7 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
           ...(sender === undefined
             ? {}
             : { managerTarget: claim.target, admissionDeadline, noticeSender: sender }),
+          localManager,
           used: false,
         },
         async () => {
@@ -876,7 +960,12 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
     }
     const authorized = await worker(
       "authorize",
-      { senderSessionId: ctx.sessionManager.getSessionId(), envelope: envelope.data },
+      {
+        senderSessionId: permit.localManager
+          ? sender.value.durableSessionId
+          : ctx.sessionManager.getSessionId(),
+        envelope: envelope.data,
+      },
       resultSchema(bindingSchema),
     );
     if (!authorized.ok) return rejectBeforeDelivery(authorized.error.message);

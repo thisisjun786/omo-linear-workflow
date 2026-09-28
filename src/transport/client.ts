@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Binding, DeliveryRecord, Envelope, Result, RuntimeIdentity } from "../core/contracts";
 import type { RoleModel } from "../core/policy";
 import { envelopeSchema } from "../core/schema";
+import { HostCapacityError, NATIVE_HOST_SESSION_LIMIT } from "../host-profile";
 import { describeResultSchema, sendResultSchema } from "./schema";
 
 export class NativeSessionAbsentError extends Error {
@@ -66,6 +67,14 @@ function failure<T>(code: string, message: string, details?: unknown): Result<T>
   return details === undefined
     ? { ok: false, error: { code, message } }
     : { ok: false, error: { code, message, details } };
+}
+
+function mapOpenSessionError(cause: unknown): unknown {
+  return cause instanceof Error &&
+    cause.name === "RpcCommandError" &&
+    cause.message === "open_failed: too_many_sessions"
+    ? new HostCapacityError(NATIVE_HOST_SESSION_LIMIT)
+    : cause;
 }
 
 export function publicRpcClient(socketPath: string): RpcPort {
@@ -171,11 +180,15 @@ export async function attachBindingWithClient(
     if (matches.length !== 1)
       throw new Error("Host must contain exactly one durable native session");
     if (exact.status !== "open") throw new NativeSessionNotReadyError(exact.status);
-    const opened = await client.openSession({
-      sessionPath: binding.sessionPath,
-      cwd: binding.cwd,
-      retain_on_disconnect: true,
-    });
+    const opened = await client
+      .openSession({
+        sessionPath: binding.sessionPath,
+        cwd: binding.cwd,
+        retain_on_disconnect: true,
+      })
+      .catch((cause: unknown) => {
+        throw mapOpenSessionError(cause);
+      });
     if (opened.attached !== true || opened.sessionId !== exact.sessionId) {
       if (opened.attached === false) await client.closeSession(opened.sessionId);
       throw new Error("Native host did not attach the exact existing session");

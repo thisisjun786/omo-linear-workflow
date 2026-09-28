@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { RpcClientEvent } from "@code-yeongyu/senpi";
+import { RpcCommandError } from "../../node_modules/@code-yeongyu/senpi/dist/modes/rpc/rpc-client.js";
 import type { Binding, DeliveryRecord, Envelope } from "../../src/core/contracts";
+import { HostCapacityError } from "../../src/host-profile";
 import {
   attachBindingWithClient,
   NativeSessionNotReadyError,
@@ -92,6 +94,7 @@ class FakeRpc implements RpcPort {
     },
   ];
   opened = { sessionId: "host-row-parent", attached: true };
+  openFailure: Error | null = null;
   async start(): Promise<void> {
     this.started += 1;
   }
@@ -109,6 +112,7 @@ class FakeRpc implements RpcPort {
     readonly cwd?: string;
     readonly retain_on_disconnect?: boolean;
   }) {
+    if (this.openFailure !== null) throw this.openFailure;
     return this.opened;
   }
   async requestExtension(name: string): Promise<unknown> {
@@ -252,5 +256,23 @@ describe("native session client", () => {
     await session.close();
     expect(rpc.stopped).toBe(1);
     expect(rpc.closeSessionCalls).toBe(0);
+  });
+
+  test("maps the native worker cap refusal to an actionable typed error", async () => {
+    const rpc = new FakeRpc();
+    rpc.openFailure = new RpcCommandError("open_failed: too_many_sessions", undefined, undefined);
+
+    const result = await attachBindingWithClient(binding, rpc).then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(result).toBeInstanceOf(HostCapacityError);
+    expect(result).toMatchObject({
+      code: "host_session_capacity",
+      limit: 20,
+      action: "close_an_existing_role",
+    });
+    expect(rpc.stopped).toBe(1);
   });
 });

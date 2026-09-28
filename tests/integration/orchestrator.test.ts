@@ -16,7 +16,7 @@ import type {
 import { modelForLaunch, modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Snapshot, Workspace } from "../../src/herdr";
-import { createHostProfile, RUNTIME_CACHE_MARKER } from "../../src/host-profile";
+import { createHostProfile, HostCapacityError, RUNTIME_CACHE_MARKER } from "../../src/host-profile";
 import { roleLabel } from "../../src/linear";
 import {
   Orchestrator,
@@ -95,7 +95,7 @@ describe("host profile", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       spec_version: 1,
       core: {
-        session_runtime: "in-process",
+        session_runtime: "worker",
         multi_session: true,
         extensions: [
           "./node_modules/omo-ai/plugin",
@@ -108,6 +108,7 @@ describe("host profile", () => {
         OMO_NATIVE: "1",
         OMO_INITIATIVE_HOST: "1",
         OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
+        OMO_INITIATIVE_WORKER_ADMISSION_1: "1",
         OMO_INITIATIVE_ROOT: root,
         OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
         [RUNTIME_CACHE_MARKER]: "1",
@@ -723,6 +724,61 @@ describe("orchestrator startup", () => {
       ok: true,
       value: [{ launchState: "uncertain", initialization: { state: "pending" } }],
     });
+  });
+
+  test("capacity refusal is actionable before a role pane is launched", async () => {
+    const root = await ownedRoot("olw-capacity-launch-");
+    const events: string[] = [];
+    const herdr = new FakeHerdr(events);
+    const dependencies: OrchestratorDependencies = {
+      openRegistry,
+      createHerdrClient: () => herdr,
+      resolveHerdrArtifact: async () => ({ artifactDir: "/fixture-herdr" }),
+      ensureHost: async () => {},
+      checkHostProfile: async () => {},
+      gitTip: (cwd, ref) => fixtureTip(root, "commit", cwd, ref),
+      now: () => "2026-09-28T00:00:00.000Z",
+      uuid: () => crypto.randomUUID(),
+      attachBinding: async () => {
+        throw new Error("Capacity must fail before attach");
+      },
+      terminateBinding: async () => {},
+      prompt: async () => {
+        throw new Error("Capacity must fail before prompt");
+      },
+    };
+    Object.assign(dependencies, {
+      assertHostCapacity: async () => {
+        throw new HostCapacityError(20);
+      },
+    });
+    const scope: ScopeSnapshot = {
+      version: 1,
+      source: "fixture",
+      initiative: { id: "initiative", url: "https://linear.test/i", revision: "r1" },
+      projects: [],
+      decisionRefs: [],
+    };
+    const scopeFile = join(root, "scope.json");
+    await Bun.write(scopeFile, JSON.stringify(await mappedScope(root, scope)));
+    const orchestrator = new Orchestrator(root, "/fake/herdr.sock", dependencies);
+    const imported = await orchestrator.importScope(scopeFile, true);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const result = await orchestrator.createSupervisor({
+      initiativeId: "initiative",
+      scopeDigest: imported.value.digest,
+      designationId: "designation",
+      execute: true,
+      fixture: true,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "host_session_capacity",
+        details: { count: 20, limit: 20, action: "close_an_existing_role" },
+      },
+    });
+    expect(events).not.toContain("run");
   });
 
   test("fails role startup before reservation when the managed Herdr artifact is unavailable", async () => {

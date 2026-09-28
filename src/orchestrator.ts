@@ -41,8 +41,10 @@ import { createHerdrClient, type HerdrClient } from "./herdr";
 import { resolveHerdrArtifact } from "./herdr/artifact";
 import { HostHandoffBusyError, withHostHandoffLock } from "./host-handoff-lock";
 import {
+  assertHostCapacity,
   assertHostProtocol,
   createHostProfile,
+  HostCapacityError,
   HostPostHandoffVerificationError,
   HostProfileMismatchError,
   HostSessionsPresentError,
@@ -315,6 +317,7 @@ export interface OrchestratorDependencies {
     socket: string,
     env: Readonly<Record<string, string | undefined>>,
   ) => Promise<void>;
+  readonly assertHostCapacity?: (socket: string, sessionPath?: string) => Promise<void>;
   readonly checkHostProfile?: (
     root: string,
     socket: string,
@@ -638,6 +641,7 @@ const defaults: OrchestratorDependencies = {
   terminateBinding: defaultTerminateBinding,
   resolveHerdrArtifact,
   ensureHost: defaultEnsureHost,
+  assertHostCapacity,
   checkHostProfile: assertHostProtocol,
   readHostStatus,
   observeEmptyHostSessions,
@@ -2205,9 +2209,16 @@ export class Orchestrator {
         binding.omoSocket,
         launchEnvironment(this.#root, managedPath),
       );
+      await this.#deps.assertHostCapacity?.(binding.omoSocket, binding.sessionPath ?? undefined);
       if ((await this.#deps.gitTip(checkout.path, "HEAD")) !== handoff.head)
         return failure("head_mismatch", "Worktree HEAD changed since plan handoff");
     } catch (cause) {
+      if (cause instanceof HostCapacityError)
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
       if (cause instanceof HostProfileMismatchError)
         return failure("runtime_unavailable", cause.message, {
           reason: "host_profile_mismatch",
@@ -3937,6 +3948,7 @@ export class Orchestrator {
         this.#deps.ensureHost(this.#root, this.#omoSocket, environment),
         here,
       );
+      await this.#deps.assertHostCapacity?.(reserved.value.omoSocket);
     } catch (cause) {
       if (here !== undefined && launchToken !== undefined) {
         const closed = this.#withRegistry((r) => r.closeUnstartedManager(bindingId, launchToken));
@@ -3954,6 +3966,12 @@ export class Orchestrator {
           return closing.ok ? registry.finishClose(bindingId) : closing;
         });
       if (cause instanceof HostProtocolResultError) return cause.result;
+      if (cause instanceof HostCapacityError)
+        return failure(cause.code, cause.message, {
+          count: cause.count,
+          limit: cause.limit,
+          action: cause.action,
+        });
       return failure("runtime_unavailable", "Native host launch failed", messageOf(cause));
     }
 

@@ -1,0 +1,21 @@
+COMMAND: env -u HERDR_ENV bun test tests/host-profile.test.ts tests/host-capacity.test.ts tests/transport/client.test.ts
+
+bun test v1.4.0 (34cbb9a40)
+
+tests/host-capacity.test.ts:
+(pass) capacity guard counts workers and returns an actionable typed error at native cap
+(pass) capacity guard preserves attach-at-cap for an existing session path
+(pass) capacity guard fails closed when the mutating observation is unreadable
+
+tests/host-profile.test.ts:
+(pass) 27 tests, including worker launch spec, in-process mismatch handoff, persistent policy, and read-only status invariants
+
+tests/transport/client.test.ts:
+(pass) 7 tests, including RpcCommandError open_failed: too_many_sessions typed mapping
+
+37 pass
+0 fail
+99 expect() calls
+Ran 37 tests across 3 files. [2.14s]
+
+EXIT_CODE=0

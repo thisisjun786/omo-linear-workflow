@@ -41,6 +41,14 @@ const hostStatusSchema = z.object({
 export type HostStatus = z.infer<typeof hostStatusSchema>;
 
 const observedSessionsSchema = z.object({ sessions: z.array(z.unknown()) });
+const capacitySessionsSchema = z.object({
+  sessions: z.array(
+    z.object({
+      sessionPath: z.string().optional(),
+      kind: z.enum(["interactive", "worker"]).optional(),
+    }),
+  ),
+});
 const HOST_STATUS_TIMEOUT_MS = 15_000;
 const HOST_HANDOFF_TIMEOUT_MS = 45_000;
 const HOST_GROUP_TERM_GRACE_MS = 250;
@@ -92,7 +100,23 @@ export const RUNTIME_CACHE_MARKER = `OMO_INITIATIVE_CACHE_V1_${runtimeNamespace(
   import.meta.resolve("@code-yeongyu/senpi"),
 ).toUpperCase()}`;
 export const EXTENSION_PROTOCOL_MARKER = "OMO_INITIATIVE_EXTENSION_PROTOCOL_2";
+export const WORKER_ADMISSION_MARKER = "OMO_INITIATIVE_WORKER_ADMISSION_1";
 export const DEFAULT_HOST_RSS_WARNING_MB = 8 * 1024;
+export const NATIVE_HOST_SESSION_LIMIT = 20;
+
+export class HostCapacityError extends Error {
+  public override readonly name = "HostCapacityError";
+  public readonly code = "host_session_capacity";
+  public readonly action = "close_an_existing_role";
+  public constructor(
+    public readonly count: number,
+    public readonly limit = NATIVE_HOST_SESSION_LIMIT,
+  ) {
+    super(
+      `Native host session capacity is ${count}/${limit}; close an existing role before launching another`,
+    );
+  }
+}
 
 const crashRecordSchema = z.object({
   at: z.iso.datetime(),
@@ -467,6 +491,24 @@ export async function observeEmptyHostSessions(
     throw new HostSessionsPresentError(parsed.data.sessions.length);
 }
 
+export async function assertHostCapacity(
+  socket: string,
+  requestedSessionPath: string | undefined,
+  timeoutMs = HOST_STATUS_TIMEOUT_MS,
+  request: (socket: string, timeoutMs: number) => Promise<unknown> = requestSessionList,
+): Promise<void> {
+  const parsed = capacitySessionsSchema.safeParse(await request(socket, timeoutMs));
+  if (!parsed.success)
+    throw new HostSessionObservationError("Native host capacity could not be read");
+  if (
+    requestedSessionPath !== undefined &&
+    parsed.data.sessions.some((session) => session.sessionPath === requestedSessionPath)
+  )
+    return;
+  if (parsed.data.sessions.length >= NATIVE_HOST_SESSION_LIMIT)
+    throw new HostCapacityError(parsed.data.sessions.length);
+}
+
 function isContained(root: string, candidate: string): boolean {
   const child = relative(root, candidate);
   return child !== "" && !child.startsWith("..") && !isAbsolute(child);
@@ -570,6 +612,8 @@ function hostProfileCompatibility(status: HostStatus, required: readonly string[
       ? ["runtime_cache_isolation"]
       : []),
     ...(!status.env_keys.includes(EXTENSION_PROTOCOL_MARKER) ? ["olw_extension_protocol_2"] : []),
+    ...(!status.env_keys.includes(WORKER_ADMISSION_MARKER) ? ["worker_admission_1"] : []),
+    ...(core !== undefined && core.session_runtime !== "worker" ? ["worker_session_runtime"] : []),
   ];
   return {
     missingExtensions,
@@ -578,7 +622,7 @@ function hostProfileCompatibility(status: HostStatus, required: readonly string[
       missingExtensions.length === 0 &&
       missingCapabilities.length === 0 &&
       core?.multi_session === true &&
-      core.session_runtime === "in-process",
+      core.session_runtime === "worker",
   };
 }
 
@@ -666,7 +710,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
   const profile = {
     spec_version: 1,
     core: {
-      session_runtime: "in-process",
+      session_runtime: "worker",
       multi_session: true,
       extensions: [...EXTENSIONS],
     },
@@ -675,6 +719,7 @@ export async function createHostProfile(rootInput: string, status?: HostStatus):
       OMO_NATIVE: "1",
       OMO_INITIATIVE_HOST: "1",
       OMO_INITIATIVE_EXTENSION_PROTOCOL_2: "1",
+      OMO_INITIATIVE_WORKER_ADMISSION_1: "1",
       OMO_INITIATIVE_ROOT: root,
       OMO_RPC_SOCKET: join(root, ".omo/state/omo.sock"),
       [RUNTIME_CACHE_MARKER]: "1",

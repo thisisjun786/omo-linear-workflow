@@ -1,0 +1,54 @@
+# LINA-307 real-surface QA
+
+## Manager admission and native capacity
+
+Command: `bun scripts/qa-manager-idle.ts --capacity`.
+Host: disposable socket, actual Senpi worker runtime, real OMO and OLW extensions,
+real SQLite registry and native thread_send. Only model inference is fake/local.
+
+Attempt 1 stopped before any delivery scenario: the new QA driver called native
+RpcClient.waitForIdle on already-idle sessions. That method subscribes only to a
+future agent_settled event. It timed out. Fixed the driver to subscribe first and
+read current state, resolving immediately if idle. No production workaround.
+Scratch `/tmp/olw-manager-idle-9XRqY9`, PID 1772265, two sessions, fully cleaned.
+
+Attempt 2, 2026-09-28T09:41Z: PASS, exit 0.
+Scratch `/tmp/olw-manager-idle-ISrRmW`; host PID 1836496.
+
+- Both `omo.initiative.describe` replies had exact expected durableSessionId,
+  sessionPath, cwd, provider/model/thinking and extensionProtocol 2.
+- Idle `omo.initiative.send`: accepted, native message_seq 1, one immutable
+  envelope occurrence in manager transcript. Same-ID replay returned identical
+  stored receipt, transcript occurrence stayed one.
+- Busy manager was held by a real provider streaming barrier. The report remained
+  sending, manager was streaming, and its transcript contained zero occurrences.
+  Releasing the barrier allowed event-driven admission: accepted, message_seq 2,
+  one transcript occurrence. Replay again stayed one.
+- Twenty actual worker sessions opened. The 21st native open threw
+  `RpcCommandError: open_failed: too_many_sessions`. OLW's mutating capacity guard
+  returned `HostCapacityError`, code `host_session_capacity`, count 20, limit 20,
+  action `close_an_existing_role`. Attaching existing manager at capacity returned
+  `{sessionId:"rpc-1", attached:true}`.
+- Final synchronous preflight race and concurrent/wrong-native-key admission are
+  additionally exercised by tests/manager-isolation.test.ts and the pinned native
+  thread factory in tests/runtime/native-delivery.test.ts (not a fake receipt-only
+  assertion). Focused 22-test suite passed before this run.
+
+## Cleanup receipt
+
+Post-change memory scenario passed: worker 2719700 -> 382752 KiB; 20 -> 0
+listeners before host exit. PID 1863454 and `/tmp/olw-memory-4yEsfn` cleaned.
+
+Attempt 2 finally observed all 20 close responses, terminated owned host process,
+waited for exit, removed its socket and temporary root. Printed receipt:
+`{"sessionsClosed":20,"hostStopped":true,"socketRemoved":true,"rootRemoved":true}`.
+The initial four memory hosts and roots are listed in measurements.md; independent
+`ps -p` checks and directory absence checks confirmed all were gone.
+
+## Scope correction
+
+A delegated script author created scripts/qa-manager-idle.ts in the live checkout
+instead of the assigned worktree. Lead found this before running it and moved that
+single new file into the assigned worktree with apply_patch. No live host command,
+socket request or restart was performed. The live file no longer exists. This was
+a temporary filesystem scope violation, not a live runtime change.

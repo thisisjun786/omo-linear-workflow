@@ -1,0 +1,25 @@
+Command: bun test tests/manager-isolation.test.ts
+Baseline: production source unchanged at 22bf7e3
+
+44 | expect(delivered.state).toBe(mode === "idle" ? "accepted" : "rejected");
+error: expect(received).toBe(expected)
+Expected: "accepted"
+Received: "rejected"
+(fail) manager owns admission without shared contexts: idle [518.19ms]
+(pass) manager owns admission without shared contexts: busy [521.55ms]
+(pass) manager owns admission without shared contexts: race [502.18ms]
+2 pass, 1 fail, 9 expect() calls; exit 1.
+
+Busy/race currently pass for the wrong reason (all cross-isolate sends reject).
+The idle happy-path failure makes the suite red; positive target-side checks and
+native invocation counts must pass together after implementation.
+
+Profile and transport RED is preserved in profile-capacity-red.txt (23 pass,
+6 fail, 2 errors, exit 1). Missing marker RED is separately recorded by the child.
+
+Command: bun test tests/integration/orchestrator.test.ts -t 'capacity refusal'
+Expected error.code host_session_capacity plus {count:20,limit:20,action:close_an_existing_role}.
+Received generic runtime failure after attempting startup instead of capacity refusal.
+(fail) orchestrator startup > capacity refusal is actionable before a role pane is launched
+0 pass, 1 fail, exit 1.
+After wiring capacity before role launch: 1 pass, 0 fail, exit 0.

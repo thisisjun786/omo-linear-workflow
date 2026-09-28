@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Reclaim closed sessions' extension allocations and loopback servers with worker isolates, admit manager notices in the receiving isolate with a final synchronous idle check, and report the native 20-session capacity before role launch. Existing in-process hosts require the normal idle-host profile handoff; worker mode is not process-fatal OOM containment.
 - Detect crash-restarted shared hosts that lost OLW's launch profile, preserve the existing idle-host handoff on the next OLW entry, and make `olw doctor` report endpoint generation, profile match, RSS threshold warnings, seven-day daemon crash history, and the exact scoped recovery environment and command without invoking session APIs that reconcile daemon state.
 - Detect ready or uncertain OLW roles whose Herdr TUI survives shared-host loss. Read-only status/doctor use only side-effect-free protocol probing; reconcile performs bounded exact-session classification, persists `local_only`, `host_lost`, `starting`, or `unknown`, and posts one durable owner or user-inbox notice. OLW does not auto-abort on generic session rebinds because Senpi exposes no fallback-specific turn identity.
 - Refuse automatic recovery of uncertain local-only execute successors because native queued input cannot be proven absent. `stage start` and `reconcile` direct operators to inspect and abandon the exact binding; identity-validated, resumable close retires only that execute edge, preserves attempt history and the old session file, and lets the next `stage start` reserve a fresh successor.

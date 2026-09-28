@@ -133,6 +133,40 @@ test("launch proof binds a live host peer to the nonce TUI PID, not an observer"
   }
 });
 
+test("launch proof accepts a peer of the handed-off host listener (omo.sock.next-N)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "olw-tui-handoff-"));
+  const starttime = await processStarttime(process.pid);
+  const rows = `u_str ESTAB 0 0 ${binding.omoSocket}.next-3 100 * 200 users:(("host",pid=999,fd=3))\nu_str ESTAB 0 0 * 200 * 100 users:(("tui",pid=${process.pid},fd=4))\nu_str ESTAB 0 0 ${binding.omoSocket}.next-3x 300 * 400 users:(("other",pid=998,fd=3))\nu_str ESTAB 0 0 * 400 * 300 users:(("tui",pid=${process.pid},fd=5))\n`;
+  try {
+    await publishReadiness(root, {
+      ...receipt,
+      launch: { nonce: "launch", pid: process.pid, starttime },
+    });
+    const allocated = { ...binding, sessionPath: receipt.sessionPath };
+    expect(
+      await proveTuiConnection(
+        root,
+        allocated,
+        "launch",
+        async () => true,
+        async () => rows,
+      ),
+    ).toBe(true);
+    const foreignOnly = `u_str ESTAB 0 0 ${binding.omoSocket}.next-3x 300 * 400 users:(("other",pid=998,fd=3))\nu_str ESTAB 0 0 * 400 * 300 users:(("tui",pid=${process.pid},fd=5))\n`;
+    expect(
+      await proveTuiConnection(
+        root,
+        allocated,
+        "launch",
+        async () => true,
+        async () => foreignOnly,
+      ),
+    ).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("TUI process proof reads a real established Unix peer and notices disconnect", async () => {
   const root = await mkdtemp(join(tmpdir(), "olw-tui-peer-"));
   const path = join(root, "host.sock");

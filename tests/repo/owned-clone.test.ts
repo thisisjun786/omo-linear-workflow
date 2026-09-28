@@ -117,6 +117,9 @@ async function world() {
     async paneContainsProcess() {
       return true;
     },
+    async paneForegroundProcessNames() {
+      return ["bun"];
+    },
     async sendKeys() {},
     async run(paneId, argv) {
       const path = argv[argv.indexOf("--session") + 1];

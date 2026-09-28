@@ -1217,11 +1217,17 @@ export class Orchestrator {
       );
       // A pane reporting a session file must report this manager's session; `pi`/`omo` alone
       // (reporters without a session path) stays accepted for official Herdr compatibility.
+      // A reporter can leave its agent label behind after the TUI exits, so an agent-only
+      // pane counts as live only while a Bun process holds its foreground.
       const tuiRunning =
         recordedPane !== undefined &&
         hasLiveTui(recordedPane) &&
         (typeof recordedPane.sessionPath !== "string" ||
-          recordedPane.sessionPath === binding.sessionPath);
+          recordedPane.sessionPath === binding.sessionPath) &&
+        (typeof recordedPane.sessionPath === "string" ||
+          (
+            await this.#whileForeground(herdr.paneForegroundProcessNames(recordedPane.paneId), here)
+          ).includes("bun"));
       const pending = this.#withRegistry((registry) => registry.reattachPending(binding.id));
       if (!pending.ok) return pending;
       if (tuiRunning && !pending.value) {

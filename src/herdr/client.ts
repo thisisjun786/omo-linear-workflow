@@ -84,6 +84,7 @@ export interface HerdrClient {
   focusWorkspace(workspaceId: string): Promise<void>;
   focusPane(paneId: string): Promise<void>;
   paneContainsProcess(paneId: string, pid: number): Promise<boolean>;
+  paneForegroundProcessNames(paneId: string): Promise<readonly string[]>;
   sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void>;
   run(
     paneId: string,
@@ -219,6 +220,23 @@ class SocketHerdrClient implements HerdrClient {
       result.process_info.pane_id === paneId &&
       result.process_info.foreground_processes.some((process) => process.pid === pid)
     );
+  }
+
+  public async paneForegroundProcessNames(paneId: string): Promise<readonly string[]> {
+    const result = z
+      .object({
+        type: z.literal("pane_process_info"),
+        process_info: z.object({
+          pane_id: nonEmptyStringSchema,
+          foreground_processes: z.array(z.object({ name: z.string() })).default([]),
+        }),
+      })
+      .parse(
+        await this.#request("pane.process_info", { pane_id: nonEmptyStringSchema.parse(paneId) }),
+      );
+    if (result.process_info.pane_id !== paneId)
+      throw new HerdrError("pane_mismatch", "Herdr returned process info for another pane");
+    return result.process_info.foreground_processes.map((process) => process.name);
   }
 
   public async sendKeys(paneId: string, text: string, keys: readonly string[]): Promise<void> {

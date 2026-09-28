@@ -156,6 +156,9 @@ async function world(agent = "omo") {
     async paneContainsProcess() {
       return true;
     },
+    async paneForegroundProcessNames() {
+      return ["bun"];
+    },
     async focusPane(paneId) {
       focused.push(paneId);
     },
@@ -2039,6 +2042,23 @@ test("manage relaunches when the recorded pane survives but its TUI exited", asy
 
   expect(result.action).toBe("reattached");
   expect(w.tabs).toHaveLength(1);
+  expect(w.runs).toHaveLength(2);
+});
+
+test("manage relaunches when a stale agent label outlives the TUI in its pane", async () => {
+  const w = await world();
+  const first = value(await w.orchestrator.manage());
+  const paneId = first.binding.paneId ?? "";
+  const pane = w.panes.get(paneId);
+  if (pane === undefined) throw new Error("No manager pane");
+  w.panes.set(paneId, { workspaceId: pane.workspaceId, agent: "pi" });
+  Object.assign(w.deps.createHerdrClient("/fixture/herdr.sock"), {
+    paneForegroundProcessNames: async () => ["zsh"],
+  });
+
+  const result = await w.orchestrator.manage();
+
+  expect(result).toMatchObject({ ok: true, value: { action: "reattached" } });
   expect(w.runs).toHaveLength(2);
 });
 

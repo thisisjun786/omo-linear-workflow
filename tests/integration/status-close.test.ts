@@ -122,6 +122,7 @@ async function world() {
     focusWorkspace: unused,
     focusPane: unused,
     paneContainsProcess: unused,
+    paneForegroundProcessNames: unused,
     run: unused,
     removeWorktree: unused,
     subscribe: async (cb) => {

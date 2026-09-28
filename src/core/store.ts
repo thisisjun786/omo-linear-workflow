@@ -1207,9 +1207,7 @@ export function openRegistry(
       }
       if (held.state === "claimed") {
         settleSuccessorAttempt(id, token, "failed");
-        db.query(
-          "UPDATE successor_launch SET state = 'uncertain' WHERE binding_id = ? AND owner = ?",
-        ).run(id, token);
+        db.query("DELETE FROM successor_launch WHERE binding_id = ? AND owner = ?").run(id, token);
         return binding;
       }
       if (held.state === "dispatching") {

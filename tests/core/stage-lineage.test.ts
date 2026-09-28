@@ -133,6 +133,7 @@ test("successor recovery appends attempt history and pre-dispatch failure preser
     );
     if (!recovery.claimed) throw new Error("missing recovery claim");
     value(registry.failSuccessorLaunch(execute.id, recovery.token));
+    expect(value(registry.successorLaunchIntent(execute.id))).toBeNull();
 
     const db = new Database(path, { readonly: true });
     try {

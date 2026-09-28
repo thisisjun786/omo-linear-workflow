@@ -13,7 +13,12 @@ import {
 } from "./core/schema";
 import { openRegistry } from "./core/store";
 import { resolveHerdrArtifact } from "./herdr/artifact";
-import { inspectHostHealth, readHostStatus, runtimeCacheEnvironment } from "./host-profile";
+import {
+  inspectHostHealth,
+  readHostStatusReadOnly,
+  resolveOmoAgentDir,
+  runtimeCacheEnvironment,
+} from "./host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";
 import { fetchMirror, listMirrors, MirrorError } from "./repo/mirror";
@@ -264,14 +269,11 @@ function scopeFilter(options: Options, required: boolean): Result<ScopeFilter> {
 
 async function hostHealth(root: string, readyBindings: number) {
   const socket = join(root, ".omo/state/omo.sock");
-  const status = await readHostStatus(root, socket, {
-    ...process.env,
-    ...runtimeCacheEnvironment(root),
-  });
+  const agentDir = resolveOmoAgentDir(process.env, root);
+  const status = await readHostStatusReadOnly(socket, agentDir);
   const configuredThreshold = Number(process.env["OLW_HOST_RSS_WARNING_MB"] ?? "8192");
   return inspectHostHealth(root, status, {
-    agentDir:
-      process.env["OMO_CODING_AGENT_DIR"] ?? join(process.env["HOME"] ?? homedir(), ".omo/agent"),
+    agentDir,
     readyBindings,
     rssWarningMb:
       Number.isFinite(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 8192,

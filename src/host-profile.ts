@@ -1,8 +1,17 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { isAbsolute, join, relative } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
+import { readDaemonEnvKeys } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-env.js";
+import { createHostDaemonPaths } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js";
+import { readHostRegistration } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-registration.js";
+import {
+  probeProtocolInfo,
+  requestOnSocket,
+} from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-probe.js";
+import { readHostProcessMetrics } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-process-metrics.js";
 
 const EXTENSIONS = [
   "./node_modules/omo-ai/plugin",
@@ -38,6 +47,14 @@ const hostStatusSchema = z.object({
 export type HostStatus = z.infer<typeof hostStatusSchema>;
 
 const observedSessionsSchema = z.object({ sessions: z.array(z.unknown()) });
+const healthSessionsSchema = z.object({
+  sessions: z.array(
+    z.object({
+      kind: z.string().optional(),
+      attachments: z.number().optional(),
+    }),
+  ),
+});
 const HOST_STATUS_TIMEOUT_MS = 15_000;
 const HOST_HANDOFF_TIMEOUT_MS = 45_000;
 const HOST_GROUP_TERM_GRACE_MS = 250;
@@ -103,7 +120,10 @@ export interface HostHealth {
   readonly generation: number | null;
   readonly profile: {
     readonly matchesOlw: boolean;
-    readonly recovery: readonly string[];
+    readonly recovery: {
+      readonly env: Readonly<Record<string, string>>;
+      readonly argv: readonly string[];
+    };
   };
   readonly sessions: HostStatus["sessions"];
   readonly rssMb: number | null;
@@ -112,6 +132,17 @@ export interface HostHealth {
     z.infer<typeof crashRecordSchema> & { readonly likelyOom: boolean }
   >;
   readonly warnings: readonly string[];
+}
+
+export function resolveOmoAgentDir(
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string,
+): string {
+  for (const name of ["OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "PI_CODING_AGENT_DIR"]) {
+    const configured = env[name]?.trim();
+    if (configured) return resolve(cwd, configured);
+  }
+  return join(env["HOME"] ?? homedir(), ".omo/agent");
 }
 
 export function runtimeCacheEnvironment(
@@ -244,6 +275,44 @@ export async function runBoundedHostCommand(
   }
 }
 
+export async function readHostStatusReadOnly(
+  socket: string,
+  agentDir: string,
+): Promise<HostStatus> {
+  const paths = createHostDaemonPaths({ socket, agentDir });
+  const [protocol, registration, sessionReply, envKeys] = await Promise.all([
+    probeProtocolInfo(socket, HOST_STATUS_TIMEOUT_MS),
+    readHostRegistration(paths),
+    requestOnSocket(
+      socket,
+      { type: "list_sessions", include_workers: true },
+      HOST_STATUS_TIMEOUT_MS,
+    ),
+    readDaemonEnvKeys(paths),
+  ]);
+  const parsedSessions = healthSessionsSchema.safeParse(sessionReply);
+  const rows = parsedSessions.success ? parsedSessions.data.sessions : [];
+  const attached = rows.filter((row) => (row.attachments ?? 0) > 0).length;
+  const pid = registration?.record.pid;
+  const metrics = pid === undefined ? { rss_mb: null } : await readHostProcessMetrics(pid);
+  return hostStatusSchema.parse({
+    reachable: protocol !== undefined,
+    socket,
+    generation: protocol?.generation ?? registration?.generation ?? null,
+    launchProfile: protocol?.launch_profile ?? null,
+    sessions: {
+      total: rows.length,
+      interactive: rows.filter((row) => row.kind !== "worker").length,
+      worker: rows.filter((row) => row.kind === "worker").length,
+      retained: rows.length - attached,
+      foreign_attached: attached,
+      foreign_retained: rows.length - attached,
+    },
+    rss_mb: metrics.rss_mb,
+    env_keys: envKeys,
+  });
+}
+
 export async function readHostStatus(
   root: string,
   socket: string,
@@ -358,7 +427,9 @@ function daemonDirectoryName(socket: string): string {
   return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 16);
 }
 
-async function readCrashRecords(agentDir: string, socket: string) {
+export const RECENT_HOST_CRASH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function readCrashRecords(agentDir: string, socket: string, now: Date) {
   const path = join(agentDir, "rpc-host-daemon", daemonDirectoryName(socket), "crashes.jsonl");
   let text: string;
   try {
@@ -379,6 +450,10 @@ async function readCrashRecords(agentDir: string, socket: string) {
       } catch {
         return [];
       }
+    })
+    .filter((record) => {
+      const age = now.getTime() - new Date(record.at).getTime();
+      return age >= 0 && age <= RECENT_HOST_CRASH_WINDOW_MS;
     })
     .slice(-10);
 }
@@ -422,6 +497,7 @@ export async function inspectHostHealth(
     readonly agentDir: string;
     readonly readyBindings?: number;
     readonly rssWarningMb?: number;
+    readonly now?: () => Date;
   },
 ): Promise<HostHealth> {
   const root = await realpath(rootInput);
@@ -439,27 +515,30 @@ export async function inspectHostHealth(
     warnings.push(`Shared host RSS ${rssMb} MiB exceeds ${rssWarningMb} MiB.`);
   if (status.reachable && status.sessions.total === 0 && (options.readyBindings ?? 0) > 0)
     warnings.push(
-      "OLW bindings are ready but the shared host has zero sessions; role sessions are running local-only.",
+      `Shared host has 0 sessions while ${options.readyBindings ?? 0} OLW bindings are ready; run olw status for per-binding state.`,
     );
   return {
     reachable: status.reachable,
     generation: status.generation,
     profile: {
       matchesOlw,
-      recovery: [
-        join(root, "node_modules/.bin/omo"),
-        "host",
-        "handoff",
-        "--launch-spec",
-        profilePath,
-        "--socket",
-        status.socket,
-      ],
+      recovery: {
+        env: runtimeCacheEnvironment(root),
+        argv: [
+          join(root, "node_modules/.bin/omo"),
+          "host",
+          "handoff",
+          "--launch-spec",
+          profilePath,
+          "--socket",
+          status.socket,
+        ],
+      },
     },
     sessions: status.sessions,
     rssMb,
     rssWarningMb,
-    crashes: await readCrashRecords(options.agentDir, status.socket),
+    crashes: await readCrashRecords(options.agentDir, status.socket, options.now?.() ?? new Date()),
     warnings,
   };
 }

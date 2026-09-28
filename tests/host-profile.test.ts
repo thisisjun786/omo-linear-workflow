@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostLaunchSpec } from "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-launch-spec.js";
@@ -11,6 +11,7 @@ import {
   inspectHostHealth,
   observeEmptyHostSessions,
   RUNTIME_CACHE_MARKER,
+  resolveOmoAgentDir,
   runtimeCacheEnvironment,
 } from "../src/host-profile";
 
@@ -391,12 +392,29 @@ test("reports generation, profile, sessions, RSS warnings, and local-only roles"
     rssMb: 9_001,
     warnings: [
       expect.stringContaining("RSS 9001 MiB exceeds 8192 MiB"),
-      expect.stringContaining("role sessions are running local-only"),
+      expect.stringContaining("run olw status for per-binding state"),
     ],
   });
 });
 
-test("reads only this socket's recent daemon crash records and labels SIGKILL as likely OOM", async () => {
+test("resolves the OMO agent directory with launcher precedence and cwd-relative overrides", () => {
+  expect(
+    resolveOmoAgentDir(
+      {
+        HOME: "/fallback",
+        SENPI_CODING_AGENT_DIR: "senpi-state",
+        PI_CODING_AGENT_DIR: "/pi-state",
+      },
+      "/fixture/cwd",
+    ),
+  ).toBe("/fixture/cwd/senpi-state");
+  expect(
+    resolveOmoAgentDir({ HOME: "/fallback", OMO_CODING_AGENT_DIR: " /omo-state " }, "/fixture/cwd"),
+  ).toBe("/omo-state");
+  expect(resolveOmoAgentDir({ HOME: "/fallback" }, "/fixture/cwd")).toBe("/fallback/.omo/agent");
+});
+
+test("reads only recent crashes for this socket and labels SIGKILL as likely OOM", async () => {
   const { root, status } = await fixture();
   const agentDir = join(root, "agent");
   const { daemonDirectoryName } = await import(
@@ -407,12 +425,21 @@ test("reads only this socket's recent daemon crash records and labels SIGKILL as
   await writeFile(
     join(daemonDir, "crashes.jsonl"),
     [
+      JSON.stringify({ at: "2026-09-20T23:59:59.999Z", signal: "SIGBUS", uptimeMs: 1 }),
+      JSON.stringify({ at: "2026-09-21T00:00:00.000Z", signal: "SIGKILL", uptimeMs: 2 }),
       JSON.stringify({ at: "2026-09-27T17:54:32.119Z", signal: "SIGKILL", uptimeMs: 14_398_708 }),
       "not-json",
       JSON.stringify({ at: "2026-09-28T01:00:00.000Z", code: 1, uptimeMs: 50 }),
     ].join("\n"),
   );
-  const health = await inspectHostHealth(root, { ...status, rss_mb: 512 }, { agentDir });
+  const health = await inspectHostHealth(
+    root,
+    { ...status, rss_mb: 512 },
+    {
+      agentDir,
+      now: () => new Date("2026-09-28T02:00:00.000Z"),
+    },
+  );
   expect(health.crashes).toEqual([
     {
       at: "2026-09-27T17:54:32.119Z",
@@ -441,15 +468,76 @@ test("flags a default crash-restart profile and provides the exact safe handoff 
   );
   expect(health.profile).toMatchObject({
     matchesOlw: false,
-    recovery: [
-      join(root, "node_modules/.bin/omo"),
-      "host",
-      "handoff",
-      "--launch-spec",
-      join(root, "omo-host.json"),
-      "--socket",
-      status.socket,
-    ],
+    recovery: {
+      argv: [
+        join(root, "node_modules/.bin/omo"),
+        "host",
+        "handoff",
+        "--launch-spec",
+        join(root, "omo-host.json"),
+        "--socket",
+        status.socket,
+      ],
+    },
   });
   expect(health.warnings).toEqual([expect.stringContaining("does not match OLW")]);
+  expect(health.profile.recovery).toMatchObject({
+    env: runtimeCacheEnvironment(root),
+    argv: expect.any(Array),
+  });
+});
+
+test("doctor leaves the endpoint daemon tree byte-identical", async () => {
+  const { root, status } = await fixture();
+  await mkdir(join(root, "node_modules/.bin"), { recursive: true });
+  await Bun.write(join(root, "node_modules/.bin/omo"), "#!/bin/sh\nexit 91\n");
+  await chmod(join(root, "node_modules/.bin/omo"), 0o700);
+  await cp(join(import.meta.dir, "../herdr-release.json"), join(root, "herdr-release.json"));
+  await cp(join(import.meta.dir, "../.omo/herdr"), join(root, ".omo/herdr"), { recursive: true });
+  await mkdir(join(root, ".omo/state"), { recursive: true });
+  const agentDir = join(root, "agent");
+  const { daemonDirectoryName } = await import(
+    "../node_modules/@code-yeongyu/senpi/dist/modes/rpc/host-daemon-paths.js"
+  );
+  const daemonDir = join(agentDir, "rpc-host-daemon", daemonDirectoryName(status.socket));
+  await mkdir(join(daemonDir, "generations/dead/scratch"), { recursive: true });
+  await writeFile(
+    join(daemonDir, "host.pid"),
+    JSON.stringify({ layout: 2, instance_id: "dead", generation_dir: "generations/dead" }),
+  );
+  await writeFile(
+    join(daemonDir, "generations/dead/host.pid"),
+    JSON.stringify({ pid: 2_147_483_647, processStartTime: "1", generation: 7 }),
+  );
+  const snapshot = async () => {
+    const files = (await readdir(daemonDir, { recursive: true })).sort();
+    return Promise.all(
+      files.map(async (file) => {
+        const path = join(daemonDir, file);
+        return [file, (await Bun.file(path).exists()) && (await Bun.file(path).text())] as const;
+      }),
+    );
+  };
+  const before = await snapshot();
+  const proc = Bun.spawn(
+    [process.execPath, join(import.meta.dir, "../src/cli.ts"), "--root", root, "doctor", "--json"],
+    {
+      cwd: root,
+      env: { ...process.env, HOME: root, SENPI_CODING_AGENT_DIR: agentDir },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const output = JSON.parse(stdout);
+  expect([code, stderr]).toEqual([3, ""]);
+  expect(output).toMatchObject({
+    ok: false,
+    error: { details: { sideEffects: false } },
+  });
+  expect(await snapshot()).toEqual(before);
 });

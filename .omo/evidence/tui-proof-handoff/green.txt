@@ -1,0 +1,14 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/readiness.test.ts:
+(pass) receives a TUI receipt published before subscription [2.50ms]
+(pass) receives a TUI receipt published after subscription [0.41ms]
+(pass) rejects a receipt for the wrong checkout instead of accepting its path [0.38ms]
+(pass) launch proof binds a live host peer to the nonce TUI PID, not an observer [1.33ms]
+(pass) launch proof accepts a peer of the handed-off host listener (omo.sock.next-N) [0.56ms]
+(pass) TUI process proof reads a real established Unix peer and notices disconnect [43.20ms]
+
+ 6 pass
+ 0 fail
+ 14 expect() calls
+Ran 6 tests across 1 file. [518.00ms]

@@ -77,8 +77,15 @@ export async function proveTuiConnection(
         return { path: match[1], inode: match[2], peer: match[4], owners: match[5] ?? "" };
       })
       .filter((row) => row !== undefined);
+    // After a generation handoff the live host listens on `<socket>.next-N` and
+    // renames it over the public path; the kernel still reports the bound name.
+    const handoffListener = new RegExp(
+      `^${binding.omoSocket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\.next-\\d+)?$`,
+    );
     const hostPeers = new Set(
-      rows.filter((row) => row.path === binding.omoSocket).map((row) => row.inode),
+      rows
+        .filter((row) => row.path !== undefined && handoffListener.test(row.path))
+        .map((row) => row.inode),
     );
     if (rows.some((row) => hostPeers.has(row.peer) && !row.owners.includes("pid=")))
       throw new TuiAttachmentUnverifiedError();

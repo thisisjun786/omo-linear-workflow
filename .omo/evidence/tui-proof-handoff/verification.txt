@@ -1,0 +1,3 @@
+full normal: 773 pass + 1 env fail (unbuilt worktree .omo/herdr) -> passes after bun run build
+full HERDR_ENV unset: 774 pass 0 fail
+typecheck 0, lint 0

@@ -1,0 +1,23 @@
+bun test v1.4.0 (34cbb9a40)
+
+tests/readiness.test.ts:
+143 |       launch: { nonce: "launch", pid: process.pid, starttime },
+144 |     });
+145 |     const allocated = { ...binding, sessionPath: receipt.sessionPath };
+146 |     expect(
+147 |       await proveTuiConnection(root, allocated, "launch", async () => true, async () => rows),
+148 |     ).toBe(true);
+            ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/jun/code/olw-wt/fix-handoff-socket-name/tests/readiness.test.ts:148:7)
+(fail) launch proof accepts a peer of the handed-off host listener (omo.sock.next-N) [9.14ms]
+
+ 0 pass
+ 5 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [1312.00ms]

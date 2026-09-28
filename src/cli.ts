@@ -17,7 +17,6 @@ import {
   inspectHostHealth,
   readHostStatusReadOnly,
   resolveOmoAgentDir,
-  runtimeCacheEnvironment,
 } from "./host-profile";
 import { Orchestrator, type OrchestratorDependencies } from "./orchestrator";
 import { readChainReport } from "./proxy/chain-check";

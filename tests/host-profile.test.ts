@@ -377,7 +377,10 @@ test("prepares a new profile when no host is reachable", async () => {
     { agentDir: join(root, "agent") },
   );
   expect(health.profile.matchesOlw).toBe(false);
-  expect(health.profile.recovery).toMatchObject({ ready: false, preparation: expect.any(Array) });
+  expect(health.profile.recovery).toMatchObject({
+    ready: false,
+    preparation: ["olw", "manage", "--root", root],
+  });
 });
 
 test("reports generation, profile, sessions, RSS warnings, and local-only roles", async () => {

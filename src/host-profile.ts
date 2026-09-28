@@ -617,7 +617,7 @@ export async function inspectHostHealth(
       matchesOlw,
       recovery: {
         ready: profileExists,
-        preparation: [join(root, "node_modules/.bin/olw"), "manage"],
+        preparation: ["olw", "manage", "--root", root],
         env: runtimeCacheEnvironment(root),
         argv: [
           join(root, "node_modules/.bin/omo"),

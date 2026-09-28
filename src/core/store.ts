@@ -1215,6 +1215,8 @@ export function openRegistry(
           runtimeState: _runtimeState,
           runtimeStateReason: _runtimeStateReason,
           runtimeIncidentId: _runtimeIncidentId,
+          runtimeIncidentState: _runtimeIncidentState,
+          runtimeIncidentNoticeState: _runtimeIncidentNoticeState,
           ...current
         } = binding.value;
         return saveBinding(current);
@@ -1226,8 +1228,17 @@ export function openRegistry(
           ? { runtimeStateReason: undefined }
           : { runtimeStateReason: reason }),
         ...(incidentId === undefined
-          ? { runtimeIncidentId: undefined }
-          : { runtimeIncidentId: incidentId }),
+          ? {
+              runtimeIncidentId: undefined,
+              runtimeIncidentState: undefined,
+              runtimeIncidentNoticeState: undefined,
+            }
+          : {
+              runtimeIncidentId: incidentId,
+              runtimeIncidentState:
+                state === "local_only" || state === "host_lost" ? state : undefined,
+              runtimeIncidentNoticeState: "posted",
+            }),
       });
     });
   }
@@ -1242,12 +1253,32 @@ export function openRegistry(
       const current = get(id);
       if (!current.ok) return current;
       const lost = state === "local_only" || state === "host_lost";
-      const transition = lost && current.value.runtimeState !== state;
-      const incidentId = transition
-        ? proposedIncidentId
-        : lost
-          ? current.value.runtimeIncidentId
-          : undefined;
+      const incidentOpen =
+        current.value.runtimeIncidentId !== undefined &&
+        current.value.runtimeIncidentState !== undefined;
+      const recovered = state === "connected";
+      const changedLoss = lost && incidentOpen && current.value.runtimeIncidentState !== state;
+      const incidentId = lost
+        ? changedLoss
+          ? proposedIncidentId
+          : (current.value.runtimeIncidentId ?? proposedIncidentId)
+        : recovered
+          ? undefined
+          : current.value.runtimeIncidentId;
+      const incidentState = lost
+        ? changedLoss
+          ? state
+          : (current.value.runtimeIncidentState ?? state)
+        : recovered
+          ? undefined
+          : current.value.runtimeIncidentState;
+      const noticeState = lost
+        ? changedLoss
+          ? "pending"
+          : (current.value.runtimeIncidentNoticeState ?? "pending")
+        : recovered
+          ? undefined
+          : current.value.runtimeIncidentNoticeState;
       const saved = saveBinding({
         ...current.value,
         runtimeState: state,
@@ -1255,15 +1286,37 @@ export function openRegistry(
           ? { runtimeStateReason: undefined }
           : { runtimeStateReason: reason }),
         ...(incidentId === undefined
-          ? { runtimeIncidentId: undefined }
-          : { runtimeIncidentId: incidentId }),
+          ? {
+              runtimeIncidentId: undefined,
+              runtimeIncidentState: undefined,
+              runtimeIncidentNoticeState: undefined,
+            }
+          : {
+              runtimeIncidentId: incidentId,
+              runtimeIncidentState: incidentState,
+              runtimeIncidentNoticeState: noticeState,
+            }),
       });
       if (!saved.ok) return saved;
       return ok({
         binding: saved.value,
-        notify: transition,
+        notify: lost && (!incidentOpen || changedLoss || noticeState === "pending"),
         ...(incidentId === undefined ? {} : { incidentId }),
       });
+    });
+  }
+
+  function setRuntimeIncidentNoticeState(
+    id: string,
+    incidentId: string,
+    state: "posted" | "uncertain",
+  ): Result<Binding> {
+    return transaction(() => {
+      const current = get(id);
+      if (!current.ok) return current;
+      if (current.value.runtimeIncidentId !== incidentId)
+        return error("stale_incident", "Runtime incident was replaced before notice settlement");
+      return saveBinding({ ...current.value, runtimeIncidentNoticeState: state });
     });
   }
 
@@ -2277,6 +2330,7 @@ export function openRegistry(
     setLaunchState,
     setRuntimeState,
     transitionRuntimeState,
+    setRuntimeIncidentNoticeState,
     setContactState,
     setOwner,
     post,

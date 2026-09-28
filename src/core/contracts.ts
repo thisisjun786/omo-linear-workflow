@@ -130,6 +130,8 @@ export interface Binding {
     | undefined;
   readonly runtimeStateReason?: string | undefined;
   readonly runtimeIncidentId?: string | undefined;
+  readonly runtimeIncidentState?: "local_only" | "host_lost" | undefined;
+  readonly runtimeIncidentNoticeState?: "pending" | "posted" | "uncertain" | undefined;
   readonly launchState:
     | "reserved"
     | "provisioning"
@@ -408,6 +410,11 @@ export interface Registry {
     reason: string | undefined,
     proposedIncidentId: string,
   ): Result<{ readonly binding: Binding; readonly notify: boolean; readonly incidentId?: string }>;
+  setRuntimeIncidentNoticeState(
+    id: string,
+    incidentId: string,
+    state: "posted" | "uncertain",
+  ): Result<Binding>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;
   setOwner(parentId: string, supervisorId: string | null): Result<Binding>;
   beginClose(id: string): Result<Binding>;

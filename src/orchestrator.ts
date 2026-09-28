@@ -379,6 +379,14 @@ export function planPathForIssueKey(key: string | undefined): Result<string> {
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+
+export function runtimeNoticeLookupCommand(binding: Binding): string {
+  return binding.assignment.role === "parent" || binding.assignment.role === "child"
+    ? `olw notices --project ${binding.assignment.projectId}`
+    : binding.assignment.role === "supervisor"
+      ? `olw notices --initiative ${binding.assignment.initiativeId}`
+      : "olw notices";
+}
 type HostRecoveryPhase = "refused" | "status_unreadable" | "handoff_failed" | "verification_failed";
 
 class HostProtocolResultError extends Error {
@@ -2919,12 +2927,17 @@ export class Orchestrator {
         runtimeState: persistedState,
         runtimeStateReason: _persistedReason,
         runtimeIncidentId,
+        runtimeIncidentState,
+        runtimeIncidentNoticeState: _runtimeIncidentNoticeState,
         ...current
       } = binding;
       const lastRuntimeIncident =
         (persistedState === "local_only" || persistedState === "host_lost") &&
         runtimeIncidentId !== undefined
-          ? { state: persistedState, incidentId: runtimeIncidentId }
+          ? {
+              state: runtimeIncidentState ?? persistedState,
+              incidentId: runtimeIncidentId,
+            }
           : undefined;
       return {
         ...current,
@@ -3000,7 +3013,7 @@ export class Orchestrator {
       } else if (!notify) {
         states.set(binding.id, {
           state: "unknown",
-          reason: "Exact session not probed in read-only mode",
+          reason: "Exact session not probed in read-only mode; run olw reconcile to verify",
         });
       } else {
         const probe = await (this.#deps.probeBindingSession ?? probeBindingSession)(binding);
@@ -3045,6 +3058,14 @@ export class Orchestrator {
             transitioned.value.incidentId,
           );
           if (!notified.ok) return notified;
+          const settled = this.#withRegistry((registry) =>
+            registry.setRuntimeIncidentNoticeState(
+              binding.id,
+              transitioned.value.incidentId ?? "",
+              notified.value,
+            ),
+          );
+          if (!settled.ok) return settled;
         }
       }
     }
@@ -3056,8 +3077,8 @@ export class Orchestrator {
     state: "local_only" | "host_lost",
     unavailable: ReadonlySet<string>,
     incidentId: string,
-  ): Promise<Result<void>> {
-    if (binding.sessionPath === null) return ok(undefined);
+  ): Promise<Result<"posted" | "uncertain">> {
+    if (binding.sessionPath === null) return ok("posted");
     const failure: RuntimeFailureClaim = {
       version: 1,
       kind: "runtime_failure",
@@ -3081,14 +3102,15 @@ export class Orchestrator {
       registry.claimRuntimeFailure(binding.durableSessionId, failure, unavailable),
     );
     if (!claim.ok) return claim;
-    if (claim.value.disposition !== "new") return ok(undefined);
+    if (claim.value.disposition !== "new")
+      return ok(
+        claim.value.record.state === "uncertain" || claim.value.record.state === "sending"
+          ? "uncertain"
+          : "posted",
+      );
     await publishOperationalNotice(this.#root, claim.value.record);
-    if (claim.value.target === null) return ok(undefined);
-    const message = `[OLW] ${state}: role ${binding.id} has a live TUI without its bound host session. The active turn may be orphaned; press Esc in that pane before continuing. Details: olw notices --project ${
-      binding.assignment.role === "parent" || binding.assignment.role === "child"
-        ? binding.assignment.projectId
-        : binding.id
-    }`;
+    if (claim.value.target === null) return ok("posted");
+    const message = `[OLW] ${state}: role ${binding.id} has a live TUI without its bound host session. The active turn may be orphaned; press Esc in that pane before continuing. Details: ${runtimeNoticeLookupCommand(binding)}`;
     try {
       const receipt = await this.#boundedRuntimeOperation(
         (
@@ -3109,12 +3131,14 @@ export class Orchestrator {
         );
         if (!uncertain.ok) return uncertain;
         await publishOperationalNotice(this.#root, uncertain.value);
+        return ok("uncertain");
       } else {
         const finished = this.#withRegistry((registry) =>
           registry.finish(claim.value.record.envelope.id, receipt),
         );
         if (!finished.ok) return finished;
         await publishOperationalNotice(this.#root, finished.value);
+        return ok(finished.value.state === "uncertain" ? "uncertain" : "posted");
       }
     } catch (cause) {
       const uncertain = this.#withRegistry((registry) =>
@@ -3125,8 +3149,8 @@ export class Orchestrator {
       );
       if (!uncertain.ok) return uncertain;
       await publishOperationalNotice(this.#root, uncertain.value);
+      return ok("uncertain");
     }
-    return ok(undefined);
   }
 
   public setPaused(bindingId: string, paused: boolean): Result<Binding> {

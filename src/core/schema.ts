@@ -90,6 +90,8 @@ export const bindingSchema = z.strictObject({
   runtimeState: z.enum(["connected", "starting", "local_only", "host_lost", "unknown"]).optional(),
   runtimeStateReason: z.string().min(1).optional(),
   runtimeIncidentId: z.string().min(1).optional(),
+  runtimeIncidentState: z.enum(["local_only", "host_lost"]).optional(),
+  runtimeIncidentNoticeState: z.enum(["pending", "posted", "uncertain"]).optional(),
   launchState: z.enum([
     "reserved",
     "provisioning",

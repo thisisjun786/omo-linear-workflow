@@ -16,7 +16,11 @@ import { modelForRole } from "../../src/core/policy";
 import { openRegistry } from "../../src/core/store";
 import type { HerdrClient, Workspace } from "../../src/herdr";
 import { roleLabel } from "../../src/linear";
-import { Orchestrator, promptBindingWithClient } from "../../src/orchestrator";
+import {
+  Orchestrator,
+  promptBindingWithClient,
+  runtimeNoticeLookupCommand,
+} from "../../src/orchestrator";
 import { NativeSessionAbsentError } from "../../src/transport";
 
 const roots: string[] = [];
@@ -839,7 +843,8 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
       if (!inspected.ok) throw new Error(inspected.error.message);
       expect(inspected.value.find((binding) => binding.id === child.id)).toMatchObject({
         runtimeState: "unknown",
-        runtimeStateReason: "Exact session not probed in read-only mode",
+        runtimeStateReason:
+          "Exact session not probed in read-only mode; run olw reconcile to verify",
       });
     }
     expect(prompts).toHaveLength(0);
@@ -877,7 +882,8 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
           id: child.id,
           launchState: "uncertain",
           runtimeState: "unknown",
-          runtimeStateReason: "Exact session not probed in read-only mode",
+          runtimeStateReason:
+            "Exact session not probed in read-only mode; run olw reconcile to verify",
           lastRuntimeIncident: expect.objectContaining({ state: "local_only" }),
         }),
       ]),
@@ -1019,6 +1025,116 @@ test("concurrent reconciles allocate one runtime incident and one notice", async
   }
 });
 
+test("a failed notice claim retries the same pending incident exactly once", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    let failClaim = true;
+    let incidentSequence = 0;
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      openRegistry: (path, options) => {
+        const registry = openRegistry(path, options);
+        return {
+          ...registry,
+          claimRuntimeFailure: (...args) => {
+            if (failClaim) {
+              failClaim = false;
+              return { ok: false as const, error: { code: "storage_error", message: "injected" } };
+            }
+            return registry.claimRuntimeFailure(...args);
+          },
+        };
+      },
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      uuid: () => `incident-${++incidentSequence}`,
+    });
+    expect(await orchestrator.statusWithRuntimeHealth({}, true)).toMatchObject({
+      ok: false,
+      error: { code: "storage_error" },
+    });
+    const pending = value(w.registry.get(child.id));
+    expect(pending).toMatchObject({
+      runtimeIncidentId: "incident-1",
+      runtimeIncidentNoticeState: "pending",
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(1);
+    expect(childNotices[0]?.envelope.operational?.failure.sessionEntryId).toContain("incident-1");
+    expect(value(w.registry.get(child.id)).runtimeIncidentNoticeState).toBe("posted");
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("an unknown probe retains one active loss incident and notice", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    let reachability: "reachable" | "unknown" = "reachable";
+    let probe: "absent" | "unknown" = "absent";
+    let incidentSequence = 0;
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => reachability,
+      probeBindingSession: async () =>
+        probe === "absent"
+          ? { state: "absent" as const }
+          : { state: "unknown" as const, reason: "brief probe failure" },
+      uuid: () => `incident-${++incidentSequence}`,
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    probe = "unknown";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "unknown";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "reachable";
+    probe = "absent";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(1);
+    expect(value(w.registry.get(child.id))).toMatchObject({
+      runtimeIncidentId: "incident-1",
+      runtimeIncidentState: "local_only",
+      runtimeIncidentNoticeState: "posted",
+    });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("unscoped runtime notices suggest the unfiltered notices command", () => {
+  const manager: Binding = {
+    id: "manager-1",
+    designationId: "manager-designation",
+    assignment: { role: "manager" },
+    durableSessionId: "manager-session",
+    cwd: "/repo",
+    checkout: null,
+    herdrSocket: "/herdr",
+    omoSocket: "/omo",
+    workspaceId: "workspace",
+    paneId: "pane",
+    sessionPath: "/session.jsonl",
+    launchState: "ready",
+    contactState: "active",
+    initialization: { state: "accepted", text: "brief" },
+  };
+  expect(runtimeNoticeLookupCommand(manager)).toBe("olw notices");
+  expect(
+    runtimeNoticeLookupCommand({
+      ...manager,
+      assignment: { role: "supervisor", initiativeId: "initiative-1" },
+    }),
+  ).toBe("olw notices --initiative initiative-1");
+});
+
 test("runtime loss notices retain a real native receipt when one is returned", async () => {
   const w = await world();
   try {
@@ -1141,7 +1257,8 @@ test("read-only runtime health reports unverified current state instead of stale
         expect.objectContaining({
           id: child.id,
           runtimeState: "unknown",
-          runtimeStateReason: "Exact session not probed in read-only mode",
+          runtimeStateReason:
+            "Exact session not probed in read-only mode; run olw reconcile to verify",
           lastRuntimeIncident: { state: "host_lost", incidentId: "old-incident" },
         }),
       ]),
@@ -1173,11 +1290,11 @@ test("read-only runtime health never probes exact sessions or notifies", async (
     if (!inspected.ok) throw new Error(inspected.error.message);
     expect(inspected.value.find((binding) => binding.id === starting.id)).toMatchObject({
       runtimeState: "unknown",
-      runtimeStateReason: "Exact session not probed in read-only mode",
+      runtimeStateReason: "Exact session not probed in read-only mode; run olw reconcile to verify",
     });
     expect(inspected.value.find((binding) => binding.id === unknown.id)).toMatchObject({
       runtimeState: "unknown",
-      runtimeStateReason: "Exact session not probed in read-only mode",
+      runtimeStateReason: "Exact session not probed in read-only mode; run olw reconcile to verify",
     });
     expect(prompts).toEqual([]);
     expect(value(w.registry.operationalNotices({}))).toEqual([]);

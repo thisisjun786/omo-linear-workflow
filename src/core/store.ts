@@ -1201,15 +1201,34 @@ export function openRegistry(
     });
   }
 
-  function setRuntimeState(id: string, state: Binding["runtimeState"]): Result<Binding> {
+  function setRuntimeState(
+    id: string,
+    state: Binding["runtimeState"],
+    reason?: string,
+    incidentId?: string,
+  ): Result<Binding> {
     return transaction(() => {
       const binding = get(id);
       if (!binding.ok) return binding;
-      return saveBinding(
-        state === undefined
-          ? (({ runtimeState: _runtimeState, ...current }) => current)(binding.value)
-          : { ...binding.value, runtimeState: state },
-      );
+      if (state === undefined) {
+        const {
+          runtimeState: _runtimeState,
+          runtimeStateReason: _runtimeStateReason,
+          runtimeIncidentId: _runtimeIncidentId,
+          ...current
+        } = binding.value;
+        return saveBinding(current);
+      }
+      return saveBinding({
+        ...binding.value,
+        runtimeState: state,
+        ...(reason === undefined
+          ? { runtimeStateReason: undefined }
+          : { runtimeStateReason: reason }),
+        ...(incidentId === undefined
+          ? { runtimeIncidentId: undefined }
+          : { runtimeIncidentId: incidentId }),
+      });
     });
   }
 

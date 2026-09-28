@@ -461,6 +461,7 @@ async function world() {
           workspaceId: w.workspaceId,
           revision: 1,
           sessionPath: null,
+          agent: "omo",
         })),
       };
     },

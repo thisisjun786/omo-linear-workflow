@@ -2884,104 +2884,159 @@ export class Orchestrator {
         binding.sessionPath !== null,
     );
     if (candidates.length === 0) return listed;
+    const states = new Map<
+      string,
+      { state: NonNullable<StatusBinding["runtimeState"]>; reason?: string }
+    >();
     const herdr = this.#deps.createHerdrClient(this.#herdrSocket);
+    let snapshot: Awaited<ReturnType<HerdrClient["snapshot"]>>;
     try {
-      const snapshot = await herdr.snapshot();
-      const live: StatusBinding[] = [];
-      for (const binding of candidates) {
-        const pane = snapshot.panes.find(
-          (candidate) =>
-            candidate.paneId === binding.paneId && candidate.workspaceId === binding.workspaceId,
-        );
-        if (pane === undefined) continue;
-        if (hasLiveTui(pane) || (await readReadiness(this.#root, binding)) !== null)
-          live.push(binding);
-      }
-      if (live.length === 0) return listed;
-      const hostReachability = new Map<string, "reachable" | "unreachable" | "unknown">();
-      const readReachability =
-        this.#deps.readHostReachabilityReadOnly ??
-        (async (socket: string) => {
-          const status = await readHostStatusReadOnly(
-            socket,
-            resolveOmoAgentDir(process.env, process.cwd()),
-          );
-          return status.reachability ?? (status.reachable ? "reachable" : "unknown");
-        });
-      for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
-        try {
-          hostReachability.set(socket, await readReachability(socket));
-        } catch {
-          hostReachability.set(socket, "unknown");
-        }
-      }
-      const states = new Map<string, NonNullable<StatusBinding["runtimeState"]>>();
-      for (const binding of live) {
-        const host = hostReachability.get(binding.omoSocket);
-        if (!notify) {
-          if (host === "unreachable") states.set(binding.id, "host_lost");
-          else if (host === "unknown") states.set(binding.id, "unknown");
-          continue;
-        }
-        if (host === "unreachable") {
-          states.set(binding.id, "host_lost");
-          continue;
-        }
-        if (host !== "reachable") {
-          states.set(binding.id, "unknown");
-          continue;
-        }
-        const probe = await (this.#deps.probeBindingSession ?? probeBindingSession)(binding);
-        states.set(
-          binding.id,
-          probe.state === "open"
-            ? "connected"
-            : probe.state === "absent"
-              ? "local_only"
-              : probe.state === "present"
-                ? "starting"
-                : "unknown",
-        );
-      }
-      const unavailable = new Set(
-        [...states]
-          .filter(([, state]) => state === "local_only" || state === "host_lost")
-          .map(([id]) => id),
-      );
+      snapshot = await herdr.snapshot();
+    } catch (cause) {
+      const reason = `Herdr could not be observed: ${messageOf(cause)}`;
+      for (const binding of candidates) states.set(binding.id, { state: "unknown", reason });
       if (notify) {
-        for (const binding of live) {
-          const state = states.get(binding.id);
-          if (state !== undefined)
-            this.#withRegistry((registry) => registry.setRuntimeState(binding.id, state));
-          if (state === "local_only" || state === "host_lost")
-            await this.#notifyRuntimeLoss(binding, state, unavailable);
+        for (const binding of candidates) {
+          const saved = this.#withRegistry((registry) =>
+            registry.setRuntimeState(binding.id, "unknown", reason),
+          );
+          if (!saved.ok) return saved;
         }
       }
       return ok(
         listed.value.map((binding) => {
-          const runtimeState = states.get(binding.id) ?? binding.runtimeState;
-          return runtimeState === undefined ? binding : { ...binding, runtimeState };
+          const observed = states.get(binding.id);
+          return observed === undefined
+            ? binding
+            : { ...binding, runtimeState: observed.state, runtimeStateReason: observed.reason };
         }),
       );
-    } catch (cause) {
-      return failure("runtime_unavailable", "Runtime health observation failed", messageOf(cause));
     } finally {
       herdr.close();
     }
+
+    const live: StatusBinding[] = [];
+    for (const binding of candidates) {
+      const pane = snapshot.panes.find(
+        (candidate) =>
+          candidate.paneId === binding.paneId && candidate.workspaceId === binding.workspaceId,
+      );
+      if (pane === undefined) {
+        states.set(binding.id, { state: "unknown", reason: "Recorded Herdr pane is missing" });
+      } else if (pane.agent !== "omo" && pane.agent !== "pi") {
+        states.set(binding.id, {
+          state: "unknown",
+          reason: "Herdr pane has no currently detected role agent",
+        });
+      } else {
+        live.push(binding);
+      }
+    }
+
+    const hostReachability = new Map<string, "reachable" | "unreachable" | "unknown">();
+    const readReachability =
+      this.#deps.readHostReachabilityReadOnly ??
+      (async (socket: string) => {
+        const status = await readHostStatusReadOnly(
+          socket,
+          resolveOmoAgentDir(process.env, process.cwd()),
+        );
+        return status.reachability ?? (status.reachable ? "reachable" : "unknown");
+      });
+    for (const socket of new Set(live.map((binding) => binding.omoSocket))) {
+      try {
+        hostReachability.set(socket, await readReachability(socket));
+      } catch {
+        hostReachability.set(socket, "unknown");
+      }
+    }
+    for (const binding of live) {
+      const host = hostReachability.get(binding.omoSocket);
+      if (host === "unreachable") {
+        states.set(binding.id, { state: "host_lost" });
+      } else if (host !== "reachable") {
+        states.set(binding.id, {
+          state: "unknown",
+          reason: "Interactive host could not be observed",
+        });
+      } else if (notify) {
+        const probe = await (this.#deps.probeBindingSession ?? probeBindingSession)(binding);
+        states.set(
+          binding.id,
+          probe.state === "open"
+            ? { state: "connected" }
+            : probe.state === "absent"
+              ? { state: "local_only" }
+              : probe.state === "present"
+                ? { state: "starting" }
+                : { state: "unknown", reason: probe.reason },
+        );
+      }
+    }
+    const unavailable = new Set(
+      [...states].filter(([, observation]) => observation.state !== "connected").map(([id]) => id),
+    );
+    if (notify) {
+      for (const binding of candidates) {
+        const observed = states.get(binding.id);
+        if (observed === undefined) continue;
+        const previousState = binding.runtimeState;
+        const lost = observed.state === "local_only" || observed.state === "host_lost";
+        const incidentId =
+          lost && observed.state !== previousState
+            ? this.#deps.uuid()
+            : lost
+              ? binding.runtimeIncidentId
+              : undefined;
+        const saved = this.#withRegistry((registry) =>
+          registry.setRuntimeState(binding.id, observed.state, observed.reason, incidentId),
+        );
+        if (!saved.ok) return saved;
+        if (
+          (observed.state === "local_only" || observed.state === "host_lost") &&
+          observed.state !== previousState
+        ) {
+          if (incidentId === undefined)
+            return failure("runtime_unavailable", "Runtime loss incident identity was not created");
+          const notified = await this.#notifyRuntimeLoss(
+            saved.value,
+            observed.state,
+            unavailable,
+            incidentId,
+          );
+          if (!notified.ok) return notified;
+        }
+      }
+    }
+    return ok(
+      listed.value.map((binding) => {
+        const observed = states.get(binding.id);
+        return observed === undefined
+          ? binding
+          : {
+              ...binding,
+              runtimeState: observed.state,
+              ...(observed.reason === undefined
+                ? { runtimeStateReason: undefined }
+                : { runtimeStateReason: observed.reason }),
+            };
+      }),
+    );
   }
 
   async #notifyRuntimeLoss(
     binding: Binding,
     state: "local_only" | "host_lost",
     unavailable: ReadonlySet<string>,
-  ): Promise<void> {
-    if (binding.sessionPath === null) return;
+    incidentId: string,
+  ): Promise<Result<void>> {
+    if (binding.sessionPath === null) return ok(undefined);
     const failure: RuntimeFailureClaim = {
       version: 1,
       kind: "runtime_failure",
       failure: {
         source: "host_loss",
-        sessionEntryId: `host-loss:${binding.id}:${binding.sessionPath}`,
+        sessionEntryId: `host-loss:${binding.id}:${state}:${incidentId}`,
         durableSessionId: binding.durableSessionId,
         sessionPath: binding.sessionPath,
         cwd: binding.cwd,
@@ -2998,9 +3053,10 @@ export class Orchestrator {
     const claim = this.#withRegistry((registry) =>
       registry.claimRuntimeFailure(binding.durableSessionId, failure, unavailable),
     );
-    if (!claim.ok || claim.value.disposition !== "new") return;
+    if (!claim.ok) return claim;
+    if (claim.value.disposition !== "new") return ok(undefined);
     await publishOperationalNotice(this.#root, claim.value.record);
-    if (claim.value.target === null) return;
+    if (claim.value.target === null) return ok(undefined);
     const message = `[OLW] ${state}: role ${binding.id} has a live TUI without its bound host session. The active turn may be orphaned; press Esc in that pane before continuing. Details: olw notices --project ${
       binding.assignment.role === "parent" || binding.assignment.role === "child"
         ? binding.assignment.projectId
@@ -3028,8 +3084,10 @@ export class Orchestrator {
           `Host-loss notice did not return: ${messageOf(cause)}`,
         ),
       );
-      if (uncertain.ok) await publishOperationalNotice(this.#root, uncertain.value);
+      if (!uncertain.ok) return uncertain;
+      await publishOperationalNotice(this.#root, uncertain.value);
     }
+    return ok(undefined);
   }
 
   public setPaused(bindingId: string, paused: boolean): Result<Binding> {

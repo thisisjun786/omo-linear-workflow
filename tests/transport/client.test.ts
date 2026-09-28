@@ -71,6 +71,10 @@ class FakeRpc implements RpcPort {
   }
   started = 0;
   stopped = 0;
+  destroyed = 0;
+  destroy(): void {
+    this.destroyed += 1;
+  }
   closeSessionCalls = 0;
   sessions: Array<{
     sessionId: string;
@@ -198,9 +202,27 @@ describe("native session client", () => {
       queueMicrotask(expire);
       return () => {};
     });
-    expect(timers).toHaveLength(1);
+    expect(timers).toHaveLength(2);
     expect(result).toEqual({ state: "unknown", reason: "Native session probe timed out" });
     expect(rpc.stopped).toBe(1);
+  });
+
+  test("probe cleanup is bounded when RPC stop stalls", async () => {
+    const rpc = new FakeRpc();
+    rpc.start = () => Promise.reject(new Error("host unavailable"));
+    rpc.stop = () => new Promise<void>(() => {});
+    rpc.destroy = () => {
+      rpc.destroyed += 1;
+    };
+    const timers: Array<() => void> = [];
+    const result = await probeBindingSessionWithClient(binding, rpc, 1, (expire) => {
+      timers.push(expire);
+      if (timers.length === 2) queueMicrotask(expire);
+      return () => {};
+    });
+    expect(result).toEqual({ state: "unknown", reason: "host unavailable" });
+    expect(timers).toHaveLength(2);
+    expect(rpc.destroyed).toBe(1);
   });
 
   test("validates extension replies and close only disconnects the client", async () => {

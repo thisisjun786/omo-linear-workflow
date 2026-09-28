@@ -93,6 +93,7 @@ async function world() {
   });
   const workspaces = new Map<string, Workspace>();
   const paneSessions = new Map<string, string>();
+  const agentPanes = new Set<string>();
   const engines = new Set<string>();
   const events: string[] = [];
   let listener: ((event: unknown) => void) | undefined;
@@ -142,6 +143,7 @@ async function world() {
         sessionPath,
         workspaceId: paneId.split(":")[0] ?? "",
         revision: 1,
+        ...(agentPanes.has(paneId) ? { agent: "omo" } : {}),
       })),
     }),
     closeWorkspace: async (id) => {
@@ -207,6 +209,7 @@ async function world() {
       label: roleLabel(binding.assignment, scope, binding.id),
     });
     paneSessions.set(pane, sessionPath);
+    agentPanes.add(pane);
     engines.add(binding.id);
     return value(registry.get(binding.id));
   };
@@ -227,6 +230,7 @@ async function world() {
       }),
     );
     paneSessions.delete("childws:plan");
+    agentPanes.delete("childws:plan");
     engines.delete("plan");
     const execute = value(registry.successorReservation("plan", input("execute"), "execute"));
     if (provision) ready(execute, "childws", "childws:execute");
@@ -243,6 +247,7 @@ async function world() {
     planned,
     workspaces,
     paneSessions,
+    agentPanes,
     engines,
     events,
     herdr,
@@ -742,6 +747,45 @@ test("status/close: status counts unanswered sent/received records, excludes ans
       stage: "execute",
       openQuestions: 2,
     });
+
+    const unavailable = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../../src/cli.ts"),
+        "--root",
+        w.root,
+        "--herdr-socket",
+        join(w.root, "missing-herdr.sock"),
+        "status",
+        "--json",
+      ],
+      {
+        env: {
+          ...process.env,
+          HERDR_ENV: undefined,
+          HERDR_PANE_ID: undefined,
+          HERDR_SOCKET_PATH: undefined,
+          HERDR_SOCKET: join(w.root, "also-missing-herdr.sock"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [unavailableExit, unavailableOut, unavailableErr] = await Promise.all([
+      unavailable.exited,
+      new Response(unavailable.stdout).text(),
+      new Response(unavailable.stderr).text(),
+    ]);
+    expect([unavailableExit, unavailableErr]).toEqual([0, ""]);
+    expect(JSON.parse(unavailableOut).value).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: execute.id,
+          runtimeState: "unknown",
+          runtimeStateReason: expect.stringContaining("Herdr"),
+        }),
+      ]),
+    );
   } finally {
     w.cleanup();
   }
@@ -841,6 +885,105 @@ test("status is read-only while reconcile posts one host-loss notice and preserv
         operational: { failure: { source: "host_loss" } },
       },
     });
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("stale readiness and pane session metadata do not prove a role TUI is live", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    w.agentPanes.delete("childws:p");
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    const reconciled = await orchestrator.statusWithRuntimeHealth({}, true);
+    expect(reconciled).toMatchObject({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({
+          id: child.id,
+          runtimeState: "unknown",
+          runtimeStateReason: expect.stringContaining("agent"),
+        }),
+      ]),
+    });
+    expect(prompts).toEqual([]);
+    expect(
+      value(w.registry.operationalNotices({})).filter(
+        (notice) => notice.envelope.fromBindingId === child.id,
+      ),
+    ).toEqual([]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("runtime loss notices distinguish classification and restored-host episodes", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    let reachability: "reachable" | "unreachable" = "reachable";
+    let probe: "absent" | "open" = "absent";
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => reachability,
+      probeBindingSession: async () => ({ state: probe }),
+      prompt: async () => {},
+      uuid: (() => {
+        let sequence = 0;
+        return () => `incident-${++sequence}`;
+      })(),
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "unreachable";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "reachable";
+    probe = "open";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    reachability = "unreachable";
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    const childNotices = value(w.registry.operationalNotices({})).filter(
+      (notice) => notice.envelope.fromBindingId === child.id,
+    );
+    expect(childNotices).toHaveLength(3);
+    expect(new Set(childNotices.map((notice) => notice.envelope.id)).size).toBe(3);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a child with an unverified owner pane posts host loss to the local inbox", async () => {
+  const w = await world();
+  try {
+    const child = w.ready(w.reserve("child", "direct"), "childws", "childws:p");
+    w.paneSessions.delete("parentws:p");
+    w.agentPanes.delete("parentws:p");
+    const prompts: string[] = [];
+    const orchestrator = new Orchestrator(w.root, "/fake/herdr", {
+      ...w.dependencies,
+      readHostReachabilityReadOnly: async () => "unreachable" as const,
+      prompt: async (_binding, text) => {
+        prompts.push(text);
+      },
+    });
+    await orchestrator.statusWithRuntimeHealth({}, true);
+    expect(prompts).toEqual([]);
+    expect(value(w.registry.operationalNotices({}))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          state: "posted",
+          envelope: expect.objectContaining({ fromBindingId: child.id, toBindingId: null }),
+        }),
+      ]),
+    );
   } finally {
     w.cleanup();
   }

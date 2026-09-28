@@ -128,6 +128,8 @@ export interface Binding {
     | "host_lost"
     | "unknown"
     | undefined;
+  readonly runtimeStateReason?: string | undefined;
+  readonly runtimeIncidentId?: string | undefined;
   readonly launchState:
     | "reserved"
     | "provisioning"
@@ -394,7 +396,12 @@ export interface Registry {
   finishSuccessorLaunch(id: string, token: string, state: "ready" | "uncertain"): Result<Binding>;
   activate(id: string, identity: RuntimeIdentity): Result<Binding>;
   setLaunchState(id: string, state: Binding["launchState"]): Result<Binding>;
-  setRuntimeState(id: string, state: Binding["runtimeState"]): Result<Binding>;
+  setRuntimeState(
+    id: string,
+    state: Binding["runtimeState"],
+    reason?: string,
+    incidentId?: string,
+  ): Result<Binding>;
   setContactState(id: string, state: Binding["contactState"]): Result<Binding>;
   setOwner(parentId: string, supervisorId: string | null): Result<Binding>;
   beginClose(id: string): Result<Binding>;

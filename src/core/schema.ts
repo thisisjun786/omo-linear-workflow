@@ -88,6 +88,8 @@ export const bindingSchema = z.strictObject({
   paneId: text.nullable(),
   sessionPath: text.nullable(),
   runtimeState: z.enum(["connected", "starting", "local_only", "host_lost", "unknown"]).optional(),
+  runtimeStateReason: z.string().min(1).optional(),
+  runtimeIncidentId: z.string().min(1).optional(),
   launchState: z.enum([
     "reserved",
     "provisioning",

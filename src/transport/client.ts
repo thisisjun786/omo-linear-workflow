@@ -41,6 +41,8 @@ export interface RpcPort {
   setThinkingLevel(level: RoleModel["thinking"]): Promise<unknown>;
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Emergency transport teardown for adapters whose graceful stop can stall. */
+  destroy?(): void;
   closeSession(sessionId?: string): Promise<void>;
   listSessions(): Promise<
     ReadonlyArray<{
@@ -128,7 +130,15 @@ export async function probeBindingSessionWithClient(
     };
   } finally {
     cancel();
-    await client.stop().catch(() => {});
+    let cancelStopDeadline = () => {};
+    const stopDeadline = new Promise<void>((resolve) => {
+      cancelStopDeadline = schedule(() => {
+        client.destroy?.();
+        resolve();
+      }, timeoutMs);
+    });
+    await Promise.race([client.stop().catch(() => {}), stopDeadline]);
+    cancelStopDeadline();
   }
 }
 

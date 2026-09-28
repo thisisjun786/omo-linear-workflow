@@ -154,6 +154,8 @@ live owner. Nothing from the original packet transfers: the execute brief carrie
 ID the execute stage reports under (`report:<packet-id>`). Only an explicit packet starts
 work.
 
+If `stage start` is interrupted and the execute binding becomes `uncertain`, re-run that exact command or run `reconcile`; do not send the packet directly to a local-only TUI and do not invent a new binding or message ID. OLW relaunches the same durable session only when its transcript and registry prove that initialization was never delivered. `successor_recovery_unsafe` means that proof failed: inspect the transcript and delivery record, then either recover the exact native session or explicitly `close --binding <EXECUTE_BINDING>` (using `--discard` only after checking unpublished work). Closing retires the abandoned execute edge while retaining its attempt history, so the original `stage start` can reserve a fresh execute successor.
+
 When a child's report arrives, verify before integrating: compare the reported head and
 evidence against the criteria at that head, re-read the base, and merge into the project
 branch only when they hold. Return an in-scope correction to the same child with the violated

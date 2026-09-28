@@ -2039,6 +2039,14 @@ export class Orchestrator {
           );
           return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
         }
+        if (sessionAbsent && observedIntent.value?.state === "uncertain")
+          return this.#recoverUndeliveredSuccessor(
+            binding,
+            snapshot,
+            handoff,
+            observedIntent.value.attemptId,
+            hasLiveTui(pane) ? herdr : undefined,
+          );
         if (hasLiveTui(pane))
           return failure(
             "runtime_unavailable",
@@ -2078,6 +2086,75 @@ export class Orchestrator {
       });
     }
     return this.#launchSuccessor(claim.value.binding, snapshot, handoff, claim.value.token);
+  }
+
+  async #recoverUndeliveredSuccessor(
+    binding: Binding,
+    snapshot: ScopeSnapshot,
+    handoff: StageHandoff,
+    attemptId: string,
+    liveHerdr?: HerdrClient,
+  ): Promise<Result<CreationResult>> {
+    const unsafe = (reason: string) =>
+      failure<CreationResult>(
+        "successor_recovery_unsafe",
+        "Execute delivery cannot be proven absent. Inspect the transcript and delivery receipt; either reconcile the exact native session or close this binding and start a fresh successor.",
+        { bindingId: binding.id, reason },
+      );
+    if (binding.initialization.state !== "pending")
+      return failure(
+        "recovery_uncertain",
+        "Execute launch was dispatched and initialization may have been delivered; inspect before retrying",
+        { bindingId: binding.id },
+      );
+    if (binding.sessionPath === null) return unsafe("session_path_missing");
+    try {
+      const transcript = await readFile(binding.sessionPath, "utf8");
+      const userMessage = z.object({
+        type: z.literal("message"),
+        message: z.object({ role: z.literal("user") }),
+      });
+      if (
+        transcript
+          .split("\n")
+          .filter((line) => line.length > 0)
+          .some((line) => userMessage.safeParse(JSON.parse(line)).success)
+      )
+        return unsafe("transcript_contains_user_message");
+    } catch (cause) {
+      return unsafe(`transcript_unreadable: ${messageOf(cause)}`);
+    }
+    const delivery = this.#withRegistry((registry) =>
+      registry.delivery(initializationMessageId(binding.id)),
+    );
+    if (delivery.ok) return unsafe(`initialization_delivery_${delivery.value.state}`);
+    if (delivery.error.code !== "not_found") return delivery;
+
+    const claimed = this.#withRegistry((registry) =>
+      registry.recoverSuccessorLaunch(binding.id, attemptId, this.#deps.now()),
+    );
+    if (!claimed.ok) return claimed;
+    if (!claimed.value.claimed)
+      return claimed.value.state === "claimed" || claimed.value.state === "dispatching"
+        ? ok({
+            ...this.#creationResult(claimed.value.binding),
+            readiness: "launching",
+            execution: "not_started",
+          })
+        : failure("lease_lost", "Execute recovery attempt changed during proof");
+    if (liveHerdr !== undefined) {
+      const stopped = await this.#stopStageSession(binding, liveHerdr);
+      if (!stopped.ok) {
+        this.#withRegistry((registry) =>
+          registry.failSuccessorLaunch(
+            binding.id,
+            claimed.value.claimed ? claimed.value.token : "",
+          ),
+        );
+        return stopped;
+      }
+    }
+    return this.#launchSuccessor(claimed.value.binding, snapshot, handoff, claimed.value.token);
   }
 
   async #launchSuccessor(
@@ -3224,7 +3301,17 @@ export class Orchestrator {
     if (target.value.assignment.role === "child") {
       const stage = this.#withRegistry((registry) => registry.stageOf(bindingId));
       if (!stage.ok) return stage;
-      if (stage.value !== null) return this.#closeLineage(target.value, confirmAbsent);
+      if (stage.value !== null) {
+        const intent = this.#withRegistry((registry) => registry.successorLaunchIntent(bindingId));
+        if (!intent.ok) return intent;
+        if (
+          stage.value.stage === "execute" &&
+          target.value.launchState === "uncertain" &&
+          intent.value?.state === "uncertain"
+        )
+          return withUnpushed(await this.#closeUncertainSuccessor(target.value), inspected.value);
+        return this.#closeLineage(target.value, confirmAbsent);
+      }
     }
     const closing = this.#withRegistry((registry) => registry.beginClose(bindingId));
     if (!closing.ok) return closing;
@@ -3311,6 +3398,34 @@ export class Orchestrator {
       return failure(
         "runtime_unavailable",
         "Closure is incomplete; ownership remains held",
+        messageOf(cause),
+      );
+    } finally {
+      herdr.close();
+    }
+  }
+
+  async #closeUncertainSuccessor(binding: Binding): Promise<Result<Binding>> {
+    const closing = this.#withRegistry((registry) => registry.beginClose(binding.id));
+    if (!closing.ok) return closing;
+    const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
+    try {
+      const snapshot = await herdr.snapshot();
+      const pane = snapshot.panes.find(
+        (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
+      );
+      if (pane !== undefined && hasLiveTui(pane)) {
+        const stopped = await this.#stopStageSession(binding, herdr);
+        if (!stopped.ok) return stopped;
+      } else {
+        await this.#deps.terminateBinding(binding);
+      }
+      await removeReadiness(this.#root, binding.id);
+      return this.#withRegistry((registry) => registry.closeUncertainSuccessor(binding.id));
+    } catch (cause) {
+      return failure(
+        "runtime_unavailable",
+        "Uncertain successor closure is incomplete; lineage remains held",
         messageOf(cause),
       );
     } finally {
@@ -3567,6 +3682,55 @@ export class Orchestrator {
               else observed += 1;
               continue;
             } catch (cause) {
+              if (cause instanceof NativeSessionAbsentError) {
+                const stage = this.#withRegistry((registry) => registry.stageOf(binding.id));
+                if (!stage.ok) {
+                  issues.push({ bindingId: binding.id, ...stage.error });
+                  continue;
+                }
+                const previousId = stage.value?.previousBindingId;
+                if (
+                  stage.value?.stage !== "execute" ||
+                  previousId === null ||
+                  previousId === undefined
+                ) {
+                  issues.push({
+                    bindingId: binding.id,
+                    code: "runtime_unavailable",
+                    message: cause.message,
+                  });
+                  continue;
+                }
+                const previous = this.#withRegistry((registry) => registry.stageOf(previousId));
+                if (!previous.ok || previous.value?.handoff === null || previous.value === null) {
+                  issues.push({
+                    bindingId: binding.id,
+                    ...(previous.ok
+                      ? { code: "handoff_missing", message: "Execute predecessor has no handoff" }
+                      : previous.error),
+                  });
+                  continue;
+                }
+                const context = await this.#context(binding);
+                if (!context.ok) {
+                  issues.push({ bindingId: binding.id, ...context.error });
+                  continue;
+                }
+                const pane = snapshot.panes.find(
+                  (item) =>
+                    item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
+                );
+                const recovered = await this.#recoverUndeliveredSuccessor(
+                  binding,
+                  context.value.snapshot,
+                  previous.value.handoff,
+                  launchIntent.value.attemptId,
+                  pane !== undefined && hasLiveTui(pane) ? herdr : undefined,
+                );
+                if (recovered.ok) observed += 1;
+                else issues.push({ bindingId: binding.id, ...recovered.error });
+                continue;
+              }
               issues.push({
                 bindingId: binding.id,
                 code: "runtime_unavailable",

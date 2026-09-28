@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@code-yeongyu/senpi";
 import { runCli } from "../../src/cli";
 import type {
   Binding,
@@ -100,10 +101,18 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     const model = execute
       ? modelForLaunch("child", "execute")
       : modelForRole(binding.assignment.role);
-    const sessionPath = join(root, `${binding.id}.jsonl`);
+    const manager = SessionManager.create(root, join(root, ".omo/state/sessions"), {
+      id: binding.durableSessionId,
+    });
+    manager.appendModelChange(model.provider, model.modelId);
+    manager.appendThinkingLevelChange(model.thinking);
+    const sessionPath = manager.getSessionFile();
+    const header = manager.getHeader();
+    if (sessionPath === undefined || header === null) throw new Error("missing session seed");
+    await mkdir(join(root, ".omo/state/sessions"), { recursive: true });
     await writeFile(
       sessionPath,
-      `${JSON.stringify({ type: "model_change", provider: model.provider, modelId: model.modelId })}\n${JSON.stringify({ type: "thinking_level_change", thinkingLevel: model.thinking })}\n`,
+      `${[header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
     );
     value(registry.provision(binding.id, "workspace", `pane-${binding.id}`));
     value(registry.observeSession(binding.id, sessionPath));
@@ -142,10 +151,18 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     options.executeInitialized === false
       ? await (async () => {
           const model = modelForLaunch("child", "execute");
-          const sessionPath = join(root, "execute.jsonl");
+          const manager = SessionManager.create(root, join(root, ".omo/state/sessions"), {
+            id: executeReservation.durableSessionId,
+          });
+          manager.appendModelChange(model.provider, model.modelId);
+          manager.appendThinkingLevelChange(model.thinking);
+          const sessionPath = manager.getSessionFile();
+          const header = manager.getHeader();
+          if (sessionPath === undefined || header === null) throw new Error("missing session seed");
+          await mkdir(join(root, ".omo/state/sessions"), { recursive: true });
           await writeFile(
             sessionPath,
-            `${JSON.stringify({ type: "model_change", provider: model.provider, modelId: model.modelId })}\n${JSON.stringify({ type: "thinking_level_change", thinkingLevel: model.thinking })}\n`,
+            `${[header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
           );
           value(registry.provision(executeReservation.id, "workspace", "pane-execute"));
           value(registry.observeSession(executeReservation.id, sessionPath));
@@ -166,6 +183,7 @@ async function world(options: { executeInitialized?: boolean } = {}) {
   let elapsed = 0;
   let native = false;
   let paneLive = false;
+  let quits = 0;
   let launches = 0;
   let absenceHook: ((count: number) => Promise<void>) | undefined;
   let sendState: "accepted" | "rejected" = "accepted";
@@ -196,7 +214,13 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     focusWorkspace: async () => {},
     focusPane: async () => {},
     paneContainsProcess: async () => true,
-    sendKeys: async () => {},
+    sendKeys: async (paneId, text, keys) => {
+      expect([paneId, text, keys]).toEqual(["pane-execute", "/quit", ["Enter"]]);
+      quits += 1;
+      paneLive = false;
+      for (const listener of listeners)
+        listener({ event: "pane.exited", data: { pane_id: paneId } });
+    },
     closeWorkspace: async () => {},
     removeWorktree: async () => {},
     snapshot: async () => ({
@@ -321,6 +345,10 @@ async function world(options: { executeInitialized?: boolean } = {}) {
       native = present;
       paneLive = present;
     },
+    setLocalFallback: () => {
+      native = false;
+      paneLive = true;
+    },
     disconnect: () => {
       for (const listener of listeners)
         listener({ event: "connection.error", data: { code: "closed", message: "disconnected" } });
@@ -342,11 +370,96 @@ async function world(options: { executeInitialized?: boolean } = {}) {
     },
     launches: () => launches,
     sends: () => sends,
+    quits: () => quits,
     orchestrator: () => new Orchestrator(root, "/herdr", dependencies),
     absences: () => absences,
     registry: withRegistry,
   };
 }
+
+test("an uncertain local-only successor with an empty transcript relaunches and initializes once", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  w.setRunHook(async () => w.publish());
+
+  expect(await w.start()).toMatchObject({
+    ok: true,
+    value: { binding: { id: "execute", initialization: { state: "accepted" } } },
+  });
+  expect(w.quits()).toBe(1);
+  expect(w.launches()).toBe(2);
+  expect(w.sends()).toBe(1);
+});
+
+test("reconcile recovers an uncertain local-only successor through the same proof", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  w.setRunHook(async () => w.publish());
+
+  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({ ok: true });
+  expect(w.quits()).toBe(1);
+  expect(w.launches()).toBe(2);
+  expect(w.sends()).toBe(1);
+});
+
+test("an uncertain successor with a durable init message is refused without mutation", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  const path = w.execute.sessionPath ?? "";
+  await Bun.write(
+    path,
+    `${await Bun.file(path).text()}${JSON.stringify({ type: "message", message: { role: "user", content: "init" } })}\n`,
+  );
+  const before = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
+
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "successor_recovery_unsafe", message: expect.stringContaining("close") },
+  });
+  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual(
+    before,
+  );
+  expect(w.quits()).toBe(0);
+  expect(w.launches()).toBe(1);
+  expect(w.sends()).toBe(0);
+});
+
+test("concurrent recovery of an uncertain local-only successor relaunches once", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  w.setRunHook(async () => {
+    entered.resolve();
+    await release.promise;
+    await w.publish();
+  });
+  const first = w.start();
+  await entered.promise;
+  const second = await w.start();
+  expect(second).toMatchObject({ ok: true, value: { readiness: "launching" } });
+  release.resolve();
+  expect(await first).toMatchObject({ ok: true, value: { readiness: "ready" } });
+  expect(w.quits()).toBe(1);
+  expect(w.launches()).toBe(2);
+  expect(w.sends()).toBe(1);
+});
 
 test("a stale absence observation revalidates after the owner succeeds", async () => {
   const w = await world();

@@ -167,5 +167,8 @@ export function createStageLineage(db: Database, readonly: boolean) {
         bindingId,
       );
     },
+    retire(bindingId: string): void {
+      db.query("DELETE FROM stage_lineage WHERE binding_id = ?").run(bindingId);
+    },
   };
 }

@@ -371,6 +371,12 @@ export interface Registry {
     claimedAt: string,
     staleBefore: string,
   ): Result<SuccessorLaunchClaim>;
+  /** Reclaim an uncertain pre-delivery attempt after transcript proof, preserving its history. */
+  recoverSuccessorLaunch(
+    id: string,
+    attemptId: string,
+    claimedAt: string,
+  ): Result<SuccessorLaunchClaim>;
   ownsSuccessorLaunch(id: string, token: string): Result<boolean>;
   /** Token-fenced pane provisioning and launch-state mutation for a claimed recovery. */
   provisionSuccessorLaunch(
@@ -419,6 +425,8 @@ export interface Registry {
   setOwner(parentId: string, supervisorId: string | null): Result<Binding>;
   beginClose(id: string): Result<Binding>;
   finishClose(id: string): Result<Binding>;
+  /** Atomically close an uncertain execute attempt, restore its plan predecessor, and retire its edge. */
+  closeUncertainSuccessor(id: string): Result<Binding>;
   beginInitialization(id: string, text: string): Result<InitializationClaim>;
   finishInitialization(id: string, state: "accepted" | "rejected" | "uncertain"): Result<Binding>;
   authorize(senderSessionId: string, envelope: Envelope): Result<Binding>;

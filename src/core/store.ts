@@ -948,6 +948,50 @@ export function openRegistry(
     }
   }
 
+  function recoverSuccessorLaunch(
+    id: string,
+    attemptId: string,
+    claimedAt: string,
+  ): Result<SuccessorLaunchClaim> {
+    return transaction<SuccessorLaunchClaim>(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const held = successorLaunchClaim(id);
+      if (
+        binding.value.launchState !== "uncertain" ||
+        binding.value.initialization.state !== "pending" ||
+        held?.state !== "uncertain" ||
+        held.owner !== attemptId
+      )
+        return ok({
+          claimed: false,
+          binding: binding.value,
+          state: held?.state ?? "uncertain",
+        });
+      if (
+        db
+          .query(
+            "SELECT message_id FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? LIMIT 1",
+          )
+          .get(id) !== null
+      )
+        return error(
+          "successor_recovery_unsafe",
+          "Execute delivery cannot be proven absent. Inspect the delivery receipt; either reconcile the exact native session or close this binding and start a fresh successor.",
+          { bindingId: id, reason: "delivery_row_exists" },
+        );
+      const token = randomUUID();
+      const claimed = db
+        .query(
+          "UPDATE successor_launch SET state = 'claimed', claimed_at = ?, owner = ? WHERE binding_id = ? AND state = 'uncertain' AND owner = ?",
+        )
+        .run(claimedAt, token, id, attemptId);
+      return claimed.changes === 1
+        ? ok({ claimed: true, binding: binding.value, token })
+        : ok({ claimed: false, binding: binding.value, state: "claimed" });
+    });
+  }
+
   function ownsSuccessorLaunch(id: string, token: string): Result<boolean> {
     try {
       return ok(successorLaunchClaim(id)?.owner === token);
@@ -1434,6 +1478,35 @@ export function openRegistry(
     if (binding.value.launchState !== "closing")
       return error("invalid_transition", "Closure was not started");
     return saveBinding({ ...binding.value, launchState: "closed" });
+  }
+
+  function closeUncertainSuccessor(id: string): Result<Binding> {
+    return transaction(() => {
+      const binding = get(id);
+      if (!binding.ok) return binding;
+      const intent = successorLaunchClaim(id);
+      const stage = lineage.get(id);
+      if (
+        binding.value.launchState !== "closing" ||
+        stage?.stage !== "execute" ||
+        intent?.state !== "uncertain"
+      )
+        return error("invalid_transition", "Only a closing uncertain execute can be retired");
+      if (stage.previousBindingId === null)
+        return error("storage_corrupt", "Execute successor has no predecessor");
+      const predecessor = get(stage.previousBindingId);
+      if (!predecessor.ok) return predecessor;
+      const closed = saveBinding({ ...binding.value, launchState: "closed" });
+      if (!closed.ok) return closed;
+      const restored = saveBinding({
+        ...predecessor.value,
+        launchState: "ready",
+        contactState: "active",
+      });
+      if (!restored.ok) return restored;
+      lineage.retire(id);
+      return closed;
+    });
   }
 
   function beginInitialization(id: string, text: string): Result<InitializationClaim> {
@@ -2317,6 +2390,7 @@ export function openRegistry(
     authorizeHerdrRepublish,
     beginSuccessorLaunch,
     successorLaunchIntent,
+    recoverSuccessorLaunch,
     ownsSuccessorLaunch,
     provisionSuccessorLaunch,
     prepareSuccessorLaunch,
@@ -2333,6 +2407,9 @@ export function openRegistry(
     setRuntimeIncidentNoticeState,
     setContactState,
     setOwner,
+    beginClose,
+    finishClose,
+    closeUncertainSuccessor,
     post,
     postedReports: (filter, includeManager) => inboxRecords(filter, false, includeManager),
     postedQuestions,
@@ -2340,8 +2417,6 @@ export function openRegistry(
     answerFromUser,
     releaseUserAnswer,
     operationalNotices: (filter) => inboxRecords(filter, true),
-    beginClose,
-    finishClose,
     beginInitialization,
     finishInitialization,
     authorize,

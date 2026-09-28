@@ -115,6 +115,48 @@ function ready(registry: ReturnType<typeof openRegistry>, binding: Binding) {
   value(registry.finishInitialization(binding.id, "accepted"));
 }
 
+test("closing an uncertain successor retires its lineage and preserves launch history", async () => {
+  await fixture((path, registry, _parent, plan, next) => {
+    ready(registry, plan);
+    value(registry.recordStage(plan.id, "issue", "plan", 0, null));
+    value(registry.recordHandoff(plan.id, handoff));
+    const execute = value(registry.successorReservation(plan.id, next, "execute"));
+    value(registry.provision(execute.id, "workspace", "execute-pane"));
+    const claim = value(registry.beginSuccessorLaunch(execute.id, "execute-pane", "now", "before"));
+    if (!claim.claimed) throw new Error("missing launch claim");
+    value(registry.dispatchSuccessorLaunch(execute.id, claim.token));
+    value(registry.failSuccessorLaunch(execute.id, claim.token));
+    value(registry.beginClose(execute.id));
+    value(registry.closeUncertainSuccessor(execute.id));
+
+    expect(value(registry.stageOf(execute.id))).toBeNull();
+    expect(value(registry.lineageFor(plan.id)).stages.map((stage) => stage.bindingId)).toEqual([
+      plan.id,
+    ]);
+    expect(value(registry.successorLaunchIntent(execute.id))).toEqual({
+      attemptId: claim.token,
+      state: "uncertain",
+    });
+    const replacement = value(
+      registry.successorReservation(
+        plan.id,
+        { ...next, bindingId: "execute-2", durableSessionId: "session-execute-2" },
+        "execute",
+      ),
+    );
+    expect(value(registry.stageOf(replacement.id))).toMatchObject({ ordinal: 1 });
+    const db = new Database(path, { readonly: true });
+    try {
+      expect(
+        db.query<{ count: number }, []>("SELECT count(*) AS count FROM successor_launch").get()
+          ?.count,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 test("a read-only registry without a generation column still returns lineage", async () => {
   const dir = await mkdtemp(join(tmpdir(), "olw-lineage-ro-"));
   const path = join(dir, "registry.sqlite");

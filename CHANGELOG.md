@@ -15,6 +15,7 @@ published.
 
 ### Fixed
 
+- Accept the handed-off host listener (`<socket>.next-N`, as the kernel still reports it) when proving a launched TUI is attached, so roles launched on a host after a generation handoff are no longer refused and stopped as `tui_local_fallback`.
 - Hold native session admission across TUI attachment so a last-slot capacity race returns a typed refusal without local fallback. Finish proven pre-native manager admission failures as same-ID retryable rejections, while lost replies and post-send storage failures remain uncertain; phase-tagged admission requires the normal worker-profile handoff.
 - Reclaim closed sessions' extension allocations and loopback servers with worker isolates, admit manager notices in the receiving isolate with a final synchronous idle check, and report the native 20-session capacity before role launch. Existing in-process hosts require the normal idle-host profile handoff; worker mode is not process-fatal OOM containment.
 - Detect crash-restarted shared hosts that lost OLW's launch profile, preserve the existing idle-host handoff on the next OLW entry, and make `olw doctor` report endpoint generation, profile match, RSS threshold warnings, seven-day daemon crash history, and the exact scoped recovery environment and command without invoking session APIs that reconcile daemon state.

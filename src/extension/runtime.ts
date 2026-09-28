@@ -129,7 +129,7 @@ type WorkerAction =
 const nativeSendInputSchema = z.strictObject({
   thread: z.string().min(1),
   message: z.string(),
-  delivery: z.literal("auto"),
+  delivery: z.literal("follow_up"),
   all_scope: z.literal(true),
   idempotency_key: z.string().min(1),
 });
@@ -866,12 +866,13 @@ export function registerInitiativeRuntime(port: RuntimePort, config: RuntimeConf
       }
     }
     try {
-      // Accepted manager-notice limitation: a turn that starts in the instant between the idle
-      // check and native acceptance may receive the one-line notice mid-turn; delivery is still exactly once.
+      // follow_up, not auto: the pinned host never reports activeTurnId, so native auto to a busy
+      // target always failed with turn_conflict_before_delivery. follow_up starts a turn on an idle
+      // target and queues behind a running turn without needing its id.
       const input = nativeSendInputSchema.parse({
         thread: claim.target.durableSessionId,
         message,
-        delivery: "auto",
+        delivery: "follow_up",
         all_scope: true,
         idempotency_key: nativeKey,
       });

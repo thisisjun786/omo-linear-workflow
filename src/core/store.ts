@@ -982,77 +982,6 @@ export function openRegistry(
     }
   }
 
-  function recoverSuccessorLaunch(
-    id: string,
-    attemptId: string,
-    claimedAt: string,
-  ): Result<SuccessorLaunchClaim> {
-    return transaction<SuccessorLaunchClaim>(() => {
-      const binding = get(id);
-      if (!binding.ok) return binding;
-      const held = successorLaunchClaim(id);
-      if (
-        binding.value.launchState !== "uncertain" ||
-        binding.value.initialization.state !== "pending" ||
-        held?.state !== "uncertain" ||
-        held.owner !== attemptId
-      )
-        return ok({
-          claimed: false,
-          binding: binding.value,
-          state: held?.state ?? "uncertain",
-        });
-      if (
-        db
-          .query(
-            "SELECT message_id FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? LIMIT 1",
-          )
-          .get(id) !== null
-      )
-        return error(
-          "successor_recovery_unsafe",
-          "Execute delivery cannot be proven absent. Inspect the delivery receipt; either reconcile the exact native session or close this binding and start a fresh successor.",
-          { bindingId: id, reason: "delivery_row_exists" },
-        );
-      if (
-        db
-          .query("SELECT owner FROM successor_launch_attempts WHERE binding_id = ? AND owner = ?")
-          .get(id, attemptId) === null
-      )
-        appendSuccessorAttempt(id, attemptId, "uncertain", held.claimed_at);
-      const token = randomUUID();
-      const claimed = db
-        .query(
-          "UPDATE successor_launch SET state = 'claimed', claimed_at = ?, owner = ? WHERE binding_id = ? AND state = 'uncertain' AND owner = ?",
-        )
-        .run(claimedAt, token, id, attemptId);
-      if (claimed.changes === 1) appendSuccessorAttempt(id, token, "claimed", claimedAt);
-      return claimed.changes === 1
-        ? ok({ claimed: true, binding: binding.value, token })
-        : ok({ claimed: false, binding: binding.value, state: "claimed" });
-    });
-  }
-
-  function confirmSuccessorRecovery(id: string, token: string): Result<Binding> {
-    return successorMutation(
-      id,
-      token,
-      (binding) =>
-        db
-          .query(
-            "SELECT message_id FROM deliveries WHERE json_extract(envelope_json, '$.toBindingId') = ? LIMIT 1",
-          )
-          .get(id) !== null
-          ? error(
-              "successor_recovery_unsafe",
-              "Execute delivery appeared after the local TUI stopped; the successor was not relaunched",
-              { bindingId: id, reason: "delivery_row_exists_after_stop" },
-            )
-          : saveBinding({ ...binding, launchState: "provisioning" }),
-      "claimed",
-    );
-  }
-
   function ownsSuccessorLaunch(id: string, token: string): Result<boolean> {
     try {
       return ok(successorLaunchClaim(id)?.owner === token);
@@ -2486,8 +2415,6 @@ export function openRegistry(
     authorizeHerdrRepublish,
     beginSuccessorLaunch,
     successorLaunchIntent,
-    recoverSuccessorLaunch,
-    confirmSuccessorRecovery,
     ownsSuccessorLaunch,
     provisionSuccessorLaunch,
     prepareSuccessorLaunch,

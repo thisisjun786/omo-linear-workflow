@@ -2040,13 +2040,13 @@ export class Orchestrator {
           return finished.ok ? ok(this.#creationResult(finished.value)) : finished;
         }
         if (sessionAbsent && observedIntent.value?.state === "uncertain")
-          return await this.#recoverUndeliveredSuccessor(
-            binding,
-            snapshot,
-            handoff,
-            observedIntent.value.attemptId,
-            pane,
-            herdr,
+          return failure(
+            "successor_abandon_required",
+            "Execute delivery may have reached the local-only runtime. Inspect its pane, then close this binding and run stage start again to create a fresh successor.",
+            {
+              bindingId: binding.id,
+              recovery: "inspect_then_close_and_restart_stage",
+            },
           );
         if (hasLiveTui(pane))
           return failure(
@@ -2087,106 +2087,6 @@ export class Orchestrator {
       });
     }
     return this.#launchSuccessor(claim.value.binding, snapshot, handoff, claim.value.token);
-  }
-
-  async #recoverUndeliveredSuccessor(
-    binding: Binding,
-    snapshot: ScopeSnapshot,
-    handoff: StageHandoff,
-    attemptId: string,
-    pane: {
-      readonly paneId: string;
-      readonly workspaceId: string;
-      readonly sessionPath: string | null;
-      readonly agent?: string;
-    },
-    herdr: HerdrClient,
-  ): Promise<Result<CreationResult>> {
-    const unsafe = (reason: string) =>
-      failure<CreationResult>(
-        "successor_recovery_unsafe",
-        "Execute delivery cannot be proven absent. Inspect the transcript and delivery receipt; either reconcile the exact native session or close this binding and start a fresh successor.",
-        { bindingId: binding.id, reason },
-      );
-    if (binding.initialization.state !== "pending")
-      return failure(
-        "recovery_uncertain",
-        "Execute launch was dispatched and initialization may have been delivered; inspect before retrying",
-        { bindingId: binding.id },
-      );
-    if (binding.sessionPath === null) return unsafe("session_path_missing");
-    try {
-      const startupTypes = new Set(["session", "model_change", "thinking_level_change"]);
-      const initialTranscript = await readFile(binding.sessionPath, "utf8");
-      if (
-        initialTranscript
-          .split("\n")
-          .filter((line) => line.length > 0)
-          .map((line) => z.object({ type: z.string() }).parse(JSON.parse(line)))
-          .some((entry) => !startupTypes.has(entry.type))
-      )
-        return unsafe("transcript_contains_non_startup_entry");
-    } catch (cause) {
-      return unsafe(`transcript_unreadable: ${messageOf(cause)}`);
-    }
-    if (
-      pane.paneId !== binding.paneId ||
-      pane.workspaceId !== binding.workspaceId ||
-      pane.sessionPath !== binding.sessionPath
-    )
-      return unsafe("pane_identity_mismatch");
-    try {
-      if (SessionManager.open(pane.sessionPath).getSessionId() !== binding.durableSessionId)
-        return unsafe("pane_durable_session_mismatch");
-    } catch (cause) {
-      return unsafe(`pane_session_unreadable: ${messageOf(cause)}`);
-    }
-
-    const claimed = this.#withRegistry((registry) =>
-      registry.recoverSuccessorLaunch(binding.id, attemptId, this.#deps.now()),
-    );
-    if (!claimed.ok) return claimed;
-    if (!claimed.value.claimed)
-      return claimed.value.state === "claimed" || claimed.value.state === "dispatching"
-        ? ok({
-            ...this.#creationResult(claimed.value.binding),
-            readiness: "launching",
-            execution: "not_started",
-          })
-        : failure("lease_lost", "Execute recovery attempt changed during proof");
-    const token = claimed.value.token;
-    const settleUnsafe = (result: Result<CreationResult>): Result<CreationResult> => {
-      const settled = this.#withRegistry((registry) =>
-        registry.failSuccessorLaunch(binding.id, token),
-      );
-      return settled.ok || settled.error.code === "lease_lost" ? result : settled;
-    };
-    if (hasLiveTui(pane)) {
-      const stopped = await this.#stopStageSession(binding, herdr);
-      if (!stopped.ok) return settleUnsafe(stopped);
-    }
-    try {
-      const startupTypes = new Set(["session", "model_change", "thinking_level_change"]);
-      const transcript = await readFile(binding.sessionPath, "utf8");
-      const entries = transcript
-        .split("\n")
-        .filter((line) => line.length > 0)
-        .map((line) => z.object({ type: z.string() }).parse(JSON.parse(line)));
-      if (entries.some((entry) => !startupTypes.has(entry.type)))
-        return settleUnsafe(unsafe("transcript_contains_non_startup_entry"));
-    } catch (cause) {
-      return settleUnsafe(unsafe(`transcript_unreadable: ${messageOf(cause)}`));
-    }
-    const delivery = this.#withRegistry((registry) =>
-      registry.delivery(initializationMessageId(binding.id)),
-    );
-    if (delivery.ok) return settleUnsafe(unsafe(`initialization_delivery_${delivery.value.state}`));
-    if (delivery.error.code !== "not_found") return settleUnsafe(delivery);
-    const confirmed = this.#withRegistry((registry) =>
-      registry.confirmSuccessorRecovery(binding.id, token),
-    );
-    if (!confirmed.ok) return settleUnsafe(confirmed);
-    return this.#launchSuccessor(confirmed.value, snapshot, handoff, token);
   }
 
   async #launchSuccessor(
@@ -3442,16 +3342,49 @@ export class Orchestrator {
   }
 
   async #closeUncertainSuccessor(binding: Binding): Promise<Result<Binding>> {
-    const closing = this.#withRegistry((registry) =>
-      registry.beginUncertainSuccessorClose(binding.id),
+    const pending = this.#withRegistry((registry) =>
+      registry.uncertainSuccessorClosePending(binding.id),
     );
-    if (!closing.ok) return closing;
+    if (!pending.ok) return pending;
     const herdr = this.#deps.createHerdrClient(binding.herdrSocket);
     try {
       const snapshot = await herdr.snapshot();
       const pane = snapshot.panes.find(
         (item) => item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
       );
+      if (!pending.value) {
+        const workspace = snapshot.workspaces.find(
+          (item) => item.workspaceId === binding.workspaceId,
+        );
+        if (
+          workspace === undefined ||
+          workspace.cwd !== binding.cwd ||
+          pane === undefined ||
+          pane.sessionPath !== binding.sessionPath ||
+          binding.sessionPath === null
+        )
+          return failure(
+            "identity_mismatch",
+            "Uncertain successor workspace, pane, or session path does not match the binding",
+          );
+        try {
+          if (SessionManager.open(binding.sessionPath).getSessionId() !== binding.durableSessionId)
+            return failure(
+              "identity_mismatch",
+              "Uncertain successor durable session does not match the binding",
+            );
+        } catch (cause) {
+          return failure(
+            "identity_mismatch",
+            "Uncertain successor session identity could not be verified",
+            messageOf(cause),
+          );
+        }
+      }
+      const closing = this.#withRegistry((registry) =>
+        registry.beginUncertainSuccessorClose(binding.id),
+      );
+      if (!closing.ok) return closing;
       if (pane !== undefined && hasLiveTui(pane)) {
         const stopped = await this.#stopStageSession(binding, herdr);
         if (!stopped.ok) return stopped;
@@ -3727,61 +3660,12 @@ export class Orchestrator {
               continue;
             } catch (cause) {
               if (cause instanceof NativeSessionAbsentError) {
-                const stage = this.#withRegistry((registry) => registry.stageOf(binding.id));
-                if (!stage.ok) {
-                  issues.push({ bindingId: binding.id, ...stage.error });
-                  continue;
-                }
-                const previousId = stage.value?.previousBindingId;
-                if (
-                  stage.value?.stage !== "execute" ||
-                  previousId === null ||
-                  previousId === undefined
-                ) {
-                  issues.push({
-                    bindingId: binding.id,
-                    code: "runtime_unavailable",
-                    message: cause.message,
-                  });
-                  continue;
-                }
-                const previous = this.#withRegistry((registry) => registry.stageOf(previousId));
-                if (!previous.ok || previous.value?.handoff === null || previous.value === null) {
-                  issues.push({
-                    bindingId: binding.id,
-                    ...(previous.ok
-                      ? { code: "handoff_missing", message: "Execute predecessor has no handoff" }
-                      : previous.error),
-                  });
-                  continue;
-                }
-                const context = await this.#context(binding);
-                if (!context.ok) {
-                  issues.push({ bindingId: binding.id, ...context.error });
-                  continue;
-                }
-                const pane = snapshot.panes.find(
-                  (item) =>
-                    item.paneId === binding.paneId && item.workspaceId === binding.workspaceId,
-                );
-                if (pane === undefined) {
-                  issues.push({
-                    bindingId: binding.id,
-                    code: "runtime_unavailable",
-                    message: "Execute pane is missing",
-                  });
-                  continue;
-                }
-                const recovered = await this.#recoverUndeliveredSuccessor(
-                  binding,
-                  context.value.snapshot,
-                  previous.value.handoff,
-                  launchIntent.value.attemptId,
-                  pane,
-                  herdr,
-                );
-                if (recovered.ok) observed += 1;
-                else issues.push({ bindingId: binding.id, ...recovered.error });
+                issues.push({
+                  bindingId: binding.id,
+                  code: "successor_abandon_required",
+                  message:
+                    "Execute delivery may have reached the local-only runtime. Inspect its pane, then close this binding and run stage start again to create a fresh successor.",
+                });
                 continue;
               }
               issues.push({

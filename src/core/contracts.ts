@@ -371,13 +371,6 @@ export interface Registry {
     claimedAt: string,
     staleBefore: string,
   ): Result<SuccessorLaunchClaim>;
-  /** Reclaim an uncertain pre-delivery attempt after transcript proof, preserving its history. */
-  recoverSuccessorLaunch(
-    id: string,
-    attemptId: string,
-    claimedAt: string,
-  ): Result<SuccessorLaunchClaim>;
-  confirmSuccessorRecovery(id: string, token: string): Result<Binding>;
   ownsSuccessorLaunch(id: string, token: string): Result<boolean>;
   /** Token-fenced pane provisioning and launch-state mutation for a claimed recovery. */
   provisionSuccessorLaunch(

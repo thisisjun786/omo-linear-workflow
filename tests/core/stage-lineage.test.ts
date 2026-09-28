@@ -115,44 +115,6 @@ function ready(registry: ReturnType<typeof openRegistry>, binding: Binding) {
   value(registry.finishInitialization(binding.id, "accepted"));
 }
 
-test("successor recovery appends attempt history and pre-dispatch failure preserves it", async () => {
-  await fixture((path, registry, _parent, plan, next) => {
-    ready(registry, plan);
-    value(registry.recordStage(plan.id, "issue", "plan", 0, null));
-    value(registry.recordHandoff(plan.id, handoff));
-    const execute = value(registry.successorReservation(plan.id, next, "execute"));
-    value(registry.provision(execute.id, "workspace", "execute-pane"));
-    const first = value(
-      registry.beginSuccessorLaunch(execute.id, "execute-pane", "2026-09-28T00:00:00Z", "old"),
-    );
-    if (!first.claimed) throw new Error("missing first launch claim");
-    value(registry.dispatchSuccessorLaunch(execute.id, first.token));
-    value(registry.failSuccessorLaunch(execute.id, first.token));
-    const recovery = value(
-      registry.recoverSuccessorLaunch(execute.id, first.token, "2026-09-28T00:01:00Z"),
-    );
-    if (!recovery.claimed) throw new Error("missing recovery claim");
-    value(registry.failSuccessorLaunch(execute.id, recovery.token));
-    expect(value(registry.successorLaunchIntent(execute.id))).toBeNull();
-
-    const db = new Database(path, { readonly: true });
-    try {
-      expect(
-        db
-          .query<{ owner: string; state: string }, []>(
-            "SELECT owner, state FROM successor_launch_attempts WHERE binding_id = 'execute' ORDER BY attempt_number",
-          )
-          .all(),
-      ).toEqual([
-        { owner: first.token, state: "uncertain" },
-        { owner: recovery.token, state: "failed" },
-      ]);
-    } finally {
-      db.close();
-    }
-  });
-});
-
 test("closing an uncertain successor retires its lineage and preserves launch history", async () => {
   await fixture((path, registry, _parent, plan, next) => {
     ready(registry, plan);

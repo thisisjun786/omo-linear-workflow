@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -192,6 +193,7 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
   let absences = 0;
   let descriptions = 0;
   let sends = 0;
+  let createTabHook: HerdrClient["createTab"] | undefined;
   let paneSessionPath: string | null | undefined;
   let beforePaneExit: (() => Promise<void>) | undefined;
   const listeners = new Set<(event: unknown) => void>();
@@ -209,7 +211,8 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
     createWorktree: async () => {
       throw new Error("unexpected createWorktree");
     },
-    createTab: async () => {
+    createTab: async (workspaceId, cwd, label) => {
+      if (createTabHook) return createTabHook(workspaceId, cwd, label);
       throw new Error("unexpected createTab");
     },
     renameTab: async () => {},
@@ -251,13 +254,30 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
   async function publish() {
     native = true;
     paneLive = true;
-    if (execute.sessionPath === null) throw new Error("missing session path");
+    const current = withRegistry((opened) => {
+      const listed = value(opened.list());
+      return listed.find(
+        (binding) =>
+          binding.assignment.role === "child" &&
+          value(opened.stageOf(binding.id))?.stage === "execute" &&
+          binding.launchState !== "closed",
+      );
+    });
+    if (current?.sessionPath === null || current === undefined)
+      throw new Error("missing session path");
+    identities.set(current.durableSessionId, {
+      durableSessionId: current.durableSessionId,
+      sessionPath: current.sessionPath,
+      cwd: current.cwd,
+      ...modelForLaunch("child", "execute"),
+      extensionProtocol: 2,
+    });
     await publishReadiness(root, {
-      bindingId: execute.id,
-      durableSessionId: execute.durableSessionId,
-      sessionPath: execute.sessionPath,
+      bindingId: current.id,
+      durableSessionId: current.durableSessionId,
+      sessionPath: current.sessionPath,
       cwd: root,
-      paneId: "pane-execute",
+      paneId: current.paneId ?? "pane-execute",
     });
   }
   function session(identity: RuntimeIdentity): NativeSession {
@@ -370,6 +390,9 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
       native = false;
       paneLive = true;
     },
+    setCreateTab: (hook: HerdrClient["createTab"]) => {
+      createTabHook = hook;
+    },
     setPaneSessionPath: (path: string) => {
       paneSessionPath = path;
     },
@@ -404,194 +427,135 @@ async function world(options: { executeInitialized?: boolean; closeAwareHerdr?: 
   };
 }
 
-test("real CLI stage start keeps its Herdr client alive through recovery", async () => {
+test("stage start refuses an uncertain local-only successor without changing it", async () => {
   const w = await world({ executeInitialized: false, closeAwareHerdr: true });
   w.setRunHook(async () => {
     w.setLocalFallback();
     w.disconnect();
   });
   expect(await w.start()).toMatchObject({ ok: false });
-  w.setRunHook(async () => w.publish());
-
-  expect(
-    await runCli(
-      [
-        "--root",
-        w.root,
-        "--herdr-socket",
-        "/herdr",
-        "stage",
-        "start",
-        "--from",
-        "plan",
-        "--parent",
-        "parent",
-        "--stage",
-        "execute",
-        "--id",
-        "start",
-        "--json",
-      ],
-      w.dependencies,
-    ),
-  ).toBe(0);
-  expect(w.quits()).toBe(1);
-  expect(w.sends()).toBe(1);
-});
-
-test("recovery rechecks durable evidence after the exact pane exits", async () => {
-  const w = await world({ executeInitialized: false });
-  w.setRunHook(async () => {
-    w.setLocalFallback();
-    w.disconnect();
-  });
-  expect(await w.start()).toMatchObject({ ok: false });
-  w.setBeforePaneExit(async () => {
-    const manager = SessionManager.open(w.execute.sessionPath ?? "");
-    manager.appendMessage({ role: "user", content: "late accepted input", timestamp: Date.now() });
-  });
-  w.setRunHook(async () => w.publish());
+  const before = w.registry((registry) => value(registry.get("execute")));
+  const intent = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
 
   expect(await w.start()).toMatchObject({
     ok: false,
     error: {
-      code: "successor_recovery_unsafe",
-      details: { reason: "transcript_contains_non_startup_entry" },
+      code: "successor_abandon_required",
+      details: {
+        bindingId: "execute",
+        recovery: "inspect_then_close_and_restart_stage",
+      },
     },
   });
-  expect(w.quits()).toBe(1);
+  expect(w.registry((registry) => value(registry.get("execute")))).toEqual(before);
+  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual(
+    intent,
+  );
+  expect(w.quits()).toBe(0);
   expect(w.launches()).toBe(1);
   expect(w.sends()).toBe(0);
 });
 
-test("reconcile refuses a live pane advertising another session without touching it", async () => {
+test("close then stage start creates a fresh successor and preserves old attempt history", async () => {
   const w = await world({ executeInitialized: false });
   w.setRunHook(async () => {
     w.setLocalFallback();
     w.disconnect();
   });
   expect(await w.start()).toMatchObject({ ok: false });
-  w.setPaneSessionPath("/another-binding/session.jsonl");
+  const oldIntent = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
+  if (oldIntent === null) throw new Error("Missing uncertain attempt");
+
+  expect(await w.orchestrator().close("execute", false, true)).toMatchObject({ ok: true });
+  await Bun.write(join(w.root, "plan.md"), "plan");
+  const planSha = new Bun.CryptoHasher("sha256").update("plan").digest("hex");
+  const deliveryDb = new Database(join(w.root, ".omo/state/registry.sqlite"));
+  try {
+    deliveryDb
+      .query(
+        "UPDATE stage_lineage SET handoff_json = json_set(handoff_json, '$.completionReportId', 'plan-report', '$.planSha256', ?) WHERE binding_id = 'plan'",
+      )
+      .run(planSha);
+    deliveryDb
+      .query(
+        "INSERT INTO deliveries (message_id, envelope_json, state, receipt_json) VALUES (?, ?, 'accepted', ?)",
+      )
+      .run(
+        "plan-report",
+        JSON.stringify({
+          version: 1,
+          id: "plan-report",
+          fromBindingId: "plan",
+          toBindingId: "parent",
+          designationId: "designation",
+          snapshotDigest: value(w.registry((registry) => registry.designation("designation")))
+            .snapshotDigest,
+          kind: "report",
+          text: "done",
+          outcome: "completed",
+          evidence: [join(w.root, "plan.md")],
+        }),
+        JSON.stringify({
+          kind: "ok",
+          thread_id: "session-parent",
+          message_seq: 1,
+          deduplicated: false,
+          delivery: { kind: "started", turn_id: "plan" },
+        }),
+      );
+  } finally {
+    deliveryDb.close();
+  }
+  let nextPane = 2;
+  w.setCreateTab(async () => ({
+    tabId: `fresh:t${nextPane}`,
+    rootPaneId: `pane-fresh-${nextPane++}`,
+  }));
   w.setRunHook(async () => w.publish());
+  const fresh = await w.start();
+  expect(fresh).toMatchObject({ ok: true, value: { stage: "execute" } });
+  if (!fresh.ok) throw new Error(fresh.error.message);
+  expect(fresh.value.binding.id).not.toBe("execute");
+  expect(w.registry((registry) => value(registry.stageOf(fresh.value.binding.id)))).toMatchObject({
+    ordinal: 1,
+    previousBindingId: "plan",
+  });
+  const history = new Database(join(w.root, ".omo/state/registry.sqlite"), { readonly: true });
+  try {
+    expect(
+      history
+        .query<{ owner: string; state: string }, []>(
+          "SELECT owner, state FROM successor_launch_attempts WHERE binding_id = 'execute' ORDER BY attempt_number",
+        )
+        .all(),
+    ).toContainEqual({ owner: oldIntent.attemptId, state: "uncertain" });
+  } finally {
+    history.close();
+  }
+});
+
+test("reconcile reports an uncertain local-only successor for manual abandonment", async () => {
+  const w = await world({ executeInitialized: false });
+  w.setRunHook(async () => {
+    w.setLocalFallback();
+    w.disconnect();
+  });
+  expect(await w.start()).toMatchObject({ ok: false });
+  const before = w.registry((registry) => value(registry.get("execute")));
 
   expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({
     ok: false,
-    error: { code: "reconciliation_uncertain" },
-  });
-  expect(w.quits()).toBe(0);
-  expect(w.launches()).toBe(1);
-  expect(w.sends()).toBe(0);
-});
-
-test("concurrent stage start and reconcile initialize the recovered successor once", async () => {
-  const w = await world({ executeInitialized: false });
-  w.setRunHook(async () => {
-    w.setLocalFallback();
-    w.disconnect();
-  });
-  expect(await w.start()).toMatchObject({ ok: false });
-  const entered = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  w.setRunHook(async () => {
-    entered.resolve();
-    await release.promise;
-    await w.publish();
-  });
-  const owner = w.start();
-  await entered.promise;
-  const reconcile = await w.orchestrator().reconcile({ projectId: "project" });
-  expect(reconcile).toMatchObject({ ok: true });
-  release.resolve();
-  expect(await owner).toMatchObject({ ok: true });
-  expect(w.launches()).toBe(2);
-  expect(w.sends()).toBe(1);
-});
-
-test("an uncertain local-only successor with an empty transcript relaunches and initializes once", async () => {
-  const w = await world({ executeInitialized: false });
-  w.setRunHook(async () => {
-    w.setLocalFallback();
-    w.disconnect();
-  });
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
-  w.setRunHook(async () => w.publish());
-
-  expect(await w.start()).toMatchObject({
-    ok: true,
-    value: { binding: { id: "execute", initialization: { state: "accepted" } } },
-  });
-  expect(w.quits()).toBe(1);
-  expect(w.launches()).toBe(2);
-  expect(w.sends()).toBe(1);
-});
-
-test("reconcile recovers an uncertain local-only successor through the same proof", async () => {
-  const w = await world({ executeInitialized: false });
-  w.setRunHook(async () => {
-    w.setLocalFallback();
-    w.disconnect();
-  });
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
-  w.setRunHook(async () => w.publish());
-
-  expect(await w.orchestrator().reconcile({ projectId: "project" })).toMatchObject({ ok: true });
-  expect(w.quits()).toBe(1);
-  expect(w.launches()).toBe(2);
-  expect(w.sends()).toBe(1);
-});
-
-test("an uncertain successor with a durable init message is refused without mutation", async () => {
-  const w = await world({ executeInitialized: false });
-  w.setRunHook(async () => {
-    w.setLocalFallback();
-    w.disconnect();
-  });
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
-  const path = w.execute.sessionPath ?? "";
-  await Bun.write(
-    path,
-    `${await Bun.file(path).text()}${JSON.stringify({ type: "message", message: { role: "user", content: "init" } })}\n`,
-  );
-  const before = w.registry((registry) => value(registry.successorLaunchIntent("execute")));
-
-  expect(await w.start()).toMatchObject({
-    ok: false,
     error: {
-      code: "successor_recovery_unsafe",
-      details: { reason: "transcript_contains_non_startup_entry" },
+      code: "reconciliation_uncertain",
+      details: {
+        issues: [{ bindingId: "execute", code: "successor_abandon_required" }],
+      },
     },
   });
-  expect(w.registry((registry) => value(registry.successorLaunchIntent("execute")))).toEqual(
-    before,
-  );
+  expect(w.registry((registry) => value(registry.get("execute")))).toEqual(before);
   expect(w.quits()).toBe(0);
   expect(w.launches()).toBe(1);
   expect(w.sends()).toBe(0);
-});
-
-test("concurrent recovery of an uncertain local-only successor relaunches once", async () => {
-  const w = await world({ executeInitialized: false });
-  w.setRunHook(async () => {
-    w.setLocalFallback();
-    w.disconnect();
-  });
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
-  const entered = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  w.setRunHook(async () => {
-    entered.resolve();
-    await release.promise;
-    await w.publish();
-  });
-  const first = w.start();
-  await entered.promise;
-  const second = await w.start();
-  expect(second).toMatchObject({ ok: true, value: { readiness: "launching" } });
-  release.resolve();
-  expect(await first).toMatchObject({ ok: true, value: { readiness: "ready" } });
-  expect(w.quits()).toBe(1);
-  expect(w.launches()).toBe(2);
-  expect(w.sends()).toBe(1);
 });
 
 test("a stale absence observation revalidates after the owner succeeds", async () => {
@@ -696,7 +660,10 @@ test("an accepted dispatch with lost observation becomes uncertain and is never 
   w.setRunHook(async () => w.disconnect());
   expect(await w.start()).toMatchObject({ ok: false, error: { code: "runtime_unavailable" } });
   expect(w.launches()).toBe(1);
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "recovery_uncertain" } });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "successor_abandon_required" },
+  });
   expect(w.launches()).toBe(1);
   expect(w.registry((registry) => value(registry.get("execute")).launchState)).toBe("uncertain");
 });
@@ -770,7 +737,10 @@ test("stage-start settlement uses the intent captured before native observation"
     second,
   );
   expect(w.launches()).toBe(2);
-  expect(await w.start()).toMatchObject({ ok: false, error: { code: "recovery_uncertain" } });
+  expect(await w.start()).toMatchObject({
+    ok: false,
+    error: { code: "successor_abandon_required" },
+  });
   expect(w.launches()).toBe(2);
 });
 

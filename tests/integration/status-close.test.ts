@@ -3,6 +3,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@code-yeongyu/senpi";
 import { runCli } from "../../src/cli";
 import type {
   Binding,
@@ -475,6 +476,47 @@ test.each(["plan", "execute"])(
   },
 );
 
+test.each([
+  ["pane", "/another-binding/session.jsonl", false],
+  ["workspace", null, true],
+] as const)(
+  "status/close: uncertain successor refuses conflicting %s identity before retirement",
+  async (_kind, panePath, foreignWorkspace) => {
+    const w = await world();
+    try {
+      w.planned();
+      const db = new Database(w.path);
+      try {
+        db.query(
+          "UPDATE bindings SET launch_state = 'uncertain', json = json_set(json, '$.launchState', 'uncertain') WHERE id = 'execute'",
+        ).run();
+        db.query(
+          "INSERT INTO successor_launch (binding_id, state, claimed_at, owner) VALUES ('execute', 'uncertain', 'now', 'attempt')",
+        ).run();
+      } finally {
+        db.close();
+      }
+      if (panePath !== null) w.paneSessions.set("childws:execute", panePath);
+      w.workspaces.set("childws", {
+        workspaceId: "childws",
+        cwd: foreignWorkspace ? "/foreign/workspace" : w.root,
+        rootPaneId: "childws:execute",
+      });
+
+      const before = value(w.registry.get("execute"));
+      expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
+        ok: false,
+        error: { code: "identity_mismatch" },
+      });
+      expect(value(w.registry.get("execute"))).toEqual(before);
+      expect(w.events.filter((event) => event === "quit:childws:execute")).toHaveLength(0);
+      expect(value(w.registry.uncertainSuccessorClosePending("execute"))).toBe(false);
+    } finally {
+      w.cleanup();
+    }
+  },
+);
+
 test("status/close: interrupted uncertain-successor retirement resumes without closing lineage", async () => {
   const w = await world();
   try {
@@ -490,6 +532,14 @@ test("status/close: interrupted uncertain-successor retirement resumes without c
     } finally {
       db.close();
     }
+    const execute = value(w.registry.get("execute"));
+    if (execute.sessionPath === null) throw new Error("Missing execute session path");
+    const manager = SessionManager.create(w.root, join(w.root, "sessions"), {
+      id: execute.durableSessionId,
+    });
+    const header = manager.getHeader();
+    if (header === null) throw new Error("Missing execute session header");
+    await Bun.write(execute.sessionPath, `${JSON.stringify(header)}\n`);
     w.setFault("after-terminate");
     expect(await w.orchestrator.close("execute", false, true)).toMatchObject({
       ok: false,
